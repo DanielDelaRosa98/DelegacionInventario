@@ -46,91 +46,56 @@
   const safestr = v => (typeof v==='string' ? v.trim() : (v==null?'':String(v))).trim();
   const isNum = v => !isNaN(Number(v)) && v!=='' && v!=null;
 
+    
   let CURRENT_USER = null;
-  const ALLOW_SEC_FULL = new Set(['ADMIN','DEMO','SERVICIO_SOCIAL','ALVARO MARTIN','REBECA','REBECA TRUJILLO','REBECA TRUJILLO TORRES','CAAJ870407MBSHMH08']);
-  const ALLOW_USERID_EDIT = new Set(['ALVARO MARTIN','JOHAN GUADALUPE','REBECA','REBECA TRUJILLO','REBECA TRUJILLO TORRES']);
-  const SPECIAL_ALMACEN_USERS = new Set([
-    'CAAJ870407MBSHMH08',
-    'ALVARO_MARTIN',
-    'MARIA_TERESA',
-    'REBECA',
-    'REBECA_CAMPOS',
-    'REBECA_TRUJILLO',
-    'REBECA_TRUJILLO_TORRES',
-    'REBECA TRUJILLO',
-    'REBECA TRUJILLO TORRES',
-    'SERVICIO_SOCIAL'
-  ]);
-  const REPORT_USERS = new Set(['DEMO','ALVARO_MARTIN','CAAJ870407MBSHMH08','REBECA','REBECA_CAMPOS','REBECA_TRUJILLO']);
   let UI_PERMISOS = null;
-  const uiPerms = ()=> UI_PERMISOS?.permisos || UI_PERMISOS?.permasos || {};
+  const uiPerms = ()=> UI_PERMISOS?.permisos || {};
 
-  function isAdminDemo(u){ const uname = norm(u?.username); return uname==='ADMIN' || uname==='DEMO' || uname==='SERVICIO_SOCIAL'; }
-  function fullNameOrRFC(u){ const rf = norm(u?.username); const whole = norm([u?.nombre,u?.primer_ap,u?.segundo_ap].filter(Boolean).join(' ')); return whole || rf; }
-  function canFullSections(u){ const perms = uiPerms(); const id = fullNameOrRFC(u); const uname = norm(u?.username); if (perms?.admin) return true; return ALLOW_SEC_FULL.has(id) || ALLOW_SEC_FULL.has(uname); }
-  function isFrontAlmacenAllowed(u){ const perms = uiPerms(); const uname = norm(u?.username); const full = fullNameOrRFC(u); if (perms?.puedeAccederAlmacen) return true; return SPECIAL_ALMACEN_USERS.has(uname) || SPECIAL_ALMACEN_USERS.has(full); }
-  function canViewReportesFront(u){ const perms = uiPerms(); const uname = norm(u?.username); return !!perms?.reportes?.acceso || REPORT_USERS.has(uname); }
-  function canManageSolicitudesFront(u){ return isAdminDemo(u) || isFrontAlmacenAllowed(u) || !!uiPerms()?.solicitudes?.puedeCambiarStatus; }
-  function canEditUserId(u){
-    if (uiPerms()?.solicitudes?.idEditable) return true;
-    if (isAdminDemo(u)) return true;
-    if (isFrontAlmacenAllowed(u)) return true;
-    const id = fullNameOrRFC(u); return ALLOW_USERID_EDIT.has(id);
-  }
+  // --- Funciones puente para la nueva lógica de roles ---
+  function isAdminDemo(u) { return !!uiPerms().admin; }
+  function canFullSections(u) { return !!uiPerms().puedeAccederAlmacen; }
+  function isFrontAlmacenAllowed(u) { return !!uiPerms().puedeAccederAlmacen; }
+  function canViewReportesFront(u) { return !!uiPerms().reportes?.acceso; }
+  function canManageSolicitudesFront(u) { return !!uiPerms().solicitudes?.puedeSurtir; }
+  function canEditUserId(u) { return !!uiPerms().admin || !!uiPerms().encargado; }
+ 
 
-  function applyPermassions(){  
+function applyPermassions(){  
+    const p = uiPerms();
     const u = CURRENT_USER || {};  
-    const allowFull = canFullSections(u);  
-    const adminDemo = isAdminDemo(u);  
-    const allowAlmacen = allowFull || isFrontAlmacenAllowed(u);
-    const allowReportes = canViewReportesFront(u);
 
-    const basicViews = new Set(['captura','solicitudes']);
-    document.querySelectorAll('#nav .tab').forEach(t=>{  
-      const v = (t.dataset.view||'').toLowerCase();
-      if (v === 'reporte' || v === 'graficas'){
-        if (!allowReportes){
-          t.classList.add('hidden');
-        } else {
-          t.classList.remove('hidden');
-          t.classList.remove('disabled');
-          t.removeAttribute('aria-disabled');
-        }
-        return;
+    // 1. Ocultar/mostrar botones del Sidebar según el rol
+    document.querySelectorAll('.sidebar-nav .nav-item').forEach(btn => {  
+      const v = (btn.dataset.view || '').toLowerCase();
+      
+      if (v === 'almacen') {
+        btn.classList.toggle('hidden', !p.puedeAccederAlmacen);
       }
-      if (!allowAlmacen && !basicViews.has(v)) {
-        t.classList.add('hidden');
-        return;
-      } else {
-        t.classList.remove('hidden');
+      else if (v === 'reporte' || v === 'graficas') {
+        btn.classList.toggle('hidden', !p.reportes?.acceso);
       }
-      if (v === 'almacen') {  
-        if (!allowAlmacen){  
-          t.classList.add('disabled');  
-          t.setAttribute('aria-disabled','true');  
-        } else {  
-          t.classList.remove('disabled');  
-          t.removeAttribute('aria-disabled');  
-        }  
-      }  
+      else if (v === 'auditoria') {
+        btn.classList.toggle('hidden', !p.verLogs);
+      }
     });  
 
+    // 2. Selector de área/usuario al crear solicitud
     const uidIn = $('sol_user_id');  
     if (uidIn){  
-      const editable = canEditUserId(u);  
+      const editable = p.admin || p.encargado; 
       if (!uidIn.value) uidIn.value = (CURRENT_USER?.id ?? '').toString();  
       uidIn.disabled = !editable;  
       uidIn.title = editable ? '' : 'Bloqueado (autorrelleno con tu usuario)';  
     }  
 
+    // 3. Botones de acciones sobre solicitudes
     if ($('btn-sol-eliminar')) {  
-      $('btn-sol-eliminar').disabled = !adminDemo;  
-      $('btn-sol-eliminar').title = adminDemo ? '' : 'Eliminar solo admin/demo';  
+      $('btn-sol-eliminar').disabled = !p.solicitudes?.puedeEliminar;  
+      $('btn-sol-eliminar').title = p.solicitudes?.puedeEliminar ? '' : 'Eliminar solo Admin';  
     }  
     if ($('btn-sol-cancelar')) {
-      const canCancel = canManageSolicitudesFront(u);
-      $('btn-sol-cancelar').disabled = !canCancel;
-      $('btn-sol-cancelar').title = canCancel ? '' : 'Cancelar solo usuarios autorizados';
+      $('btn-sol-cancelar').disabled = !p.solicitudes?.puedeCancelar;
+      $('btn-sol-cancelar').title = p.solicitudes?.puedeCancelar ? '' : 'Cancelar solo usuarios autorizados';
     }
   }
 
@@ -148,7 +113,10 @@
   }
   function handleAuthError(e){
     const m = String(e?.message || e?.massage || '').toLowerCase();
-    if (m.includes('no autenticado') || m.includes('unauthorized') || m.includes('token')){ show('login-wrap'); hide('app-wrap'); toast('Sesion requerida'); return true; }
+    if (m.includes('no autenticado') || m.includes('unauthorized') || m.includes('token')){
+      window.location.replace('/');
+      return true;
+    }
     return false;
   }
 
@@ -230,16 +198,23 @@
   }
 
   async function fetchUiConfig(){ try{ if (!(await hasRoute('GET','/api/ui-config'))) return null; const j = await apiJSON('/api/ui-config'); UI_PERMISOS = j; return j; }catch{ return null; } }
+  
   async function me(){
     try{
       const j = await apiJSON('/api/auth/me'); const u = j.user || {};
-      CURRENT_USER = u; $('who').textContent = u.username || u.nombre || 'usuario';
-      hide('login-wrap'); show('app-wrap'); await fetchUiConfig(); showView('captura');
-      await Promise.all([loadSolicitudUsers(), loadSolicitudOficialias()]); applyPermassions();
+      CURRENT_USER = u; 
+      $('who').textContent = u.username || u.nombre || 'usuario';
+      if($('who_rol'))$('who_rol').textContent = `[${u.rol || 'USUARIO'}]`; 
+      
+      await fetchUiConfig(); 
+      showView('panel_general'); // <-- La nueva vista principal del dashboard
+      await Promise.all([loadSolicitudUsers(), loadSolicitudOficialias()]); 
+      applyPermassions();
     }catch{
-      CURRENT_USER = null; show('login-wrap'); hide('app-wrap'); const m = $('login-msg'); if (m) m.textContent = '';
+      window.location.replace('/'); // <-- Enviamos a la raíz
     }
   }
+
   async function login(){
     const username = $('user').value.trim(); const password = $('pass').value; const msg = $('login-msg'); msg.textContent = 'Validando...';
     try{
@@ -249,27 +224,119 @@
       await Promise.all([loadSolicitudUsers(), loadSolicitudOficialias()]); applyPermassions();
     }catch(e){ console.error(e); msg.textContent = e.message || e.massage || 'No se pudo iniciar sesion'; }
   }
-  async function logout(){
+ async function logout(){
     try{ await apiJSON('/api/auth/logout', { method:'POST' }); }catch{}
-    CURRENT_USER = null; UI_PERMISOS = null; show('login-wrap'); hide('app-wrap');
-    $('user').focus();
+    CURRENT_USER = null; UI_PERMISOS = null;
+    window.location.replace('/'); // <-- Enviamos a la raíz
   }
 
-  function showView(id){
-    for (const sec of document.querySelectorAll('section')) sec.classList.add('hidden');
-    const el = document.getElementById('view-'+id); if (el) el.classList.remove('hidden');
-    for (const b of document.querySelectorAll('#nav .tab')) b.classList.remove('active');
-    const btn = document.querySelector(`#nav .tab[data-view="${id}"]`); if (btn) btn.classList.add('active');
+ function showView(id){
+    // 1. Ocultar todas las vistas/secciones
+    document.querySelectorAll('.view-section, #view-container > section').forEach(sec => {
+      sec.classList.remove('active');
+      sec.classList.add('hidden');
+      sec.style.display = 'none';
+    });
 
-    const viewId = String(id).toLowerCase();
-    const locked =
-      (viewId === 'almacen' && !(canFullSections(CURRENT_USER) || isFrontAlmacenAllowed(CURRENT_USER) || isAdminDemo(CURRENT_USER))) ||
-      ((viewId === 'reporte' || viewId === 'graficas') && !canViewReportesFront(CURRENT_USER));
-    if (locked){ toast('Acceso restringido', false); showView('captura'); return; }
+    // 2. Mostrar únicamente la vista seleccionada
+    const el = document.getElementById('view-' + id);
+    if (el) {
+      el.classList.remove('hidden');
+      el.classList.add('active');
+      el.style.display = 'block';
+    }
 
-    if (id==='almacen'){ loadCategorias(); loadAlmacen(); }
-    if (id==='reporte'){ setReporteView('home'); loadReporteUsuarios(); }
-    if (id==='graficas'){ loadGraficas(); }
+    // 3. Marcar como activo el botón del menú lateral (Sidebar)
+    document.querySelectorAll('.sidebar-nav .nav-item').forEach(b => b.classList.remove('active'));
+    const btn = document.querySelector(`.sidebar-nav .nav-item[data-view="${id}"]`);
+    if (btn) {
+      btn.classList.add('active');
+      const breadcrumb = document.getElementById('breadcrumb');
+      if (breadcrumb) {
+        breadcrumb.innerHTML = `Operación / <b>${btn.textContent.trim()}</b>`;
+      }
+    }
+
+    // 4. Cargar los datos correspondientes a la vista
+    if (id === 'panel_general') { if (typeof loadPanelGeneral === 'function') loadPanelGeneral(); }
+    if (id === 'almacen') { loadCategorias(); loadAlmacen(); }
+    if (id === 'reporte') { setReporteView('home'); loadReporteUsuarios(); }
+    if (id === 'graficas') { loadGraficas(); }
+    if (id === 'auditoria') { if (typeof loadAuditoria === 'function') loadAuditoria(); }
+  }
+
+  async function loadPanelGeneral(){
+    try {
+      // 1. Consultar solicitudes (la API ya filtra por usuario si es rol USUARIO)
+      const solRes = await apiJSON('/api/solicitudes?limit=500&page=1');
+      const rows = Array.isArray(solRes?.data) ? solRes.data : [];
+
+      const total = rows.length;
+      const pendientes = rows.filter(r => norm(r.status || r.STATUS) === 'PENDIENTE').length;
+      const surtidas = rows.filter(r => ['APROBADA', 'SURTIDA', 'ENTREGADO', 'ENTREGADA'].includes(norm(r.status || r.STATUS))).length;
+
+      if ($('kpi-ordenes-total')) $('kpi-ordenes-total').textContent = total;
+      if ($('kpi-ordenes-pendientes')) $('kpi-ordenes-pendientes').textContent = pendientes;
+      if ($('kpi-ordenes-autorizadas')) $('kpi-ordenes-autorizadas').textContent = surtidas;
+
+      // 2. Consultar total de materiales en catálogo
+      if (uiPerms().puedeAccederAlmacen) {
+        const almRes = await apiJSON('/api/almacen?limit=1000&page=1');
+        const almRows = Array.isArray(almRes?.data) ? almRes.data : [];
+        if ($('kpi-materiales-total')) $('kpi-materiales-total').textContent = almRows.length;
+      } else {
+        const stRes = await apiJSON('/api/stock?limit=1000&page=1');
+        const stRows = Array.isArray(stRes?.data) ? stRes.data : [];
+        if ($('kpi-materiales-total')) $('kpi-materiales-total').textContent = stRows.length;
+      }
+    } catch (e) {
+      console.warn('Error cargando KPIs del panel general:', e);
+    }
+  }
+
+  async function loadAuditoria(){
+    const box = $('audit_box');
+    if (!box) return;
+    box.innerHTML = '<div class="muted">Cargando...</div>';
+    try {
+      // Pide los últimos 150 registros al endpoint de server.js
+      const j = await apiJSON('/api/logs/accesos?limit=150');
+      const rows = Array.isArray(j?.data) ? j.data : [];
+      if (!rows.length) {
+        box.innerHTML = '<div class="muted">Sin registros de acceso.</div>';
+        return;
+      }
+      // Construye la tabla con Usuario, IP, Fecha y Estado
+      box.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Usuario</th>
+              <th>Dirección IP</th>
+              <th>Fecha y Hora</th>
+              <th>Resultado</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => {
+              const f = r.fecha_acceso ? new Date(r.fecha_acceso).toLocaleString('es-MX') : '-';
+              const exito = r.exito 
+                ? '<span style="color: var(--accent); font-weight: 600;">Exitoso</span>' 
+                : '<span style="color: var(--danger); font-weight: 600;">Fallido</span>';
+              return `<tr>
+                <td>${r.id}</td>
+                <td><b>${safestr(r.username)}</b></td>
+                <td>${safestr(r.ip_address)}</td>
+                <td>${f}</td>
+                <td>${exito}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>`;
+    } catch (e) {
+      box.innerHTML = `<div class="muted" style="color: var(--danger);">${e.message || 'Error al cargar bitácora'}</div>`;
+    }
   }
 
   function formatReportOficialiaLabel(row){
@@ -1969,7 +2036,9 @@ function extractClave(r) {
   function renderAlmacen(rows){
     const tb = $('alm_tbody'); if (!tb) return;
     tb.innerHTML = '';
-    const adminDemo = isAdminDemo(CURRENT_USER);
+    const p = uiPerms();
+    const puedeEliminarAlmacen = p.puedeEliminarAlmacen;
+
     rows.forEach(r=>{
       const id = r.ID ?? r.id;
       const categoriaNom = nombreCategoriaFromRow(r) || '';
@@ -1994,7 +2063,7 @@ function extractClave(r) {
         <td>
           <button class="mini" data-action="hist">Historial</button>
           <button class="mini" data-action="edit">Editar</button>
-          <button class="mini danger" data-action="del" title="Eliminar" ${adminDemo?'':'disabled'}>${adminDemo?'Eliminar':'Eliminar'}</button>
+          <button class="mini danger" data-action="del" title="Eliminar" ${puedeEliminarAlmacen?'':'disabled'}>Eliminar</button>
         </td>`;
       tb.appendChild(tr);
 
@@ -2207,14 +2276,28 @@ function extractClave(r) {
     $('btn-login')?.addEventListener('click', login);
     $('pass')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter') login(); });
     $('btn-logout')?.addEventListener('click', logout);
+    // Botón verde del Dashboard principal para crear nueva solicitud
+    $('btn-crear-rapido')?.addEventListener('click', () => showView('captura'));
+    // Botón para recargar la tabla de Auditoría
+    $('btn-audit-refresh')?.addEventListener('click', loadAuditoria);
 
-    document.getElementById('nav')?.addEventListener('click', (ev)=>{
-      const btn = ev.target.closest('.tab'); if (!btn) return;
-      const isDisabled = btn.classList.contains('disabled');
-      if (isDisabled){ toast('Acceso restringido', false); return; }
-      showView(btn.dataView || btn.dataset.view);
-      const v = btn.dataView || btn.dataset.view;
-      if (v==='almacen') { loadCategorias(); loadAlmacen(); }
+   // Clic en los botones del menú lateral izquierdo (Sidebar)
+    document.querySelector('.sidebar-nav')?.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.nav-item');
+      if (!btn) return;
+      if (btn.classList.contains('hidden') || btn.classList.contains('disabled')) {
+        toast('Acceso restringido', false);
+        return;
+      }
+      showView(btn.dataset.view);
+    });
+
+    // Botón "+ Crear solicitud" del Panel general
+    $('btn-crear-rapido')?.addEventListener('click', () => showView('captura'));
+
+    // Botón "Actualizar" en la vista de Auditoría
+    $('btn-audit-refresh')?.addEventListener('click', () => {
+      if (typeof loadAuditoria === 'function') loadAuditoria();
     });
 
     $('btn-rep-load')?.addEventListener('click', ()=> loadReporteUsuarios(true));

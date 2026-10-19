@@ -138,40 +138,36 @@ return String(u || "")
 .replace(/[\s\.-]+/g, "_");
 }
 
-const PRIVILEGED_USERS = new Set(["demo", "admin", "servicio_social"]);
-
-function isAdminDemo(req) {
-const u = normalizeUser(req.user?.username);
-return PRIVILEGED_USERS.has(u);
+// Roles: ADMIN (Nivel 3), ENCARGADO (Nivel 2), USUARIO (Nivel 1)
+function isAdmin(req) {
+  return req.user?.rol === 'ADMIN';
 }
 
-const ALMACEN_ACCESS_KEYS = [
-  "caaj870407mbshmh08",
-  "alvaro_martin",
-  "maria_teresa",
-  "rebeca",
-  "rebeca_campos",
-  "rebeca_trujillo",
-  "rebeca_trujillo_torres",
-  "servicio_social"
-];
-const REPORT_ACCESS_KEYS = new Set(["demo", "alvaro_martin", "caaj870407mbshmh08", "rebeca", "rebeca_campos", "rebeca_trujillo"]);
-
-function hasAlmacenAccess(req) {
-const payload = req.user || {};
-const full = JSON.stringify(payload).toLowerCase().replace(/[\s\.-]+/g, "_");
-for (const key of ALMACEN_ACCESS_KEYS) {
-if (full.includes(key)) return true;
+function isEncargado(req) {
+  return req.user?.rol === 'ENCARGADO';
 }
-return false;
+
+function canManageAlmacen(req) {
+  // Tanto Admin como Encargado pueden gestionar inventario y agregar productos
+  return isAdmin(req) || isEncargado(req);
 }
 
 function canManageSolicitudes(req) {
-return isAdminDemo(req) || hasAlmacenAccess(req);
+  // Admin y Encargado pueden gestionar/surtir vales de todos
+  return isAdmin(req) || isEncargado(req);
 }
 
 function canViewReportes(req) {
-return REPORT_ACCESS_KEYS.has(normalizeUser(req.user?.username));
+  // Admin y Encargado tienen acceso a reportes de consumo
+  return isAdmin(req) || isEncargado(req);
+}
+
+// Mantenemos estos alias por compatibilidad con funciones internas que ya existen más abajo en tu código
+function isAdminDemo(req) {
+  return isAdmin(req);
+}
+function hasAlmacenAccess(req) {
+  return canManageAlmacen(req);
 }
 
 function ensureEntradaAllowed(req, delta, { isNew = false, viaAddStock = false } = {}) {
@@ -444,51 +440,99 @@ return httpError(res, 401, "Token invalido");
 }
 
 app.post("/api/auth/login", async (req, res) => {
-const { username, password } = req.body || {};
-if (!username || !password) return httpError(res, 400, "username y password requeridos");
-try {
-const [rows] = await poolRead.query(
-`SELECT u.id, u.username, u.psw, u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO,
-u.ID_OFICIALIA, u.ACTIVO
-FROM usuario u
-WHERE u.username = ? LIMIT 1`,
-[username]
-);
-if (!rows.length) return httpError(res, 401, "Usuario o contrasena invalidos");
-const u = rows[0];
-if (u.ACTIVO === 0 || u.ACTIVO === false) return httpError(res, 403, "Usuario inactivo");
+  const { username, password } = req.body || {};
+  // Obtener la IP del cliente (funciona en local, red LAN y tras proxy)
+  const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || req.ip || '127.0.0.1';
 
-const stored = u.psw || "";
-let ok = false;
-if (stored.startsWith("$2")) {
-  ok = await bcrypt.compare(password, stored);
-} else {
-  ok = stored === password;
-  if (ok && HAS_OPS_CREDS && poolOps) {
-    try {
-      const hash = await bcrypt.hash(password, 10);
-      await poolOps.query("UPDATE usuario SET psw=? WHERE id=?", [hash, u.id]);
-    } catch (err) {
-      console.warn("[WARN] No se pudo actualizar hash de contrasena:", err?.message || err);
-    }
+  if (!username || !password) {
+    return httpError(res, 400, "username y password requeridos");
   }
-}
-if (!ok) return httpError(res, 401, "Usuario o contrasena invalidos");
-const payload = {
-id: u.id,
-username: u.username,
-nombre: u.nombre,
-primer_ap: u.PRIMER_APELLIDO,
-segundo_ap: u.SEGUNDO_APELLIDO,
-id_oficialia: u.ID_OFICIALIA,
-};
-const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "8h" });
-res.cookie("token", token, { httpOnly: true, sameSite: "lax", secure: cookieSecure, maxAge: 8 * 60 * 60 * 1000 });
-res.json({ ok: true, token, user: payload });
-} catch (e) {
-return httpError(res, 500, e.message);
-}
+
+  try {
+    const [rows] = await poolRead.query(
+      `SELECT u.id, u.username, u.psw, u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO,
+      u.ID_OFICIALIA, u.ACTIVO, COALESCE(u.rol, 'USUARIO') AS rol
+      FROM usuario u
+      WHERE u.username = ? LIMIT 1`,
+      [username]
+    );
+
+    if (!rows.length) {
+      if (poolOps) {
+        await poolOps.query(
+          "INSERT INTO log_accesos (username, ip_address, exito) VALUES (?, ?, FALSE)",
+          [username, clientIp]
+        ).catch(() => {});
+      }
+      return httpError(res, 401, "Usuario o contraseña inválidos");
+    }
+
+    const u = rows[0];
+
+    if (u.ACTIVO === 0 || u.ACTIVO === false) {
+      return httpError(res, 403, "Usuario inactivo");
+    }
+
+    const stored = u.psw || "";
+    let ok = false;
+
+    if (stored.startsWith("$2")) {
+      ok = await bcrypt.compare(password, stored);
+    } else {
+      ok = stored === password;
+      if (ok && HAS_OPS_CREDS && poolOps) {
+        try {
+          const hash = await bcrypt.hash(password, 10);
+          await poolOps.query("UPDATE usuario SET psw=? WHERE id=?", [hash, u.id]);
+        } catch (err) {
+          console.warn("[WARN] No se pudo actualizar hash de contraseña:", err?.message || err);
+        }
+      }
+    }
+
+    if (!ok) {
+      if (poolOps) {
+        await poolOps.query(
+          "INSERT INTO log_accesos (usuario_id, username, ip_address, exito) VALUES (?, ?, ?, FALSE)",
+          [u.id, username, clientIp]
+        ).catch(() => {});
+      }
+      return httpError(res, 401, "Usuario o contraseña inválidos");
+    }
+
+    // Registrar inicio de sesión exitoso en la bitácora
+    if (poolOps) {
+      await poolOps.query(
+        "INSERT INTO log_accesos (usuario_id, username, ip_address, exito) VALUES (?, ?, ?, TRUE)",
+        [u.id, username, clientIp]
+      ).catch(() => {});
+    }
+
+    // Datos que viajan dentro del token JWT
+    const payload = {
+      id: u.id,
+      username: u.username,
+      nombre: u.nombre,
+      primer_ap: u.PRIMER_APELLIDO,
+      segundo_ap: u.SEGUNDO_APELLIDO,
+      id_oficialia: u.ID_OFICIALIA,
+      rol: u.rol || 'USUARIO'
+    };
+
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "8h" });
+    res.cookie("token", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: cookieSecure,
+      maxAge: 8 * 60 * 60 * 1000
+    });
+
+    res.json({ ok: true, token, user: payload });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
 });
+
 app.get("/api/auth/me", authRequired, (req, res) => res.json({ ok: true, user: req.user }));
 app.post("/api/auth/logout", (req, res) => {
 res.clearCookie("token", { httpOnly: true, sameSite: "lax", secure: cookieSecure });
@@ -658,34 +702,24 @@ return httpError(res, 500, e.message);
 }
 });
 
-app.get("/api/usuarios", authRequired, async (req, res) => {
-try {
-const canAllUsers = canManageSolicitudes(req);
-const includeInactive = String(req.query.include_inactive || "") === "1";
-if (canAllUsers) {
-const [rows] = await poolRead.query(
-`SELECT u.id, u.username, COALESCE(u.ACTIVO, 1) AS activo,
-CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_completo
-FROM usuario u
-WHERE (${includeInactive ? "1=1" : "COALESCE(u.ACTIVO, 1) <> 0"})
-ORDER BY nombre_completo ASC, u.username ASC
-LIMIT 500`
-);
-return res.json({ ok: true, data: rows });
-}
+app.get("/api/logs/accesos", authRequired, async (req, res) => {
+  if (req.user?.rol !== 'ADMIN') {
+    return httpError(res, 403, "Acceso denegado: solo el Administrador puede consultar los accesos");
+  }
 
-const [rows] = await poolRead.query(
-`SELECT u.id, u.username, COALESCE(u.ACTIVO, 1) AS activo,
-CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_completo
-FROM usuario u
-WHERE u.id = ?
-LIMIT 1`,
-[Number(req.user?.id || 0)]
-);
-return res.json({ ok: true, data: rows });
-} catch (e) {
-return httpError(res, 500, e.message);
-}
+  try {
+    const limit = Math.max(parseInt(req.query.limit) || 100, 1);
+    const [rows] = await poolRead.query(
+      `SELECT id, usuario_id, username, ip_address, fecha_acceso, exito
+       FROM log_accesos
+       ORDER BY fecha_acceso DESC
+       LIMIT ?`,
+      [limit]
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
 });
 
 app.get("/api/oficialias", authRequired, async (req, res) => {
@@ -2539,43 +2573,32 @@ return httpError(res, 500, e.message);
 });
 
 app.get("/api/ui-config", authRequired, (req, res) => {
-const isAdmin = isAdminDemo(req);
-const canAlm = hasAlmacenAccess(req);
+  const rol = req.user?.rol || 'USUARIO';
+  const admin = rol === 'ADMIN';
+  const encargado = rol === 'ENCARGADO';
 
-const hiddenFields = isAdmin ? [] : ["stock", "status"];
-
-const camposAlmacenBloqueados = isAdmin
-? []
-: ["CLAVE", "DESCRIPCION", "CATEGORIA", "UNIDAD", "STATUS"];
-
-const puedeEditarUsuarioSol = isAdmin || canAlm;
-const puedeCambiarStatusSol = isAdmin || canAlm;
-
-res.json({
-ok: true,
-user: req.user?.username || null,
-permisos: {
-admin: isAdmin,
-puedeAccederAlmacen: isAdmin || canAlm,
-reportes: {
-acceso: canViewReportes(req),
-},
-solicitudes: {
-idEditable: puedeEditarUsuarioSol,
-autoRellenoId: !puedeEditarUsuarioSol,
-forceAutoRelleno: !puedeEditarUsuarioSol,
-puedeCambiarStatus: puedeCambiarStatusSol,
-ocultarStockProducto: true,
-},
-entradaEnEdit: isAdmin ? "permitida" : canAlm ? "solo_por_addStock" : "bloqueada",
-bloqueos: {
-eliminarAlmacen: !isAdmin,
-editarCamposAlmacen: isAdmin ? "full" : canAlm ? "solo_stock" : "ninguno",
-camposAlmacenBloqueados,
-},
-},
-hiddenFields,
-});
+  res.json({
+    ok: true,
+    user: req.user?.username || null,
+    rol: rol,
+    permisos: {
+      admin: admin,
+      encargado: encargado,
+      puedeAccederAlmacen: admin || encargado,
+      puedeEditarAlmacen: admin || encargado,
+      puedeEliminarAlmacen: admin, 
+      reportes: {
+        acceso: admin || encargado,
+      },
+      solicitudes: {
+        puedeCrear: true, 
+        puedeSurtir: admin || encargado,
+        puedeCancelar: admin || encargado,
+        puedeEliminar: admin,
+      },
+      verLogs: admin
+    }
+  });
 });
 
 
@@ -2942,9 +2965,6 @@ return httpError(res, 500, e.message);
 
 const STATIC_DIR = path.join(__dirname, "public");
 app.use(express.static(STATIC_DIR));
-app.get("/", (req, res) => res.sendFile(path.join(STATIC_DIR, "index.html")));
-app.get("/login", (req, res) => res.redirect("/"));
-
 app.get("/__ping", (req, res) => res.send("OK"));
 
 const DEFAULT_PORT = Number(process.env.PORT) || 8080;

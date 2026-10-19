@@ -1,749 +1,319 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Almacen DREGCIVIL</title>
+  <title>Login - Inventarios Bienestar BCS</title>
   <style>
-    :root{
-      --bg:#0f1115; --card:#161a22; --line:#252b36; --fg:#e6e9ef; --muted:#9aa4b2;
-      --ok:#2ecc71; --danger:#ff4d4f; --pill:#222738; --pill-on:#1b4b91;
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #ffffff;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      overflow: hidden;
     }
-    *{ box-sizing:border-box }
-    html,body{ margin:0; padding:0; background:var(--bg); color:var(--fg);
-      font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;
+    .login-screen {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      width: 100%;
     }
-    a{ color:#8ab4ff; text-decoration:none }
-    header{
-      display:flex; align-items:center; justify-content:space-between;
-      padding:12px 16px; background:#12161e; border-bottom:1px solid var(--line);
-      position:sticky; top:0; z-index:10;
+    /* Mitad superior azul */
+    .login-top {
+      height: 53%;
+      background: #1a5596;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding-bottom: 40px;
     }
-    header .brand{ display:flex; align-items:center; gap:10px; }
-    header h1{ margin:0; font-size:18px; font-weight:700; }
-    .logo{ height:38px; width:auto; display:block; }
-    .wrap{ max-width:1200px; margin:0 auto; padding:16px; }
-    .card{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; }
-    .grid{ display:grid; gap:10px; }
-    .cols-2{ grid-template-columns: repeat(2, minmax(0,1fr));}
-    .cols-3{ grid-template-columns: repeat(3, minmax(0,1fr));}
-    .cols-4{ grid-template-columns: repeat(4, minmax(0,1fr));}
-    label{ font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
-    input, select, textarea{
-      width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:10px;
-      background:#0f131b; color:var(--fg);
+    .login-brand {
+      display: flex;
+      align-items: center;
+      gap: 18px;
     }
-    textarea{ min-height:86px; resize:vertical; }
-    button{
-      padding:8px 12px; border:1px solid var(--line); background:#0f131b; color:var(--fg);
-      border-radius:10px; cursor:pointer;
+    .login-brand img {
+      width: 96px;
+      height: 96px;
+      object-fit: contain;
+      filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.25));
     }
-    button:hover{ background:#0b0f15; }
-    button.mini{ padding:4px 8px; font-size:12px; }
-    button.danger{ border-color:#4a1f25; color:#ff8c98; }
-    .muted{ color:var(--muted); }
-    .hidden{ display:none !important; }
-    .tag{ display:inline-block; padding:2px 8px; border:1px solid var(--line); background:#0b0f15; border-radius:999px; font-size:12px; }
-    #nav{ display:flex; gap:8px; flex-wrap:wrap; }
-    #nav .tab{
-      padding:8px 12px; border-radius:999px; border:1px solid var(--line); background:var(--pill); cursor:pointer;
+    .login-brand h1 {
+      margin: 0;
+      color: #ffffff;
+      font-size: 44px;
+      font-weight: 700;
+      font-style: italic;
+      letter-spacing: 0.5px;
     }
-    #nav .tab.active{ background:var(--pill-on); border-color:#2a5fb3; }
-    #toast{ min-height:20px; font-size:13px; }
-    #toast.ok{ color:var(--ok); }
-    #toast.danger{ color:var(--danger); }
-    table{ width:100%; border-collapse:collapse; }
-    thead th{
-      text-align:left; font-size:12px; color:var(--muted); border-bottom:1px solid var(--line);
-      padding:8px; position:sticky; top:0; background:var(--card); z-index:2;
+    /* Mitad inferior blanca con curva superior */
+    .login-bottom {
+      flex: 1;
+      background: #ffffff;
+      border-radius: 40px 40px 0 0;
+      margin-top: -40px;
+      box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.12);
+      display: flex;
+      justify-content: center;
+      padding: 42px 24px 24px;
     }
-    tbody td{ padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
-    .table-scroll{ max-height:55vh; overflow:auto; border:1px solid var(--line); border-radius:10px; background:var(--card); }
-    .kpis{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:8px; }
-    .kpi{ background:#12161e; border:1px solid var(--line); border-radius:12px; padding:10px; }
-    .kpi .val{ font-size:20px; font-weight:800; }
-    .kpi .lab{ font-size:12px; color:var(--muted); }
-    .item{ display:grid; grid-template-columns: 160px 1fr; gap:8px; padding:6px 0; border-bottom:1px dashed #202634; }
-    .item:last-child{ border-bottom:none; }
-    .msg{ font-size:12px; color:var(--muted); min-height:18px; }
-
-    @media (min-width: 1024px){
-      .two-col{ display:grid; grid-template-columns: 2fr 1fr; gap:14px; }
+    .login-box {
+      width: 100%;
+      max-width: 520px;
     }
-
-    #listado_box .table-scroll{ max-height: 60vh; }
-    #det_preview{
-      max-height:220px;
-      overflow:auto;
-      border:1px solid var(--line);
-      border-radius:10px;
-      background:#0f131b;
-      padding:10px;
+    .login-title {
+      color: #153e70;
+      font-size: 20px;
+      font-weight: 700;
+      margin: 0 0 28px 0;
     }
-    .sol-flow-status{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:10px;
-      padding:10px 12px;
-      border:1px solid var(--line);
-      border-radius:12px;
-      background:#12161e;
-      margin-bottom:12px;
+    .login-field {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 26px;
     }
-    .sol-step-tabs{
-      display:flex;
-      gap:8px;
-      flex-wrap:wrap;
-      margin-bottom:12px;
+    .login-icon {
+      color: #1a5596;
+      width: 30px;
+      height: 30px;
+      flex-shrink: 0;
     }
-    .sol-step-tab{
-      background:#111724;
-      border-color:#2a3344;
+    .login-input-wrap {
+      flex: 1;
+      border-bottom: 1.5px solid #c8d0da;
+      padding-bottom: 6px;
+      display: flex;
+      align-items: center;
+      transition: border-color 0.2s ease;
     }
-    .sol-step-tab.active{
-      background:#1b4b91;
-      border-color:#2a5fb3;
+    .login-input-wrap:focus-within {
+      border-bottom-color: #1a5596;
     }
-    .sol-step-tab:disabled{
-      opacity:.55;
-      cursor:not-allowed;
+    .login-input-wrap input {
+      width: 100%;
+      border: none;
+      background: transparent;
+      color: #334155;
+      font-size: 16px;
+      padding: 4px 0;
+      outline: none;
     }
-    .sol-help{
-      color:var(--muted);
-      font-size:12px;
-      margin:0 0 12px 0;
+    .login-input-wrap input::placeholder {
+      color: #8b95a5;
     }
-    .sol-pane.hidden{ display:none !important; }
-    .sol-pill{
-      display:inline-block;
-      padding:4px 10px;
-      border-radius:999px;
-      border:1px solid #294d79;
-      background:#132238;
-      color:#b8d6ff;
-      font-size:12px;
-      white-space:nowrap;
+    .btn-eye {
+      background: transparent;
+      border: none;
+      color: #1a5596;
+      padding: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
-    #listado_box tbody tr{
-      cursor:pointer;
+    .btn-eye:hover {
+      color: #0f3868;
     }
-    #listado_box tbody tr.is-selected{
-      background:#18263d;
+    .login-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 32px;
+      padding-left: 44px;
     }
-    .rep-toolbar{
-      display:flex;
-      gap:8px;
-      flex-wrap:wrap;
-      align-items:end;
-      justify-content:space-between;
+    .login-remember {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #8b95a5;
+      font-size: 15px;
+      cursor: pointer;
+      user-select: none;
     }
-    .rep-toolbar .actions{
-      display:flex;
-      gap:8px;
-      flex-wrap:wrap;
+    .login-remember input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+      accent-color: #1a5596;
+      cursor: pointer;
     }
-    .rep-link{
-      color:#8ab4ff;
-      cursor:pointer;
-      text-decoration:underline;
+    .btn-submit {
+      background: #1a5596;
+      color: #ffffff;
+      border: none;
+      border-radius: 999px;
+      padding: 10px 48px;
+      font-size: 16px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s ease, transform 0.1s ease;
     }
-    .rep-chart{
-      display:grid;
-      gap:10px;
+    .btn-submit:hover {
+      background: #134277;
     }
-    .rep-bar-row{
-      display:grid;
-      grid-template-columns: 220px 1fr 60px;
-      gap:10px;
-      align-items:center;
+    .btn-submit:active {
+      transform: scale(0.98);
     }
-    .rep-bar-label{
-      font-size:12px;
-      color:var(--fg);
-      white-space:nowrap;
-      overflow:hidden;
-      text-overflow:ellipsis;
+    .btn-submit:disabled {
+      opacity: 0.65;
+      cursor: not-allowed;
     }
-    .rep-bar-track{
-      height:12px;
-      border-radius:999px;
-      background:#0f131b;
-      border:1px solid var(--line);
-      overflow:hidden;
+    #login-msg {
+      margin-top: 16px;
+      padding-left: 44px;
+      font-size: 13px;
+      min-height: 20px;
+      color: #dc2626;
     }
-    .rep-bar-fill{
-      height:100%;
-      background:linear-gradient(90deg, #4d7fcc, #8ab4ff);
-    }
-    .rep-bar-val{
-      font-size:12px;
-      color:var(--muted);
-      text-align:right;
-    }
-    .pie-wrap{
-      display:grid;
-      grid-template-columns: minmax(180px, 240px) 1fr;
-      gap:16px;
-      align-items:center;
-    }
-    .pie-wrap.single{
-      grid-template-columns: 1fr;
-      justify-items:center;
-    }
-    .pie-chart{
-      width:220px;
-      height:220px;
-      border-radius:50%;
-      border:1px solid var(--line);
-      margin:0 auto;
-      position:relative;
-      background:#0f131b;
-    }
-    .pie-chart::after{
-      content:'';
-      position:absolute;
-      inset:24%;
-      border-radius:50%;
-      background:var(--card);
-      border:1px solid var(--line);
-    }
-    .pie-center{
-      position:absolute;
-      inset:0;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      flex-direction:column;
-      z-index:1;
-      text-align:center;
-      pointer-events:none;
-    }
-    .pie-center .big{
-      font-size:24px;
-      font-weight:800;
-      color:var(--fg);
-      line-height:1;
-    }
-    .pie-center .small{
-      font-size:11px;
-      color:var(--muted);
-      margin-top:4px;
-    }
-    .pie-legend{
-      display:grid;
-      gap:8px;
-    }
-    .pie-legend-item{
-      display:grid;
-      grid-template-columns: 14px 1fr auto;
-      gap:8px;
-      align-items:center;
-      font-size:12px;
-    }
-    .pie-swatch{
-      width:14px;
-      height:14px;
-      border-radius:4px;
-      border:1px solid rgba(255,255,255,.12);
-    }
-    .pie-label{
-      color:var(--fg);
-      white-space:nowrap;
-      overflow:hidden;
-      text-overflow:ellipsis;
-    }
-    .pie-val{
-      color:var(--muted);
-      text-align:right;
-    }
-    .pie-scroll{
-      width:100%;
-      margin-top:14px;
-    }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
 
-  <header>
-    <div class="brand">
-      <img src="/logo.png" alt="Logo" class="logo" onerror="this.style.display='none'">
-      <h1>Almacen DREGCIVIL</h1>
-    </div>
-    <div class="grid cols-3" style="gap:8px; align-items:center;">
-      <div id="sol_actual" class="muted">Sin solicitud</div>
-      <div id="who" class="muted">usuario</div>
-      <div><button id="btn-logout">Salir</button></div>
-    </div>
-  </header>
-
-  <div class="wrap">
-   
-    <div id="login-wrap" class="card">
-      <div class="grid cols-3">
-        <div>
-          <label for="user">Usuario</label>
-          <input id="user" placeholder="usuario">
-        </div>
-        <div>
-          <label for="pass">Contrasena</label>
-          <input id="pass" type="password" placeholder="--------">
-        </div>
-        <div style="align-self:end;">
-          <button id="btn-login">Entrar</button>
-          <div id="login-msg" class="msg"></div>
-        </div>
+  <div class="login-screen">
+    <!-- Mitad superior azul -->
+    <div class="login-top">
+      <div class="login-brand">
+        <img src="/logo.png" alt="Logo Inventarios" onerror="this.style.display='none'">
+        <h1>Inventarios</h1>
       </div>
     </div>
 
-   
-    <div id="app-wrap" class="hidden">
-      <div id="nav" class="card">
-        <div class="tab active" data-view="captura">Captura</div>
-        <div class="tab" data-view="solicitudes">Solicitudes</div>
-        <div class="tab" data-view="almacen">Almacen</div>
-        <div class="tab" data-view="reporte">Reporte</div>
-        <div class="tab" data-view="graficas">Graficas</div>
+    <!-- Mitad inferior blanca -->
+    <div class="login-bottom">
+      <div class="login-box">
+        <h2 class="login-title">Login</h2>
+
+        <form id="login-form">
+          <!-- Usuario -->
+          <div class="login-field">
+            <svg class="login-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="20" height="16" rx="2"/>
+              <circle cx="8" cy="10" r="2"/>
+              <path d="M14 9h4"/>
+              <path d="M14 13h4"/>
+              <path d="M5 16c.8-1.4 2-2 3-2s2.2.6 3 2"/>
+            </svg>
+            <div class="login-input-wrap">
+              <input id="user" type="text" placeholder="Usuario" autocomplete="username" required>
+            </div>
+          </div>
+
+          <!-- Contraseña -->
+          <div class="login-field">
+            <svg class="login-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4" y="11" width="16" height="10" rx="2"/>
+              <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+              <circle cx="12" cy="16" r="1"/>
+            </svg>
+            <div class="login-input-wrap">
+              <input id="pass" type="password" placeholder="Contraseña" autocomplete="current-password" required>
+              <button type="button" id="btn-toggle-pass" class="btn-eye" title="Mostrar u ocultar contraseña">
+                <svg id="eye-off" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/>
+                  <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/>
+                  <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/>
+                  <line x1="2" x2="22" y1="2" y2="22"/>
+                </svg>
+                <svg id="eye-on" class="hidden" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Guardar clave y Botón -->
+          <div class="login-actions">
+            <label class="login-remember">
+              <input type="checkbox" id="remember-user">
+              <span>Guardar clave</span>
+            </label>
+            <button id="btn-login" class="btn-submit" type="submit">Ingresar</button>
+          </div>
+
+          <div id="login-msg"></div>
+        </form>
       </div>
-
-      <div id="toast" class="muted"></div>
-
-      
-      <section id="view-captura">
-        <div class="card">
-          <h3 style="margin:0 0 10px 0;">Captura de solicitud</h3>
-          <div class="sol-flow-status">
-            <div id="sol_flow_text" class="muted"></div>
-            <div id="sol_flow_id" class="sol-pill">Sin solicitud</div>
-          </div>
-          <div class="sol-step-tabs">
-            <button id="btn-sol-tab-crear" class="sol-step-tab active" type="button">1. Nueva solicitud</button>
-            <button id="btn-sol-tab-agregar" class="sol-step-tab" type="button" disabled>2. Agregar detalle</button>
-            <button id="btn-sol-tab-revision" class="sol-step-tab" type="button" disabled>3. Detalle</button>
-            <button id="btn-sol-tab-pdf" class="sol-step-tab" type="button" disabled>4. Descargar PDF</button>
-          </div>
-
-          <div id="sol-pane-crear" class="sol-pane">
-            <div class="grid cols-3">
-              <div>
-                <label for="sol_user_id">Usuario solicitante</label>
-                <select id="sol_user_id"></select>
-              </div>
-              <div>
-                <label for="tipo_solicitud">Tipo</label>
-                <select id="tipo_solicitud">
-                  <option value="CONSUMIBLES">CONSUMIBLES</option>
-                  <option value="ACTIVO_FIJO">ACTIVO_FIJO</option>
-                </select>
-              </div>
-              <div>
-                <label for="obs_sol">Observaciones</label>
-                <input id="obs_sol" placeholder="Opcional">
-              </div>
-            </div>
-            <div style="margin-top:8px;">
-              <button id="btn-crear-sol">Crear solicitud</button>
-              <span id="msg_sol" class="msg"></span>
-            </div>
-          </div>
-
-          <div id="sol-pane-agregar" class="sol-pane hidden">
-            <div class="grid cols-4">
-              <div>
-                <label for="busca_prod">Buscar producto</label>
-                <input id="busca_prod" placeholder="CLAVE o descripcion">
-              </div>
-              <div style="align-self:end;">
-                <button id="btn-find-prod">Buscar productos</button>
-              </div>
-              <div>
-                <label for="prod_sel">Resultados</label>
-                <select id="prod_sel">
-                  <option value="">- selecciona producto -</option>
-                </select>
-              </div>
-              <div>
-                <label for="det_cant">Cantidad</label>
-                <input id="det_cant" type="number" min="1" value="1">
-              </div>
-            </div>
-            <div class="grid cols-2" style="margin-top:8px;">
-              <div>
-                <label for="det_obs">Observaciones del renglon</label>
-                <input id="det_obs" placeholder="Opcional">
-              </div>
-              <div style="align-self:end;">
-                <button id="btn-add-det">Agregar</button>
-              </div>
-            </div>
-            <div id="msg_det" class="msg"></div>
-            <div id="det_preview" class="muted" style="margin-top:8px;">Sin renglones.</div>
-          </div>
-
-          <div id="sol-pane-revision" class="sol-pane hidden">
-            <div id="sol_detalle_badge" class="muted" style="margin-bottom:8px;">Sin solicitud</div>
-            <div id="sol_detalle_box" class="card"><div class="muted">Sin renglones.</div></div>
-            <div id="sol_msg_detalle" class="msg"></div>
-          </div>
-
-          <div id="sol-pane-pdf" class="sol-pane hidden">
-            <div class="card" style="margin:0;">
-              <button id="btn-sol-pdf-flow">Descargar PDF</button>
-            </div>
-          </div>
-        </div>
-      </section>
-
-     
-      <section id="view-solicitudes" class="hidden two-col">
-        <div>
-          <div id="sol_acciones_card" class="card">
-            <h3 style="margin:0 0 10px 0;">Acciones</h3>
-            <div class="grid cols-1">
-              <div>
-                <input id="sol_edit_id" type="hidden">
-              </div>
-            </div>
-            <div style="margin-top:8px;">
-              <div style="align-self:end; display:flex; gap:8px; flex-wrap:wrap;">
-                <button id="btn-sol-cancelar">Cancelar</button>
-                <button id="btn-sol-eliminar" class="danger">Eliminar</button>
-                <button id="btn-sol-pdf">Descargar PDF</button>
-              </div>
-            </div>
-            <div id="msg_edit" class="msg"></div>
-          </div>
-
-          <div class="sol-step-tabs" style="margin-bottom:10px;">
-            <button id="btn-solicitudes-tab-lista" class="sol-step-tab active" type="button">Listado</button>
-            <button id="btn-solicitudes-tab-consulta" class="sol-step-tab" type="button" disabled>Consulta</button>
-          </div>
-
-          <div id="solicitudes-pane-lista">
-          <div class="card">
-            <h3 style="margin:0 10px 10px 0; display:inline-block;">Listado</h3>
-            <div class="sol-step-tabs" style="margin:0 0 10px 0;">
-              <button id="btn-list-mode-activas" class="sol-step-tab active" type="button">Activas</button>
-              <button id="btn-list-mode-canceladas" class="sol-step-tab" type="button">Cancelados</button>
-            </div>
-            <div class="grid cols-3">
-              <div>
-                <label for="list_q">Filtro</label>
-                <input id="list_q" placeholder="texto libre">
-              </div>
-              <div>
-                <label for="list_oficialia">Oficialia</label>
-                <select id="list_oficialia"></select>
-              </div>
-              <div style="align-self:end;">
-                <button id="btn-listar">Listar</button>
-                <button id="btn-list-consultar" disabled>Consultar</button>
-              </div>
-            </div>
-            <div id="msg_list" class="msg"></div>
-            <div id="listado_box" style="margin-top:8px;"></div>
-            <div id="msg_lookup" class="msg" style="margin-top:8px;"></div>
-          </div>
-          </div>
-
-          <div id="solicitudes-pane-consulta" class="hidden">
-            <div class="card">
-              <h3 style="margin:0 0 10px 0;">Consulta</h3>
-              <div id="sol_resumen"></div>
-            </div>
-            <div class="card">
-              <h3 style="margin:0 0 10px 0;">Productos solicitados</h3>
-              <div id="sol_consulta_detalle"><div class="muted">Sin renglones.</div></div>
-            </div>
-          </div>
-        </div>
-
-        <div></div>
-      </section>
-
-      
-      <section id="view-almacen" class="hidden">
-        <div class="card">
-          <h3 style="margin:0 0 10px 0;">Busqueda</h3>
-          <div class="grid cols-4">
-            <div>
-              <label for="alm_q">Filtro</label>
-              <input id="alm_q" placeholder="CLAVE, descripcion o categoria">
-            </div>
-            <div>
-              <label for="alm_order">Orden</label>
-              <select id="alm_order">
-                <option value="CLAVE">CLAVE</option>
-                <option value="DESCRIPCION">DESCRIPCION</option>
-                <option value="CATEGORIA">CATEGORIA</option>
-                <option value="UNIDAD">UNIDAD</option>
-                <option value="STOCK">STOCK</option>
-              </select>
-            </div>
-            <div>
-              <label for="alm_dir">Direccion</label>
-              <select id="alm_dir">
-                <option value="ASC">ASC</option>
-                <option value="DESC">DESC</option>
-              </select>
-            </div>
-            <div style="align-self:end;">
-              <button id="btn-alm-apply">Aplicar</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3 style="margin:0 0 10px 0;">Stock bajo</h3>
-          <div id="alm_stock_bajo"><div class="muted">Sin datos.</div></div>
-        </div>
-
-        <div class="card">
-          <div class="muted">Resultados - <span id="alm_meta">-</span></div>
-          <div class="table-scroll" style="margin-top:8px;">
-            <table>
-              <thead>
-                <tr>
-                  <th>CLAVE</th>
-                  <th>DESCRIPCION</th>
-                  <th>Categoria</th>
-                  <th>Unidad</th>
-                  <th>Stock</th>
-                  <th>Estatus</th>
-                  <th>Acciones</th>
-                </tr>
-              </thead>
-              <tbody id="alm_tbody"></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3 style="margin:0 0 10px 0;">Historial de producto</h3>
-          <div id="alm_hist_title" class="muted">Selecciona Historial en un producto.</div>
-          <div id="alm_historial_box" style="margin-top:8px;"><div class="muted">Sin datos.</div></div>
-        </div>
-
-        <div class="card">
-          <h3 style="margin:0 0 10px 0;">Alta / edicion</h3>
-          <div class="grid cols-4">
-            <div>
-              <label for="alm_clave">CLAVE</label>
-              <input id="alm_clave" placeholder="CL-001">
-            </div>
-            <div>
-              <label for="alm_desc">DESCRIPCION</label>
-              <input id="alm_desc" placeholder="Nombre del producto">
-            </div>
-            <div>
-              <label for="alm_cat">Categoria</label>
-              <select id="alm_cat"></select>
-            </div>
-            <div>
-              <label for="alm_unidad">Unidad</label>
-              <input id="alm_unidad" placeholder="Ej. PIEZA, CAJA, METRO">
-            </div>
-          </div>
-          <div class="grid cols-4" style="margin-top:8px;">
-            <div>
-              <label for="alm_stock">Stock</label>
-              <input id="alm_stock" type="number" step="1" value="0">
-            </div>
-            <div>
-              <label for="alm_estado">Estatus</label>
-              <select id="alm_estado">
-                <option value="ACTIVO">ACTIVO</option>
-                <option value="INACTIVO">INACTIVO</option>
-              </select>
-            </div>
-            <div style="align-self:end;">
-              <button id="btn-alm-crear">Guardar en almacen</button>
-            </div>
-            <div style="align-self:end;">
-              <button id="btn-alm-cancel" class="hidden">Cancelar</button>
-            </div>
-          </div>
-          <div id="alm_msg" class="msg"></div>
-        </div>
-      </section>
-
-      <section id="view-reporte" class="hidden">
-        <div id="rep-home">
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Reporte por oficialia</h3>
-            <div class="grid cols-4">
-              <div>
-                <label for="rep_oficialia">Oficialia</label>
-                <select id="rep_oficialia">
-                  <option value="">Todos</option>
-                </select>
-              </div>
-              <div>
-                <label for="rep_fecha_inicio">Fecha inicial</label>
-                <input id="rep_fecha_inicio" type="date">
-              </div>
-              <div>
-                <label for="rep_fecha_fin">Fecha final</label>
-                <input id="rep_fecha_fin" type="date">
-              </div>
-              <div style="align-self:end;">
-                <button id="btn-rep-load">Generar reporte</button>
-                <button id="btn-rep-print-general">Imprimir general</button>
-              </div>
-              <div id="rep_msg" class="msg" style="align-self:end;"></div>
-            </div>
-          </div>
-
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Lista de oficialias</h3>
-            <div id="rep_oficialias_box"><div class="muted">Sin datos.</div></div>
-          </div>
-        </div>
-
-        <div id="rep-detail" class="hidden">
-          <div class="card">
-            <div class="rep-toolbar">
-              <div>
-                <h3 id="rep_detail_title" style="margin:0 0 6px 0;">Reporte de oficialia</h3>
-                <div id="rep_detail_sub" class="muted"></div>
-              </div>
-              <div class="actions">
-                <button id="btn-rep-back">Regresar</button>
-                <button id="btn-rep-print-detail">Imprimir</button>
-                <button id="btn-rep-export-excel">Exportar Excel</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="card">
-            <div class="kpis">
-              <div class="kpi">
-                <div id="rep_kpi_sol" class="val">-</div>
-                <div class="lab">Solicitudes</div>
-              </div>
-              <div class="kpi">
-                <div id="rep_kpi_cant" class="val">-</div>
-                <div class="lab">Productos solicitados</div>
-              </div>
-              <div class="kpi">
-                <div id="rep_kpi_ent" class="val">-</div>
-                <div class="lab">Productos entregados</div>
-              </div>
-              <div class="kpi">
-                <div id="rep_kpi_top_prod" class="val" style="font-size:16px;">-</div>
-                <div class="lab">Producto mas solicitado</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="card">
-            <div class="kpis" style="grid-template-columns: repeat(1, minmax(0,1fr));">
-              <div class="kpi">
-                <div id="rep_kpi_top_oficialia" class="val" style="font-size:16px;">-</div>
-                <div class="lab">Oficialia que mas solicita</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Grafica de productos</h3>
-            <div id="rep_chart_box"><div class="muted">Sin datos.</div></div>
-          </div>
-
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Productos mas solicitados</h3>
-            <div id="rep_productos_box"><div class="muted">Sin datos.</div></div>
-          </div>
-
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Solicitudes del periodo</h3>
-            <div id="rep_solicitudes_box"><div class="muted">Sin datos.</div></div>
-          </div>
-
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Inconsistencias de oficialia</h3>
-            <div id="rep_inconsistencias_box"><div class="muted">Sin datos.</div></div>
-          </div>
-        </div>
-      </section>
-
-      <section id="view-graficas" class="hidden">
-        <div class="card">
-          <h3 style="margin:0 0 10px 0;">Graficas</h3>
-          <div class="grid cols-4">
-            <div>
-              <label for="graf_oficialia">Oficialia</label>
-              <select id="graf_oficialia">
-                <option value="">Todas</option>
-              </select>
-            </div>
-            <div>
-              <label for="graf_fecha_inicio">Fecha inicial</label>
-              <input id="graf_fecha_inicio" type="date">
-            </div>
-            <div>
-              <label for="graf_fecha_fin">Fecha final</label>
-              <input id="graf_fecha_fin" type="date">
-            </div>
-            <div style="align-self:end;">
-              <button id="btn-graf-load">Cargar graficas</button>
-            </div>
-            <div id="graf_msg" class="msg" style="align-self:end;"></div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="kpis">
-            <div class="kpi">
-              <div id="graf_kpi_sol" class="val">-</div>
-              <div class="lab">Solicitudes</div>
-            </div>
-            <div class="kpi">
-              <div id="graf_kpi_cant" class="val">-</div>
-              <div class="lab">Productos solicitados</div>
-            </div>
-            <div class="kpi">
-              <div id="graf_kpi_ent" class="val">-</div>
-              <div class="lab">Productos entregados</div>
-            </div>
-            <div class="kpi">
-              <div id="graf_kpi_cump" class="val">-</div>
-              <div class="lab">Cumplimiento</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="grid cols-2">
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Pastel de productos solicitados</h3>
-            <div id="graf_top_solicitados"><div class="muted">Sin datos.</div></div>
-          </div>
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Pastel de productos entregados</h3>
-            <div id="graf_top_entregados"><div class="muted">Sin datos.</div></div>
-          </div>
-        </div>
-
-        <div class="grid cols-2">
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Pastel por oficialia / usuario</h3>
-            <div id="graf_top_grupo"><div class="muted">Sin datos.</div></div>
-          </div>
-          <div class="card">
-            <h3 style="margin:0 0 10px 0;">Cumplimiento por producto</h3>
-            <div id="graf_cumplimiento"><div class="muted">Sin datos.</div></div>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3 style="margin:0 0 10px 0;">Pastel de todos los productos solicitados</h3>
-          <div id="graf_all_productos"><div class="muted">Sin datos.</div></div>
-        </div>
-      </section>
-
     </div>
   </div>
- 
-<script src="/app.js"></script>
+
+  <script>
+    (async () => {
+      // Si el usuario ya tiene sesión activa, enviarlo directo al sistema
+      try {
+        const check = await fetch('/api/auth/me', { credentials: 'include' });
+        if (check.ok) {
+          window.location.replace('dashboard.html');
+          return;
+        }
+      } catch {}
+
+      const userInput = document.getElementById('user');
+      const passInput = document.getElementById('pass');
+      const rememberChk = document.getElementById('remember-user');
+      const toggleBtn = document.getElementById('btn-toggle-pass');
+      const eyeOff = document.getElementById('eye-off');
+      const eyeOn = document.getElementById('eye-on');
+      const form = document.getElementById('login-form');
+      const msg = document.getElementById('login-msg');
+      const btnLogin = document.getElementById('btn-login');
+
+      // Recuperar usuario guardado
+      const savedUser = localStorage.getItem('inv_saved_user');
+      if (savedUser) {
+        userInput.value = savedUser;
+        rememberChk.checked = true;
+      }
+
+      // Mostrar / Ocultar contraseña
+      toggleBtn.addEventListener('click', () => {
+        const isPass = passInput.type === 'password';
+        passInput.type = isPass ? 'text' : 'password';
+        eyeOff.classList.toggle('hidden', isPass);
+        eyeOn.classList.toggle('hidden', !isPass);
+      });
+
+      // Enviar formulario a la API
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const username = userInput.value.trim();
+        const password = passInput.value;
+
+        msg.style.color = '#1a5596';
+        msg.textContent = 'Validando...';
+        btnLogin.disabled = true;
+
+        try {
+          const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+          });
+          const data = await res.json().catch(() => ({}));
+
+          if (!res.ok || !data.ok) {
+            throw new Error(data.error || data.message || 'Usuario o contraseña inválidos');
+          }
+
+          if (rememberChk.checked) {
+            localStorage.setItem('inv_saved_user', username);
+          } else {
+            localStorage.removeItem('inv_saved_user');
+          }
+
+          window.location.replace('dashboard.html');
+        } catch (err) {
+          msg.style.color = '#dc2626';
+          msg.textContent = err.message || 'No se pudo iniciar sesión';
+          btnLogin.disabled = false;
+        }
+      });
+    })();
+  </script>
 </body>
 </html>
