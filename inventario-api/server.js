@@ -2603,365 +2603,287 @@ app.get("/api/ui-config", authRequired, (req, res) => {
 
 
 app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
-try {
-const id = Number(req.params.id);
-if (!Number.isFinite(id)) return httpError(res, 400, "ID invalido");
-
-
-let solicitud;
-{
-const deptoCol = await detectUsuarioDepartamentoCol();
-const [r] = await poolRead.query(
-`SELECT s.*, u.username,
-u.ID_OFICIALIA AS id_oficialia,
-${deptoCol ? `u.${qi(deptoCol)} AS departamento,` : `NULL AS departamento,`}
-CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_usuario
-FROM solicitudes s
-LEFT JOIN usuario u ON u.id = s.usuario_id
-WHERE s.id = ? LIMIT 1`, [id]
-);
-if (!r.length) return httpError(res, 404, "Solicitud no encontrada");
-solicitud = r[0];
-solicitud.oficialia_nombre = await getOficialiaNombre(solicitud.id_oficialia ?? solicitud.ID_OFICIALIA ?? null);
-}
-
-let detalles = [];
-{
-const [rows] = await poolRead.query(
-`SELECT d.id AS detalle_id, d.solicitud_id, d.producto_id,
-p.CLAVE, p.DESCRIPCION, p.unidad AS unidad, p.categoria AS categoria,
-d.cantidad, d.atendida, d.observaciones
-FROM detalles_solicitud d
-LEFT JOIN productos p ON p.${await detectProductosPK()} = d.producto_id
-WHERE d.solicitud_id = ?
-ORDER BY d.id`, [id]
-);
-detalles = await attachCategoriaNombre(rows);
-}
-
-res.setHeader("Content-Type", "application/pdf");
-res.setHeader("Content-Disposition", `inline; filename="solicitud_${id}.pdf"`);
-
-const doc = new PDFDocument({ size: "LETTER", margin: 40 });
-doc.pipe(res);
-
-const colorPrimary = "#4B5563";
-const colorLight = "#F3F4F6";
-const colorText = "#111827";
-const colorMuted = "#6B7280";
-const border = "#D1D5DB";
-const pageWidth = doc.page.width;
-const pageHeight = doc.page.height;
-const bottomMargin = doc.page.margins?.bottom ?? 40;
-const leftX = 40;
-const rightLimit = pageWidth - 40;
-const fmtDate = (d) => {
-const dt = d ? new Date(d) : null;
-if (!dt || isNaN(dt.getTime())) return String(d || "-");
-return dt.toLocaleDateString("es-MX");
-};
-
-const usuarioBase = solicitud.nombre_usuario || pickUsuarioServer(solicitud) || "-";
-const usuarioLine = usuarioBase || "-";
-const departamentoLine = String(solicitud.departamento || "").trim();
-const showDepartamento = Boolean(departamentoLine);
-const recibeLine = (() => {
-const textoOfi = solicitud.oficialia_nombre ? `(${solicitud.oficialia_nombre})` : "";
-if (/\bOFICIAL\b/i.test(usuarioLine)) return usuarioLine;
-return [usuarioLine, textoOfi].filter(Boolean).join(" ").trim() || "_________________________";
-})();
-
-doc.save();
-doc.rect(30, 18, pageWidth - 60, 58).fill(colorLight);
-doc.restore();
-
-const logoPath = path.join(__dirname, "public", "logo.png");
-if (fs.existsSync(logoPath)) {
   try {
-    doc.image(logoPath, 40, 18, { fit: [108, 58], align: "left", valign: "top" });
-  } catch {}
-}
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return httpError(res, 400, "ID invalido");
 
-const titleX = 176;
-const titleWidth = rightLimit - titleX;
-doc.fillColor(colorPrimary).font("Helvetica-Bold").fontSize(13).text("DIRECCION ESTATAL DEL REGISTRO CIVIL", titleX, 28, {
-  width: titleWidth,
-  align: "center",
+    // 1. Obtener datos de la solicitud, usuario, departamento y encargado del área
+    let solicitud;
+    {
+      const deptoCol = await detectUsuarioDepartamentoCol();
+      const [r] = await poolRead.query(
+        `SELECT s.*, u.username,
+          u.ID_OFICIALIA AS id_oficialia,
+          ${deptoCol ? `u.${qi(deptoCol)} AS departamento,` : `NULL AS departamento,`}
+          CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_usuario,
+          o.nombre AS oficialia_nombre,
+          o.oficial_reponsable AS encargado_area
+        FROM solicitudes s
+        LEFT JOIN usuario u ON u.id = s.usuario_id
+        LEFT JOIN oficialias o ON o.id = COALESCE(s.id_oficialia, u.ID_OFICIALIA)
+        WHERE s.id = ? LIMIT 1`,
+        [id]
+      );
+      if (!r.length) return httpError(res, 404, "Solicitud no encontrada");
+      solicitud = r[0];
+      if (!solicitud.oficialia_nombre) {
+        solicitud.oficialia_nombre = await getOficialiaNombre(solicitud.id_oficialia ?? solicitud.ID_OFICIALIA ?? null);
+      }
+    }
+
+    // 2. Obtener los artículos solicitados
+    let detalles = [];
+    {
+      const [rows] = await poolRead.query(
+        `SELECT d.id AS detalle_id, d.solicitud_id, d.producto_id,
+          p.CLAVE, p.DESCRIPCION, p.unidad AS unidad, p.categoria AS categoria,
+          d.cantidad, d.atendida, d.observaciones
+        FROM detalles_solicitud d
+        LEFT JOIN productos p ON p.${await detectProductosPK()} = d.producto_id
+        WHERE d.solicitud_id = ?
+        ORDER BY d.id`,
+        [id]
+      );
+      detalles = await attachCategoriaNombre(rows);
+    }
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="vale_suministro_${id}.pdf"`);
+
+    const doc = new PDFDocument({ size: "LETTER", margin: 36 });
+    doc.pipe(res);
+
+    const pageWidth = doc.page.width;   // 612 pt
+    const pageHeight = doc.page.height; // 792 pt
+    const leftX = 36;
+    const rightLimit = pageWidth - 36;  // 576 pt
+    const tableWidth = rightLimit - leftX; // 540 pt
+
+    // Formatear fecha DD/MM/YYYY
+    const fmtDate = (d) => {
+      const dt = d ? new Date(d) : new Date();
+      if (isNaN(dt.getTime())) return String(d || "");
+      const day = String(dt.getDate()).padStart(2, "0");
+      const month = String(dt.getMonth() + 1).padStart(2, "0");
+      const year = dt.getFullYear();
+      return `${day}/${month}/${year}`;
+    };
+
+    // Variables dinámicas del Vale
+    const areaNombre = String(solicitud.oficialia_nombre || solicitud.departamento || "General").trim();
+    const paraUtilizarseEn = String(solicitud.observaciones || "").trim();
+    const fechaTexto = fmtDate(solicitud.fecha_solicitud);
+
+    // Datos para la firma "SOLICITA:"
+    const solicitaDepto = /^departamento/i.test(areaNombre)
+      ? areaNombre
+      : `Departamento de ${areaNombre}`;
+    const solicitaEncargado = String(
+      solicitud.encargado_area || solicitud.nombre_usuario || pickUsuarioServer(solicitud) || ""
+    ).trim();
+
+    // Datos para la firma "AUTORIZA:"
+    const autorizaCargo = process.env.VALE_AUTORIZA_CARGO || "Delegada de programas en BCS";
+    const autorizaNombre = process.env.VALE_AUTORIZA_NOMBRE || "Yanssen Weichselbaum Calderon";
+
+    // Función para dibujar el encabezado institucional
+    function drawValeHeader() {
+      const logoPath = path.join(__dirname, "public", "logo.png");
+      if (fs.existsSync(logoPath)) {
+        try {
+          doc.image(logoPath, leftX, 32, { fit: [130, 50], align: "left", valign: "top" });
+        } catch {}
+      }
+
+      doc.fillColor("#000000").font("Helvetica-Bold").fontSize(11)
+        .text("SECRETARÍA DE BIENESTAR", leftX, 38, { width: tableWidth, align: "center" });
+      doc.font("Helvetica-Bold").fontSize(10)
+        .text("DELEGACIÓN FEDERAL BAJA CALIFORNIA SUR", leftX, 53, { width: tableWidth, align: "center" });
+      doc.font("Helvetica-Bold").fontSize(11)
+        .text("VALE DE SUMINISTRO", leftX, 74, { width: tableWidth, align: "center" });
+
+      // Bloque superior derecho: FECHA REC. y RECURSOS MATERIALES
+      doc.font("Helvetica-Bold").fontSize(8.5)
+        .text("FECHA REC.___________________", 370, 92, { width: 206, align: "right" });
+      doc.font("Helvetica-Bold").fontSize(8.5)
+        .text("RECURSOS MATERIALES", 370, 106, { width: 206, align: "center" });
+
+      // Fila AREA
+      const yArea = 106;
+      doc.font("Helvetica-Bold").fontSize(9).text("AREA:", leftX, yArea);
+      doc.font("Helvetica").fontSize(9.5).text(areaNombre, leftX + 38, yArea);
+      doc.moveTo(leftX + 35, yArea + 11).lineTo(350, yArea + 11).lineWidth(0.6).strokeColor("#000000").stroke();
+
+      // Fila PARA UTILIZARSE EN y FECHA
+      const yUso = 124;
+      doc.font("Helvetica-Bold").fontSize(9).text("PARA UTILIZARSE EN:", leftX, yUso);
+      doc.font("Helvetica").fontSize(9).text(paraUtilizarseEn, leftX + 110, yUso, { width: 240, lineBreak: false });
+      doc.moveTo(leftX + 108, yUso + 11).lineTo(350, yUso + 11).lineWidth(0.6).strokeColor("#000000").stroke();
+
+      doc.font("Helvetica-Bold").fontSize(9).text("FECHA:", 395, yUso);
+      doc.font("Helvetica").fontSize(9.5).text(fechaTexto, 440, yUso, { width: 120, align: "center" });
+      doc.moveTo(438, yUso + 11).lineTo(rightLimit, yUso + 11).lineWidth(0.6).strokeColor("#000000").stroke();
+    }
+
+    // Configuración de columnas de la tabla (Total = 540 pt)
+    const colNoW = 35;
+    const colDescW = 285;
+    const colUniW = 70;
+    const colSolW = 75;
+    const colEntW = 75;
+
+    const xNo = leftX;
+    const xDesc = xNo + colNoW;
+    const xUni = xDesc + colDescW;
+    const xSol = xUni + colUniW;
+    const xEnt = xSol + colSolW;
+
+    function drawTableHeader(topY) {
+      const h1 = 15;
+      const h2 = 15;
+      const totalH = h1 + h2;
+
+      doc.save();
+      doc.lineWidth(0.8).strokeColor("#000000");
+
+      // Contorno exterior del encabezado
+      doc.rect(leftX, topY, tableWidth, totalH).stroke();
+
+      // Líneas verticales del encabezado
+      doc.moveTo(xDesc, topY).lineTo(xDesc, topY + totalH).stroke();
+      doc.moveTo(xUni, topY).lineTo(xUni, topY + totalH).stroke();
+      doc.moveTo(xSol, topY).lineTo(xSol, topY + totalH).stroke();
+      doc.moveTo(xEnt, topY + h1).lineTo(xEnt, topY + totalH).stroke();
+
+      // Línea horizontal que divide CANTIDAD de SOLICITADA / ENTREGADA
+      doc.moveTo(xSol, topY + h1).lineTo(rightLimit, topY + h1).stroke();
+      doc.restore();
+
+      doc.fillColor("#000000").font("Helvetica-Bold").fontSize(8.5);
+      doc.text("No.", xNo, topY + 11, { width: colNoW, align: "center" });
+      doc.text("DESCRIPCIÓN DEL ARTÍCULO", xDesc, topY + 11, { width: colDescW, align: "center" });
+      doc.text("UNIDAD", xUni, topY + 11, { width: colUniW, align: "center" });
+      doc.text("CANTIDAD", xSol, topY + 4, { width: colSolW + colEntW, align: "center" });
+
+      doc.fontSize(8);
+      doc.text("SOLICITADA", xSol, topY + h1 + 4, { width: colSolW, align: "center" });
+      doc.text("ENTREGADA", xEnt, topY + h1 + 4, { width: colEntW, align: "center" });
+
+      return topY + totalH;
+    }
+
+    // Dibujar encabezado del vale y encabezado de tabla
+    drawValeHeader();
+    let currentY = drawTableHeader(148);
+
+    // Completar hasta un mínimo de 18 renglones para mantener la cuadrícula física del formato
+    const minRows = 18;
+    const totalRows = Math.max(detalles.length, minRows);
+    const defaultRowH = 19;
+
+    for (let i = 0; i < totalRows; i++) {
+      const item = detalles[i] || null;
+      const descText = item ? String(item.DESCRIPCION || "").trim() : "";
+      const uniText = item ? String(item.unidad || "").trim() : "";
+      const solText = item && item.cantidad != null ? String(item.cantidad) : "";
+      // Si ya tiene cantidad atendida > 0 o el estatus es SURTIDA/APROBADA la muestra; si está PENDIENTE y en 0, deja el espacio para llenado o muestra el valor
+      const entVal = item ? Number(item.atendida || 0) : 0;
+      const entText = item && (entVal > 0 || ["SURTIDA", "ENTREGADA"].includes(String(solicitud.status || "").toUpperCase()))
+        ? String(entVal)
+        : "";
+
+      doc.font("Helvetica").fontSize(8.5);
+      const descH = descText ? doc.heightOfString(descText, { width: colDescW - 8 }) : 10;
+      const rowH = Math.max(defaultRowH, descH + 6);
+
+      // Si excede el límite antes de las firmas, crear nueva página
+      if (currentY + rowH > pageHeight - 165) {
+        doc.addPage();
+        drawValeHeader();
+        currentY = drawTableHeader(148);
+      }
+
+      doc.save();
+      doc.lineWidth(0.5).strokeColor("#000000");
+      doc.rect(leftX, currentY, tableWidth, rowH).stroke();
+      doc.moveTo(xDesc, currentY).lineTo(xDesc, currentY + rowH).stroke();
+      doc.moveTo(xUni, currentY).lineTo(xUni, currentY + rowH).stroke();
+      doc.moveTo(xSol, currentY).lineTo(xSol, currentY + rowH).stroke();
+      doc.moveTo(xEnt, currentY).lineTo(xEnt, currentY + rowH).stroke();
+      doc.restore();
+
+      if (item) {
+        const textY = currentY + 5;
+        doc.fillColor("#000000").font("Helvetica").fontSize(8.5);
+        doc.text(String(i + 1), xNo, textY, { width: colNoW, align: "center" });
+        doc.text(descText, xDesc + 4, textY, { width: colDescW - 8, align: "left" });
+        doc.text(uniText, xUni + 2, textY, { width: colUniW - 4, align: "center" });
+        doc.text(solText, xSol + 2, textY, { width: colSolW - 4, align: "center" });
+        doc.text(entText, xEnt + 2, textY, { width: colEntW - 4, align: "center" });
+      }
+
+      currentY += rowH;
+    }
+
+    // 3. Dibujar las 3 cajas de firma al pie (SOLICITA, AUTORIZA, RECIBE)
+    const signBoxY = Math.max(currentY + 18, pageHeight - 145);
+    const signBoxH = 78;
+    const gap = 12;
+    const boxW = (tableWidth - gap * 2) / 3; // 172 pt cada caja
+
+    const xBox1 = leftX;
+    const xBox2 = leftX + boxW + gap;
+    const xBox3 = leftX + (boxW + gap) * 2;
+
+    doc.save();
+    doc.lineWidth(0.7).strokeColor("#000000");
+    doc.rect(xBox1, signBoxY, boxW, signBoxH).stroke();
+    doc.rect(xBox2, signBoxY, boxW, signBoxH).stroke();
+    doc.rect(xBox3, signBoxY, boxW, signBoxH).stroke();
+
+    // Líneas de firma dentro de cada caja
+    const lineY = signBoxY + 48;
+    doc.moveTo(xBox1 + 12, lineY).lineTo(xBox1 + boxW - 12, lineY).stroke();
+    doc.moveTo(xBox2 + 12, lineY).lineTo(xBox2 + boxW - 12, lineY).stroke();
+    doc.moveTo(xBox3 + 12, lineY).lineTo(xBox3 + boxW - 12, lineY).stroke();
+    doc.restore();
+
+    // Textos Caja 1: SOLICITA (Dinámico por departamento y encargado)
+    doc.fillColor("#000000").font("Helvetica-Bold").fontSize(8)
+      .text("SOLICITA:", xBox1 + 4, signBoxY + 6, { width: boxW - 8, align: "center" });
+    doc.font("Helvetica").fontSize(7.5)
+      .text(solicitaDepto, xBox1 + 4, signBoxY + 17, { width: boxW - 8, align: "center" });
+    doc.font("Helvetica-Bold").fontSize(7.5)
+      .text(solicitaEncargado, xBox1 + 4, lineY + 5, { width: boxW - 8, align: "center" });
+
+    // Textos Caja 2: AUTORIZA (Delegada)
+    doc.font("Helvetica-Bold").fontSize(8)
+      .text("AUTORIZA:", xBox2 + 4, signBoxY + 6, { width: boxW - 8, align: "center" });
+    doc.font("Helvetica").fontSize(7.5)
+      .text(autorizaCargo, xBox2 + 4, signBoxY + 17, { width: boxW - 8, align: "center" });
+    doc.font("Helvetica-Bold").fontSize(7.5)
+      .text(autorizaNombre, xBox2 + 4, lineY + 5, { width: boxW - 8, align: "center" });
+
+    // Textos Caja 3: RECIBE (Conformidad)
+    doc.font("Helvetica-Bold").fontSize(8)
+      .text("RECIBE:", xBox3 + 4, signBoxY + 6, { width: boxW - 8, align: "center" });
+    doc.font("Helvetica").fontSize(7.5)
+      .text("NOMBRE, FECHA Y FIRMA", xBox3 + 4, signBoxY + 17, { width: boxW - 8, align: "center" });
+    doc.font("Helvetica").fontSize(7.2)
+      .text("Recibí de conformidad: SI (   )  NO (   )", xBox3 + 4, lineY + 6, { width: boxW - 8, align: "center" });
+
+    // 4. Pie de página institucional
+    const footerY = signBoxY + signBoxH + 10;
+    doc.font("Helvetica").fontSize(7.5).fillColor("#333333");
+    doc.text(`Folio Solicitud: #${id}`, leftX, footerY, { width: 150, align: "left" });
+    doc.text("Hoja 1 De 1", leftX, footerY, { width: tableWidth, align: "center" });
+    doc.text("Delegación de BIENESTAR en Baja California Sur", leftX, footerY + 10, { width: tableWidth, align: "center" });
+
+    doc.end();
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
 });
-doc.fillColor(colorMuted).font("Helvetica").fontSize(10).text("SISTEMA DE INVENTARIO", titleX, 45, {
-  width: titleWidth,
-  align: "center",
-});
-doc.save();
-doc.moveTo(leftX, 82).lineTo(rightLimit, 82).lineWidth(0.9).strokeColor(border).stroke();
-doc.restore();
-
-const metaLine = (label, value, x, y, labelWidth, valueWidth) => {
-  doc.fillColor(colorMuted).font("Helvetica-Bold").fontSize(9).text(String(label), x, y, { width: labelWidth });
-  doc.fillColor(colorText).font("Helvetica").fontSize(9.5).text(String(value ?? "-"), x + labelWidth, y, {
-    width: valueWidth,
-  });
-};
-
-const metaStartY = 96;
-const metaGapY = 18;
-const leftMetaLabelWidth = 64;
-const rightMetaLabelWidth = 56;
-const leftMetaX = leftX;
-const rightMetaX = 320;
-const contentBottom = pageHeight - bottomMargin;
-
-metaLine("ID solicitud:", id, leftMetaX, metaStartY, leftMetaLabelWidth, 130);
-metaLine("Fecha:", fmtDate(solicitud.fecha_solicitud), rightMetaX, metaStartY, rightMetaLabelWidth, 120);
-metaLine("Oficialia:", solicitud.oficialia_nombre || "-", leftMetaX, metaStartY + metaGapY, leftMetaLabelWidth, 190);
-metaLine("Estatus:", solicitud.status || "-", rightMetaX, metaStartY + metaGapY, rightMetaLabelWidth, 120);
-metaLine("Usuario solicitante:", usuarioLine, leftMetaX, metaStartY + metaGapY * 2, 104, 360);
-
-doc.font("Helvetica").fontSize(9.5);
-const usuarioHeight = Math.max(doc.heightOfString(usuarioLine, { width: 360 }), 12);
-const metaBottomY = metaStartY + metaGapY * 2 + usuarioHeight;
-
-doc.save();
-doc.moveTo(leftX, metaBottomY + 10).lineTo(rightLimit, metaBottomY + 10).lineWidth(0.8).strokeColor(border).stroke();
-doc.restore();
-
-const signLeftX = 72;
-const signRightX = 322;
-const signLeftW = 190;
-const signRightW = 210;
-const signPrimary = "LIC. REBECA TRUJILLO TORRES";
-const signSecondary = "JEFA DEPARTAMENTO ADMINISTRATIVO";
-const signTertiary = "DIR. ESTATAL DEL REGISTRO CIVIL";
-
-doc.font("Helvetica").fontSize(8.4);
-const leftLine1Height = doc.heightOfString(recibeLine, { width: signLeftW, align: "center" });
-doc.fontSize(7.8);
-const leftLine2Height = showDepartamento ? doc.heightOfString(departamentoLine, { width: signLeftW, align: "center" }) : 0;
-const rightLine1Height = doc.heightOfString(signPrimary, { width: signRightW, align: "center" });
-const rightLine2Height = doc.heightOfString(signSecondary, { width: signRightW, align: "center" });
-const rightLine3Height = doc.heightOfString(signTertiary, { width: signRightW, align: "center" });
-
-const signTextOffset = 7;
-const signGap = 1;
-const leftSignHeight = leftLine1Height + (showDepartamento ? signGap + leftLine2Height : 0);
-const rightSignHeight = rightLine1Height + signGap + rightLine2Height + signGap + rightLine3Height;
-const signatureBlockHeight = signTextOffset + Math.max(leftSignHeight, rightSignHeight);
-
-const headers = [
-{ label: "CLAVE", width: 70, align: "left" },
-{ label: "DESCRIPCION", width: 180, align: "left" },
-{ label: "CATEGORIA", width: 85, align: "left" },
-{ label: "UNIDAD", width: 65, align: "left" },
-{ label: "SOLICITADA", width: 65, align: "center" },
-{ label: "ATENDIDA", width: 65, align: "center" },
-];
-const tableWidth = headers.reduce((sum, col) => sum + col.width, 0);
-const solicitudObserv = String(solicitud.observaciones || "").trim();
-const observationRows = [];
-if (solicitudObserv && solicitudObserv !== "-") {
-observationRows.push({ clave: "SOL", producto: "SOLICITUD", observacion: solicitudObserv });
-}
-detalles.forEach((row, idx) => {
-const note = String(row.observaciones || "").trim();
-if (!note || note === "-") return;
-const clave = String(row.CLAVE || "").trim() || `Detalle ${idx + 1}`;
-const desc = String(row.DESCRIPCION || "").trim();
-observationRows.push({
-  clave,
-  producto: desc || `Detalle ${idx + 1}`,
-  observacion: note,
-});
-});
-const hasObservSection = observationRows.length > 0;
-const observationClaveWidth = 78;
-const observationProductWidth = 170;
-const observationTextWidth = tableWidth - observationClaveWidth - observationProductWidth;
-const minSignatureGap = 12;
-const signBottomPadding = 8;
-const tableBottomLimit = contentBottom - (signatureBlockHeight + minSignatureGap + signBottomPadding);
-let tableY = Math.max(metaBottomY + 20, 186);
-
-function drawTableTitle() {
-doc.fillColor(colorPrimary).font("Helvetica-Bold").fontSize(10).text("DETALLE DE INSUMOS", leftX, doc.y);
-doc.moveDown(0.35);
-}
-
-function drawColumnGuides(top, height) {
-let x = leftX;
-doc.save();
-doc.lineWidth(0.5).strokeColor(border);
-headers.slice(0, -1).forEach((col) => {
-  x += col.width;
-  doc.moveTo(x, top).lineTo(x, top + height).stroke();
-});
-doc.restore();
-}
-
-function drawTableHeader() {
-const top = doc.y;
-let x = leftX;
-doc.save();
-doc.rect(leftX, top, tableWidth, 18).fill(colorLight);
-doc.rect(leftX, top, tableWidth, 18).lineWidth(0.6).strokeColor(border).stroke();
-doc.restore();
-drawColumnGuides(top, 18);
-doc.fillColor(colorPrimary).font("Helvetica-Bold").fontSize(8.2);
-headers.forEach((col) => {
-doc.text(col.label, x + 4, top + 5, { width: col.width - 8, align: col.align });
-x += col.width;
-});
-doc.y = top + 18;
-}
-
-function ensureTableSpace(rowHeight) {
-if (doc.y + rowHeight > tableBottomLimit) {
-doc.addPage();
-doc.y = 40;
-drawTableTitle();
-drawTableHeader();
-}
-}
-
-function drawRow(row) {
-const values = [
-  { text: row.CLAVE || "-", width: headers[0].width, align: "left" },
-  { text: row.DESCRIPCION || "-", width: headers[1].width, align: "left" },
-  { text: row.categoria || row.categoria_nombre || "-", width: headers[2].width, align: "left" },
-  { text: row.unidad || "-", width: headers[3].width, align: "left" },
-  { text: String(row.cantidad ?? "-"), width: headers[4].width, align: "center" },
-  { text: String(row.atendida ?? "-"), width: headers[5].width, align: "center" },
-];
-
-let rowHeight = 0;
-values.forEach((col) => {
-const h = doc.heightOfString(col.text, { width: col.width - 8, align: col.align });
-rowHeight = Math.max(rowHeight, h + 7);
-});
-ensureTableSpace(rowHeight + 2);
-
-const top = doc.y;
-let x = leftX;
-doc.save();
-doc.rect(leftX, top, tableWidth, rowHeight).lineWidth(0.5).strokeColor(border).stroke();
-doc.moveTo(leftX, top + rowHeight).lineTo(leftX + tableWidth, top + rowHeight).lineWidth(0.5).strokeColor(border).stroke();
-doc.restore();
-drawColumnGuides(top, rowHeight);
-doc.fillColor(colorText).font("Helvetica").fontSize(9);
-values.forEach((col) => {
-doc.text(col.text, x + 4, top + 4, { width: col.width - 8, align: col.align });
-x += col.width;
-});
-doc.y = top + rowHeight;
-}
-
-function drawObservationSectionHeader() {
-const titleTop = doc.y + 10;
-doc.save();
-doc.moveTo(leftX, titleTop).lineTo(leftX + tableWidth, titleTop).lineWidth(0.6).strokeColor(border).stroke();
-doc.restore();
-doc.fillColor(colorPrimary).font("Helvetica-Bold").fontSize(9.2).text("OBSERVACIONES", leftX, titleTop + 7, {
-  width: tableWidth,
-});
-const top = titleTop + 22;
-doc.save();
-doc.rect(leftX, top, tableWidth, 18).fill(colorLight);
-doc.rect(leftX, top, tableWidth, 18).lineWidth(0.6).strokeColor(border).stroke();
-doc.moveTo(leftX + observationClaveWidth, top).lineTo(leftX + observationClaveWidth, top + 18).lineWidth(0.5).strokeColor(border).stroke();
-doc.moveTo(leftX + observationClaveWidth + observationProductWidth, top).lineTo(leftX + observationClaveWidth + observationProductWidth, top + 18).lineWidth(0.5).strokeColor(border).stroke();
-doc.restore();
-doc.fillColor(colorPrimary).font("Helvetica-Bold").fontSize(8.2);
-doc.text("CLAVE", leftX + 4, top + 5, { width: observationClaveWidth - 8, align: "left" });
-doc.text("PRODUCTO", leftX + observationClaveWidth + 4, top + 5, { width: observationProductWidth - 8, align: "left" });
-doc.text("OBSERVACION", leftX + observationClaveWidth + observationProductWidth + 4, top + 5, { width: observationTextWidth - 8, align: "left" });
-doc.y = top + 18;
-}
-
-function ensureObservationSpace(rowHeight) {
-const reserve = 8;
-if (doc.y + rowHeight + reserve > contentBottom) {
-doc.addPage();
-doc.y = 40;
-drawObservationSectionHeader();
-}
-}
-
-function drawObservationRow(row) {
-const claveText = row.clave || "-";
-const productoText = row.producto || "-";
-const observacionText = row.observacion || "-";
-doc.font("Helvetica").fontSize(8.3);
-let rowHeight = 0;
-[
-  { text: claveText, width: observationClaveWidth - 8 },
-  { text: productoText, width: observationProductWidth - 8 },
-  { text: observacionText, width: observationTextWidth - 8 },
-].forEach((col) => {
-  const h = doc.heightOfString(col.text, { width: col.width, align: "left" });
-  rowHeight = Math.max(rowHeight, h + 8);
-});
-ensureObservationSpace(rowHeight);
-const top = doc.y;
-doc.save();
-doc.rect(leftX, top, tableWidth, rowHeight).lineWidth(0.5).strokeColor(border).stroke();
-doc.moveTo(leftX + observationClaveWidth, top).lineTo(leftX + observationClaveWidth, top + rowHeight).lineWidth(0.5).strokeColor(border).stroke();
-doc.moveTo(leftX + observationClaveWidth + observationProductWidth, top).lineTo(leftX + observationClaveWidth + observationProductWidth, top + rowHeight).lineWidth(0.5).strokeColor(border).stroke();
-doc.restore();
-doc.fillColor(colorText).font("Helvetica").fontSize(8.3);
-doc.text(claveText, leftX + 4, top + 4, { width: observationClaveWidth - 8, align: "left" });
-doc.text(productoText, leftX + observationClaveWidth + 4, top + 4, { width: observationProductWidth - 8, align: "left" });
-doc.text(observacionText, leftX + observationClaveWidth + observationProductWidth + 4, top + 4, { width: observationTextWidth - 8, align: "left" });
-doc.y = top + rowHeight;
-}
-
-doc.y = tableY;
-if (doc.y + 36 > tableBottomLimit) {
-doc.addPage();
-doc.y = 40;
-}
-drawTableTitle();
-drawTableHeader();
-
-if (!detalles.length) {
-doc.fillColor(colorMuted).font("Helvetica").fontSize(10).text("Sin detalles capturados.", leftX, doc.y + 10);
-doc.y += 24;
-} else {
-detalles.forEach(drawRow);
-}
-
-if (doc.y + minSignatureGap + signatureBlockHeight + signBottomPadding > contentBottom) {
-doc.addPage();
-doc.y = 40;
-}
-const signY = contentBottom - signatureBlockHeight - signBottomPadding;
-
-doc.save();
-doc.moveTo(signLeftX, signY).lineTo(signLeftX + signLeftW, signY).lineWidth(0.8).strokeColor(colorText).stroke();
-doc.moveTo(signRightX, signY).lineTo(signRightX + signRightW, signY).lineWidth(0.8).strokeColor(colorText).stroke();
-doc.restore();
-
-doc.fillColor(colorText).font("Helvetica").fontSize(8.4).text(recibeLine, signLeftX, signY + signTextOffset, { width: signLeftW, align: "center" });
-if (showDepartamento) {
-doc.fontSize(7.8).text(departamentoLine, signLeftX, signY + signTextOffset + leftLine1Height + signGap, { width: signLeftW, align: "center" });
-}
-
-doc.fillColor(colorText).font("Helvetica").fontSize(8.4).text(signPrimary, signRightX, signY + signTextOffset, { width: signRightW, align: "center" });
-doc.fontSize(7.8).text(signSecondary, signRightX, signY + signTextOffset + rightLine1Height + signGap, { width: signRightW, align: "center" });
-doc.text(signTertiary, signRightX, signY + signTextOffset + rightLine1Height + signGap + rightLine2Height + signGap, { width: signRightW, align: "center" });
-
-doc.y = signY + signatureBlockHeight + 10;
-
-if (hasObservSection) {
-doc.addPage();
-doc.y = 40;
-drawObservationSectionHeader();
-observationRows.forEach(drawObservationRow);
-}
-
-doc.end();
-} catch (e) {
-return httpError(res, 500, e.message);
-}
-}); 
 
 const STATIC_DIR = path.join(__dirname, "public");
 app.use(express.static(STATIC_DIR));
