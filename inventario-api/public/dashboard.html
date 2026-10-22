@@ -4,7 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Sistema - Control de Inventario</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/styles.css?v=2" />
 </head>
 <body>
 
@@ -15,7 +15,7 @@
       <div class="sidebar-header">
         <img src="/logo.png" alt="Logo" onerror="this.style.display='none'">
         <div>
-          <h2>Control de<br>Inventario</h2>
+          <h2>Control de <br>Inventario</h2>
           <span>Gestión de materiales</span>
         </div>
       </div>
@@ -100,32 +100,42 @@
           </div>
 
           <div class="kpi-grid">
-            <div class="kpi-card">
+            <div class="kpi-card clickable" id="kpi-card-total" title="Ir al listado de todas las órdenes">
               <div class="kpi-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></div>
               <div class="kpi-title">Órdenes registradas</div>
               <div class="kpi-value" id="kpi-ordenes-total">0</div>
-              <div class="kpi-desc">Total en el sistema</div>
+              <div class="kpi-desc">Ver todas las solicitudes →</div>
             </div>
 
-            <div class="kpi-card">
+            <div class="kpi-card clickable" id="kpi-card-pendientes" title="Filtrar órdenes pendientes de revisión">
               <div class="kpi-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg></div>
               <div class="kpi-title">Pendientes de revisión</div>
               <div class="kpi-value" id="kpi-ordenes-pendientes" style="color: #ea580c;">0</div>
-              <div class="kpi-desc">Requieren atención del encargado</div>
+              <div class="kpi-desc">Requieren atención del encargado →</div>
             </div>
             
-            <div class="kpi-card">
+            <div class="kpi-card clickable" id="kpi-card-surtidas" title="Ver órdenes aprobadas y surtidas">
               <div class="kpi-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg></div>
               <div class="kpi-title">Órdenes surtidas</div>
               <div class="kpi-value" id="kpi-ordenes-autorizadas" style="color: var(--accent);">0</div>
-              <div class="kpi-desc">Procesadas exitosamente</div>
+              <div class="kpi-desc">Procesadas exitosamente →</div>
             </div>
 
-            <div class="kpi-card">
+            <div class="kpi-card clickable" id="kpi-card-materiales" title="Ir al catálogo de inventario">
               <div class="kpi-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg></div>
               <div class="kpi-title">Materiales en catálogo</div>
               <div class="kpi-value" id="kpi-materiales-total">0</div>
-              <div class="kpi-desc">Artículos gestionados</div>
+              <div class="kpi-desc">Artículos gestionados →</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+              <h3 style="margin:0; font-size:16px;">Actividad Reciente (Últimas Órdenes)</h3>
+              <button class="btn-secondary" id="btn-ver-todas-ordenes" type="button">Ver todas</button>
+            </div>
+            <div id="panel_actividad_box">
+              <div class="muted">Cargando actividad reciente...</div>
             </div>
           </div>
         </section>
@@ -134,7 +144,7 @@
         <section id="view-captura" class="view-section" style="display: none;">
           <div class="card">
             <h3>Captura de solicitud</h3>
-            <div class="sol-flow-status" style="display:flex; justify-content:space-between; padding:10px; background:var(--bg-app); border:1px solid var(--border); border-radius:8px; margin-bottom:12px;">
+            <div class="sol-flow-status" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding:10px; background:var(--bg-app); border:1px solid var(--border); border-radius:8px; margin-bottom:12px;">
               <div id="sol_flow_text" class="muted"></div>
               <div id="sol_flow_id" style="background:var(--bg-sidebar); color:white; padding:4px 10px; border-radius:999px; font-size:12px;">Sin solicitud</div>
             </div>
@@ -166,7 +176,7 @@
                 </div>
               </div>
               <div style="margin-top:16px;">
-                <button id="btn-crear-sol" class="btn-primary">Crear solicitud</button>
+                <button id="btn-crear-sol" class="btn-primary">Continuar a agregar productos &rarr;</button>
                 <span id="msg_sol" class="msg"></span>
               </div>
             </div>
@@ -203,6 +213,9 @@
               </div>
               <div id="msg_det" class="msg"></div>
               <div id="det_preview" class="muted" style="margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:8px;">Sin renglones.</div>
+              <div class="actions" style="margin-top:14px; display:flex; justify-content:flex-end;">
+                <button id="btn-sol-go-revision" class="btn-primary" type="button">Continuar a Detalle / Guardar (Paso 3) &rarr;</button>
+              </div>
             </div>
 
             <!-- Paso 3 -->
@@ -214,68 +227,90 @@
 
             <!-- Paso 4 -->
             <div id="sol-pane-pdf" class="sol-pane hidden">
-              <button id="btn-sol-pdf-flow" class="btn-primary">Descargar PDF</button>
+              <div id="sol_pdf_success_box" style="margin-bottom:16px; padding:16px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px;">
+                <h3 style="margin:0 0 6px 0; color:#15803d;">¡Solicitud guardada con éxito!</h3>
+                <p id="sol_pdf_success_text" class="muted" style="margin:0; font-size:14px;">La solicitud ha sido registrada en el sistema. Descarga el vale oficial en formato PDF para recabar firmas.</p>
+              </div>
+              <button id="btn-sol-pdf-flow" class="btn-primary">Descargar Vale PDF</button>
             </div>
           </div>
         </section>
 
         <!-- 3. VISTA: Solicitudes (Órdenes de Material) -->
         <section id="view-solicitudes" class="view-section" style="display: none;">
-          <div class="grid cols-2" style="grid-template-columns: 2fr 1fr; align-items: start;">
-            <div>
-              <div id="sol_acciones_card" class="card">
-                <h3>Acciones</h3>
-                <input id="sol_edit_id" type="hidden">
-                <div style="display:flex; gap:8px;">
-                  <button id="btn-sol-cancelar" class="btn-secondary">Cancelar</button>
-                  <button id="btn-sol-eliminar" class="btn-secondary" style="color:var(--danger); border-color:#fca5a5;">Eliminar</button>
-                  <button id="btn-sol-pdf" class="btn-primary">Descargar PDF</button>
-                </div>
-                <div id="msg_edit" class="msg"></div>
+          <div>
+            <div id="sol_acciones_card" class="card">
+              <h3>Acciones</h3>
+              <input id="sol_edit_id" type="hidden">
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button id="btn-sol-cancelar" class="btn-secondary">Cancelar</button>
+                <button id="btn-sol-eliminar" class="btn-secondary" style="color:var(--danger); border-color:#fca5a5;">Eliminar</button>
+                <button id="btn-sol-pdf" class="btn-primary">Descargar PDF</button>
               </div>
+              <div id="msg_edit" class="msg"></div>
+            </div>
 
-              <div class="nav" style="margin-bottom:12px;">
-                <button id="btn-solicitudes-tab-lista" class="tab active" type="button">Listado</button>
-                <button id="btn-solicitudes-tab-consulta" class="tab" type="button" disabled>Consulta</button>
-              </div>
+            <div class="nav" style="margin-bottom:12px;">
+              <button id="btn-solicitudes-tab-lista" class="tab active" type="button">Listado</button>
+              <button id="btn-solicitudes-tab-consulta" class="tab" type="button" disabled>Consulta</button>
+            </div>
 
-              <div id="solicitudes-pane-lista" class="card">
-                <h3 style="display:inline-block; margin-right:12px;">Listado</h3>
-                <div class="nav" style="display:inline-flex; margin:0 0 16px 0;">
+            <div id="solicitudes-pane-lista" class="card">
+              <div style="display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:16px;">
+                <h3 style="margin:0;">Listado</h3>
+                <div class="nav" style="display:inline-flex; margin:0;">
                   <button id="btn-list-mode-activas" class="tab active" type="button" style="padding:4px 10px;">Activas</button>
                   <button id="btn-list-mode-canceladas" class="tab" type="button" style="padding:4px 10px;">Cancelados</button>
                 </div>
-                <div class="grid cols-3" style="margin-bottom:12px;">
-                  <div class="field">
-                    <label for="list_q">Filtro</label>
-                    <input id="list_q" placeholder="texto libre">
-                  </div>
-                  <div class="field">
-                    <label for="list_oficialia">Departamento</label>
-                    <select id="list_oficialia"></select>
-                  </div>
-                  <div style="align-self:end; display:flex; gap:8px;">
-                    <button id="btn-listar" class="btn-secondary">Listar</button>
-                    <button id="btn-list-consultar" class="btn-primary" disabled>Consultar</button>
-                  </div>
+              </div>
+              <div class="grid cols-3" style="margin-bottom:12px;">
+                <div class="field">
+                  <label for="list_q">Filtro</label>
+                  <input id="list_q" placeholder="texto libre">
                 </div>
-                <div id="msg_list" class="msg"></div>
-                <div id="listado_box" style="margin-top:8px;"></div>
-                <div id="msg_lookup" class="msg"></div>
+                <div class="field">
+                  <label for="list_oficialia">Departamento</label>
+                  <select id="list_oficialia"></select>
+                </div>
+                <div style="align-self:end; display:flex; gap:8px; flex-wrap:wrap;">
+                  <button id="btn-listar" class="btn-secondary">Listar</button>
+                  <button id="btn-list-consultar" class="btn-primary" disabled>Consultar</button>
+                </div>
+              </div>
+              <div id="msg_list" class="msg"></div>
+              <div id="listado_box" style="margin-top:8px;"></div>
+              <div id="msg_lookup" class="msg"></div>
+            </div>
+
+            <div id="solicitudes-pane-consulta" class="hidden">
+              <div class="card">
+                <h3>Resumen de la Solicitud</h3>
+                <div id="sol_resumen" class="kv kv-2"></div>
               </div>
 
-              <div id="solicitudes-pane-consulta" class="hidden">
-                <div class="card">
-                  <h3>Consulta</h3>
-                  <div id="sol_resumen" class="kv kv-2"></div>
+              <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+                  <h3 style="margin:0;">Artículos Solicitados / Surtido</h3>
+                  <span class="muted" style="font-size:12.5px;">Ajusta la cantidad entregada si el surtido es parcial</span>
                 </div>
-                <div class="card">
-                  <h3>Productos solicitados</h3>
-                  <div id="sol_consulta_detalle"><div class="muted">Sin renglones.</div></div>
+                <div id="sol_consulta_detalle"><div class="muted">Sin renglones.</div></div>
+                <div id="msg_surtir_consulta" class="msg"></div>
+              </div>
+
+              <!-- Sección Opcional para Subir el PDF Firmado -->
+              <div id="respaldo-consulta-card" class="card">
+                <h3 style="margin:0 0 6px 0;">Respaldo de Vale Firmado (Opcional)</h3>
+                <p class="muted" style="margin:0 0 12px 0; font-size:13px;">
+                  Una vez recabadas las firmas físicas (Solicita, Autoriza y Recibe), puedes adjuntar el escaneo en PDF o imagen como respaldo digital.
+                </p>
+                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                  <input type="file" id="sol_file_respaldo" accept=".pdf,image/*" style="max-width:100%;">
+                  <button id="btn-sol-subir-respaldo" class="btn-secondary" type="button">Subir vale firmado</button>
+                  <button id="btn-sol-ver-respaldo" class="btn-primary hidden" type="button">Ver vale firmado guardado</button>
                 </div>
+                <div id="msg_respaldo" class="msg"></div>
               </div>
             </div>
-            <div><!-- Espacio libre columna derecha --></div>
           </div>
         </section>
 
@@ -334,8 +369,8 @@
             <h3>Alta / edición de producto</h3>
             <div class="grid cols-4">
               <div class="field">
-                <label for="alm_clave">CLAVE</label>
-                <input id="alm_clave" placeholder="CL-001">
+                <label for="alm_clave">CLAVE (Automática)</label>
+                <input id="alm_clave" placeholder="CL-001" readonly class="readonly">
               </div>
               <div class="field">
                 <label for="alm_desc">DESCRIPCIÓN</label>
@@ -353,7 +388,7 @@
             <div class="grid cols-4" style="margin-top:12px;">
               <div class="field">
                 <label for="alm_stock">Stock inicial / Ajuste</label>
-                <input id="alm_stock" type="number" step="1" value="0">
+                <input id="alm_stock" type="number" step="1" placeholder="Cantidad" value="">
               </div>
               <div class="field">
                 <label for="alm_estado">Estatus</label>
@@ -410,12 +445,12 @@
           </div>
 
           <div id="rep-detail" class="hidden">
-            <div class="card" style="display:flex; justify-content:space-between; align-items:center;">
+            <div class="card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
               <div>
                 <h3 id="rep_detail_title" style="margin:0;">Reporte de oficialía</h3>
                 <div id="rep_detail_sub" class="muted" style="font-size:13px; margin-top:4px;"></div>
               </div>
-              <div style="display:flex; gap:8px;">
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
                 <button id="btn-rep-back" class="btn-secondary">Regresar</button>
                 <button id="btn-rep-print-detail" class="btn-primary">Imprimir</button>
                 <button id="btn-rep-export-excel" class="btn-primary" style="background:#059669;">Exportar Excel</button>
@@ -487,7 +522,7 @@
         <!-- 7. VISTA: Auditoría de Accesos (Solo Admin) -->
      <section id="view-auditoria" class="view-section" style="display: none;">
        <div class="card">
-         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
            <h3 style="margin:0;">Registro de Accesos al Sistema (IP y Usuarios)</h3>
            <button id="btn-audit-refresh" class="btn-secondary">Actualizar</button>
          </div>
@@ -501,7 +536,7 @@
     </main>
   </div>
  
-  <script src="/app.js"></script>
+  <script src="/app.js?v=8"></script>
 
   <script>
     // Filtro de seguridad rápido para evitar parpadeos si no hay sesión

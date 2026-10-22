@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const mysql = require("mysql2/promise");
 const helmet = require("helmet");
 const cors = require("cors");
@@ -139,12 +139,23 @@ return String(u || "")
 }
 
 // Roles: ADMIN (Nivel 3), ENCARGADO (Nivel 2), USUARIO (Nivel 1)
+function normalizeRol(r, username = '') {
+  const up = String(r || '').trim().toUpperCase();
+  if (up === 'ADMIN' || up === 'ADMINISTRADOR') return 'ADMIN';
+  if (up === 'ENCARGADO') return 'ENCARGADO';
+  if (up === 'USUARIO' || up === 'USER') return 'USUARIO';
+  const u = normalizeUser(username);
+  if (u === 'admin') return 'ADMIN';
+  if (u === 'encargado') return 'ENCARGADO';
+  return 'USUARIO';
+}
+
 function isAdmin(req) {
-  return req.user?.rol === 'ADMIN';
+  return normalizeRol(req.user?.rol, req.user?.username) === 'ADMIN';
 }
 
 function isEncargado(req) {
-  return req.user?.rol === 'ENCARGADO';
+  return normalizeRol(req.user?.rol, req.user?.username) === 'ENCARGADO';
 }
 
 function canManageAlmacen(req) {
@@ -433,6 +444,9 @@ req.cookies?.token || (req.headers.authorization?.startsWith("Bearer ") ? req.he
 if (!token) return httpError(res, 401, "No autenticado");
 try {
 req.user = jwt.verify(token, process.env.JWT_SECRET);
+if (req.user) {
+  req.user.rol = normalizeRol(req.user.rol, req.user.username);
+}
 next();
 } catch {
 return httpError(res, 401, "Token invalido");
@@ -516,7 +530,7 @@ app.post("/api/auth/login", async (req, res) => {
       primer_ap: u.PRIMER_APELLIDO,
       segundo_ap: u.SEGUNDO_APELLIDO,
       id_oficialia: u.ID_OFICIALIA,
-      rol: u.rol || 'USUARIO'
+      rol: normalizeRol(u.rol, u.username)
     };
 
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "8h" });
@@ -702,8 +716,81 @@ return httpError(res, 500, e.message);
 }
 });
 
+app.get("/api/usuarios", authRequired, async (req, res) => {
+  try {
+    const reqRol = normalizeRol(req.user?.rol, req.user?.username);
+    const admin = reqRol === "ADMIN";
+    const encargado = reqRol === "ENCARGADO";
+    const includeInactive = String(req.query.include_inactive || "") === "1";
+    const nameCol = await detectOficialiaNameCol();
+    const deptoCol = await detectUsuarioDepartamentoCol();
+    const ofiSelect = nameCol ? `o.${qi(nameCol)} AS oficialia_nombre,` : `NULL AS oficialia_nombre,`;
+    const deptoSelect = deptoCol ? `u.${qi(deptoCol)} AS departamento,` : `NULL AS departamento,`;
+
+    if (admin || encargado) {
+      const [rows] = await poolRead.query(
+        `SELECT u.id, u.username, COALESCE(u.ACTIVO, 1) AS activo,
+          COALESCE(u.rol, 'USUARIO') AS rol,
+          u.ID_OFICIALIA AS id_oficialia,
+          ${ofiSelect}
+          ${deptoSelect}
+          CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_completo
+        FROM usuario u
+        LEFT JOIN oficialias o ON o.id = u.ID_OFICIALIA
+        WHERE (${includeInactive ? "1=1" : "COALESCE(u.ACTIVO, 1) <> 0"})
+        ORDER BY oficialia_nombre ASC, nombre_completo ASC, u.username ASC
+        LIMIT 500`
+      );
+      const mapped = rows
+        .map((r) => {
+          const rolNorm = normalizeRol(r.rol, r.username);
+          const areaNombre = String(r.oficialia_nombre || r.departamento || r.nombre_completo || r.username || "").trim();
+          return {
+            ...r,
+            rol: rolNorm,
+            oficialia_nombre: r.oficialia_nombre || r.departamento || null,
+            area_nombre: areaNombre,
+          };
+        })
+        .filter((r) => {
+          if (admin) return true;
+          // ENCARGADO: mostrar su propia área (ENCARGADO) y las áreas de USUARIO
+          return r.rol === "ENCARGADO" || r.rol === "USUARIO" || Number(r.id) === Number(req.user?.id);
+        });
+      return res.json({ ok: true, data: mapped });
+    }
+
+    const [rows] = await poolRead.query(
+      `SELECT u.id, u.username, COALESCE(u.ACTIVO, 1) AS activo,
+        COALESCE(u.rol, 'USUARIO') AS rol,
+        u.ID_OFICIALIA AS id_oficialia,
+        ${ofiSelect}
+        ${deptoSelect}
+        CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_completo
+      FROM usuario u
+      LEFT JOIN oficialias o ON o.id = u.ID_OFICIALIA
+      WHERE u.id = ?
+      LIMIT 1`,
+      [Number(req.user?.id || 0)]
+    );
+    const mapped = rows.map((r) => {
+      const rolNorm = normalizeRol(r.rol, r.username);
+      const areaNombre = String(r.oficialia_nombre || r.departamento || r.nombre_completo || r.username || "").trim();
+      return {
+        ...r,
+        rol: rolNorm,
+        oficialia_nombre: r.oficialia_nombre || r.departamento || null,
+        area_nombre: areaNombre,
+      };
+    });
+    return res.json({ ok: true, data: mapped });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
 app.get("/api/logs/accesos", authRequired, async (req, res) => {
-  if (req.user?.rol !== 'ADMIN') {
+  if (!isAdmin(req)) {
     return httpError(res, 403, "Acceso denegado: solo el Administrador puede consultar los accesos");
   }
 
@@ -1251,9 +1338,47 @@ return httpError(res, 500, e.message);
 }
 });
 
+async function resolveProductoIdByClaveOrId(conn, { producto_id = null, clave = null }) {
+  if (producto_id && Number.isFinite(Number(producto_id))) {
+    return Number(producto_id);
+  }
+  if (!clave) return null;
+  const claveClean = String(clave).trim();
+  const pk = await detectProductosPK();
+  const almStatusCol = await detectAlmacenStatusCol();
+  const almHasUnidad = await hasAlmacenUnidad();
+  const unidadSel = almHasUnidad ? "UNIDAD" : "NULL AS UNIDAD";
+  const statusSel = almStatusCol ? `${qi(almStatusCol)} AS ESTADO` : "NULL AS ESTADO";
+
+  const [rAlm] = await conn.query(
+    `SELECT CLAVE, DESCRIPCION, CATEGORIA, ${unidadSel}, ${statusSel}
+     FROM almacen_dregcivil
+     WHERE CLAVE=?
+     ORDER BY ID ASC
+     LIMIT 1`,
+    [claveClean]
+  );
+
+  if (rAlm.length) {
+    return await upsertProductoFromAlmacen(conn, {
+      CLAVE: rAlm[0].CLAVE,
+      DESCRIPCION: rAlm[0].DESCRIPCION,
+      CATEGORIA: rAlm[0].CATEGORIA,
+      UNIDAD: rAlm[0].UNIDAD,
+      ESTADO: rAlm[0].ESTADO || "ACTIVO",
+    });
+  }
+
+  const [rProd] = await conn.query(
+    `SELECT ${qi(pk)} AS producto_id FROM productos WHERE CLAVE=? ORDER BY ${qi(pk)} ASC LIMIT 1`,
+    [claveClean]
+  );
+  return rProd[0]?.producto_id || null;
+}
+
 app.post("/api/solicitudes", authRequired, async (req, res) => {
 try {
-const { usuario_id, tipo_solicitud = "CONSUMIBLES", observaciones = null } = req.body || {};
+const { usuario_id, tipo_solicitud = "CONSUMIBLES", observaciones = null, items = [] } = req.body || {};
 const uid = usuario_id || req.user.id;
 const [u] = await poolRead.query(
 `SELECT u.id, u.username, u.ID_OFICIALIA AS ofi, o.id_localidad AS loc
@@ -1263,12 +1388,49 @@ WHERE u.id=? LIMIT 1`,
 );
 if (!u.length) return httpError(res, 400, "Usuario no vAlido o sin oficialAa/localidad");
 const { ofi, loc } = u[0];
-const [rs] = await poolOps.query(
-`INSERT INTO solicitudes(tipo_solicitud, fecha_solicitud, id_oficialia, id_localidad, usuario_id, status, observaciones)
-VALUES (?, NOW(), ?, ?, ?, 'PENDIENTE', ?)`,
-[tipo_solicitud, ofi, loc, uid, observaciones]
-);
-res.json({ ok: true, solicitud_id: rs.insertId });
+
+const conn = await poolOps.getConnection();
+try {
+  await conn.beginTransaction();
+
+  const [rs] = await conn.query(
+    `INSERT INTO solicitudes(tipo_solicitud, fecha_solicitud, id_oficialia, id_localidad, usuario_id, status, observaciones)
+    VALUES (?, NOW(), ?, ?, ?, 'PENDIENTE', ?)`,
+    [tipo_solicitud, ofi, loc, uid, observaciones]
+  );
+  const solicitudId = rs.insertId;
+
+  const itemsArray = Array.isArray(items) ? items : [];
+  for (const it of itemsArray) {
+    const cantidad = Number(it.cantidad || 0);
+    if (!(cantidad > 0)) continue;
+    const prodId = await resolveProductoIdByClaveOrId(conn, {
+      producto_id: it.producto_id,
+      clave: it.clave
+    });
+    if (!prodId) {
+      throw new Error(`Producto no encontrado para clave: ${it.clave || it.producto_id || 'desconocida'}`);
+    }
+
+    const rawAtendida = Number(it.atendida || 0);
+    const atendida = Number.isFinite(rawAtendida) && rawAtendida > 0 ? rawAtendida : 0;
+    const itemObs = it.observaciones || null;
+
+    await conn.query(
+      `INSERT INTO detalles_solicitud (solicitud_id, producto_id, cantidad, atendida, observaciones)
+       VALUES (?, ?, ?, ?, ?)`,
+      [solicitudId, prodId, cantidad, atendida, itemObs]
+    );
+  }
+
+  await conn.commit();
+  res.json({ ok: true, solicitud_id: solicitudId });
+} catch (err) {
+  await conn.rollback();
+  throw err;
+} finally {
+  conn.release();
+}
 } catch (e) {
 return httpError(res, 400, e.message);
 }
@@ -1383,6 +1545,9 @@ return httpError(res, 400, e.message);
 
 app.patch("/api/solicitudes/:id/detalles/:detalleId", authRequired, async (req, res) => {
 try {
+if (!canManageSolicitudes(req)) {
+return httpError(res, 403, "Solo el Encargado o Administrador puede modificar la cantidad atendida");
+}
 const solicitudId = Number(req.params.id);
 const detalleId = Number(req.params.detalleId);
 if (!Number.isFinite(solicitudId) || !Number.isFinite(detalleId)) {
@@ -1411,6 +1576,9 @@ return httpError(res, 400, e.message);
 
 app.patch("/api/detalles/:id", authRequired, async (req, res) => {
 try {
+if (!canManageSolicitudes(req)) {
+return httpError(res, 403, "Solo el Encargado o Administrador puede modificar la cantidad atendida");
+}
 const detalleId = Number(req.params.id);
 if (!Number.isFinite(detalleId)) return httpError(res, 400, "ID invalido");
 const data = {};
@@ -1456,6 +1624,85 @@ res.json({ ok: true, updated: true, id, status: result.status, restored_qty: res
 if (e.statusCode) return httpError(res, e.statusCode, e.message);
 return httpError(res, 400, e.message);
 }
+});
+
+async function deleteOrDiscardSolicitud(req, res, { isDraftDiscard = false } = {}) {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return httpError(res, 400, "ID invalido");
+
+  const admin = isAdmin(req);
+  const canManage = canManageSolicitudes(req);
+  if (!isDraftDiscard && !admin) {
+    return httpError(res, 403, "Eliminar solo Admin");
+  }
+
+  const conn = await poolOps.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [solRows] = await conn.query(
+      "SELECT id, usuario_id, status FROM solicitudes WHERE id=? LIMIT 1 FOR UPDATE",
+      [id]
+    );
+    if (!solRows.length) {
+      await conn.rollback();
+      return res.json({ ok: true, deleted: false });
+    }
+    const sol = solRows[0];
+
+    if (isDraftDiscard && !canManage && Number(sol.usuario_id) !== Number(req.user?.id)) {
+      await conn.rollback();
+      return httpError(res, 403, "No puedes descartar una solicitud de otro usuario");
+    }
+
+    const pk = await detectProductosPK();
+    const [detRows] = await conn.query(
+      `SELECT ds.id, ds.atendida, p.CLAVE AS clave
+       FROM detalles_solicitud ds
+       LEFT JOIN productos p ON p.${qi(pk)} = ds.producto_id
+       WHERE ds.solicitud_id = ?
+       FOR UPDATE`,
+      [id]
+    );
+
+    const totalAtendida = detRows.reduce((acc, r) => acc + (Number(r.atendida || 0) || 0), 0);
+    if (isDraftDiscard && totalAtendida > 0 && !admin) {
+      await conn.rollback();
+      return httpError(res, 409, "No se puede descartar una solicitud ya surtida");
+    }
+
+    for (const row of detRows) {
+      const atendida = Number(row.atendida || 0);
+      if (atendida > 0 && row.clave) {
+        await applySolicitudStockDeltaForClave(conn, {
+          clave: row.clave,
+          delta: -atendida,
+          responsable: req.user?.username || "web",
+          referencia: `SOL-${id}-DEL`,
+          observaciones: "Eliminacion de solicitud",
+        });
+      }
+    }
+
+    await conn.query("DELETE FROM detalles_solicitud WHERE solicitud_id = ?", [id]);
+    const [delRes] = await conn.query("DELETE FROM solicitudes WHERE id = ?", [id]);
+    await conn.commit();
+    return res.json({ ok: true, deleted: delRes.affectedRows > 0, id });
+  } catch (e) {
+    await conn.rollback();
+    if (e.statusCode) return httpError(res, e.statusCode, e.message);
+    return httpError(res, 400, e.message);
+  } finally {
+    conn.release();
+  }
+}
+
+app.delete("/api/solicitudes/:id", authRequired, async (req, res) => {
+  const isDraft = String(req.query.draft || "") === "1";
+  return deleteOrDiscardSolicitud(req, res, { isDraftDiscard: isDraft });
+});
+
+app.post("/api/solicitudes/:id/discard", authRequired, async (req, res) => {
+  return deleteOrDiscardSolicitud(req, res, { isDraftDiscard: true });
 });
 
 
@@ -1826,6 +2073,25 @@ conn.release();
 }
 
 
+async function getNextAlmacenClave(connOrPool = poolRead) {
+  const [almRows] = await connOrPool.query("SELECT CLAVE FROM almacen_dregcivil WHERE CLAVE IS NOT NULL");
+  let prodRows = [];
+  try {
+    const [pRows] = await connOrPool.query("SELECT CLAVE FROM productos WHERE CLAVE IS NOT NULL");
+    prodRows = pRows;
+  } catch {}
+  let maxNum = 0;
+  for (const r of [...almRows, ...prodRows]) {
+    const c = String(r.CLAVE || "").trim().toUpperCase();
+    const m = c.match(/^CL-(\d+)$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (Number.isFinite(n) && n > maxNum) maxNum = n;
+    }
+  }
+  return `CL-${String(maxNum + 1).padStart(3, "0")}`;
+}
+
 app.get("/api/almacen", authRequired, async (req, res) => {
 try {
 const admin = isAdminDemo(req);
@@ -1849,6 +2115,7 @@ const almStatusCol = await detectAlmacenStatusCol();
 const hasUnidad = await hasAlmacenUnidad();
 const catIsNum = await almCategoriaIsNumeric();
 const meta = await detectCategorias();
+const nextClave = await getNextAlmacenClave(poolRead);
 
 const extraWhere = clave ? " AND a.CLAVE = ?" : "";
 const extraParam = clave ? [clave] : [];
@@ -1880,7 +2147,7 @@ ORDER BY ${orderExpr} ${dirSafe}
 LIMIT ? OFFSET ?`,
 [q, like, ...extraParam, lim, off]
 );
-return res.json({ ok: true, data: rows });
+return res.json({ ok: true, data: rows, next_clave: nextClave });
 } else {
 const cols = `a.ID, a.CLAVE, a.DESCRIPCION, a.CATEGORIA, ${unidadSelect}, a.STOCK, p.minimo AS minimo, ${statusSel}`;
 const [rows] = await poolRead.query(
@@ -1895,7 +2162,7 @@ ORDER BY ${orderExpr} ${dirSafe}
 LIMIT ? OFFSET ?`,
 [q, like, ...extraParam, lim, off]
 );
-return res.json({ ok: true, data: rows });
+return res.json({ ok: true, data: rows, next_clave: nextClave });
 }
 } catch (e) {
 res.status(500).json({ ok: false, error: e.message });
@@ -1914,29 +2181,40 @@ const replace = admin && String(req.query.replace || "") === "1";
 
 const body = req.body || {};
 try {
-const CLAVE = String(body.CLAVE ?? body.clave ?? "").trim();
+let CLAVE = String(body.CLAVE ?? body.clave ?? "").trim().toUpperCase();
 const DESCRIPCION = String(body.DESCRIPCION ?? body.descripcion ?? "").trim();
-const cantNueva = Number(body.STOCK ?? body.stock ?? 0);
+const rawStock = body.STOCK ?? body.stock;
+const cantNueva = Number(rawStock);
+const rawCat = body.CATEGORIA ?? body.categoria;
+const rawUni = String(body.UNIDAD ?? body.unidad ?? "").trim();
 const hasUnidad = await hasAlmacenUnidad();
 const almStatusCol = await detectAlmacenStatusCol();
 
-if (!CLAVE || !DESCRIPCION) return httpError(res, 400, "CLAVE y DESCRIPCION son requeridos");
+if (
+  !DESCRIPCION ||
+  rawCat == null ||
+  String(rawCat).trim() === "" ||
+  !rawUni ||
+  rawStock === undefined ||
+  rawStock === null ||
+  String(rawStock).trim() === "" ||
+  !Number.isFinite(cantNueva) ||
+  cantNueva < 0
+) {
+  return httpError(res, 400, "Falta agregar información: completa todos los campos");
+}
 
 const catIsNum = await almCategoriaIsNumeric();
 let CATEGORIA;
 if (catIsNum) {
-if (body.CATEGORIA != null || body.categoria != null) {
-CATEGORIA = await resolveCategoriaIdOrCreate(body.CATEGORIA ?? body.categoria);
+  CATEGORIA = await resolveCategoriaIdOrCreate(rawCat);
 } else {
-CATEGORIA = null;
-}
-} else {
-let c = String(body.CATEGORIA ?? body.categoria ?? "").trim().toUpperCase();
-if (c.length > 50) c = c.slice(0, 50);
-CATEGORIA = c || null;
+  let c = String(rawCat).trim().toUpperCase();
+  if (c.length > 50) c = c.slice(0, 50);
+  CATEGORIA = c || null;
 }
 
-const UNIDAD = hasUnidad ? body.UNIDAD ?? body.unidad ?? null : body.unidad ?? null;
+const UNIDAD = rawUni.toUpperCase().slice(0, 20);
 const STATUS_IN = admin
 ? String(body.status ?? body.STATUS ?? body.estado ?? body.ESTADO ?? "ACTIVO").toUpperCase()
 : "ACTIVO";
@@ -1944,6 +2222,15 @@ const STATUS_IN = admin
 const conn = await poolOps.getConnection();
 try {
 await conn.beginTransaction();
+
+if (!CLAVE) {
+  CLAVE = await getNextAlmacenClave(conn);
+} else if (!replace) {
+  const [dupCheck] = await conn.query("SELECT ID FROM almacen_dregcivil WHERE CLAVE=? LIMIT 1", [CLAVE]);
+  if (dupCheck.length) {
+    CLAVE = await getNextAlmacenClave(conn);
+  }
+}
 
 const [ex] = await conn.query(`SELECT ID, STOCK FROM almacen_dregcivil WHERE CLAVE=? LIMIT 1`, [CLAVE]);
 
@@ -2009,7 +2296,7 @@ observaciones: body.observaciones || null,
 }
 
 await conn.commit();
-res.json({ ok: true, id: idAlm });
+res.json({ ok: true, id: idAlm, clave: CLAVE });
 } catch (e) {
 await conn.rollback();
 if (e.statusCode) return httpError(res, e.statusCode, e.message);
@@ -2573,7 +2860,7 @@ return httpError(res, 500, e.message);
 });
 
 app.get("/api/ui-config", authRequired, (req, res) => {
-  const rol = req.user?.rol || 'USUARIO';
+  const rol = normalizeRol(req.user?.rol, req.user?.username);
   const admin = rol === 'ADMIN';
   const encargado = rol === 'ENCARGADO';
 
@@ -2886,7 +3173,17 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
 });
 
 const STATIC_DIR = path.join(__dirname, "public");
-app.use(express.static(STATIC_DIR));
+app.use(
+  express.static(STATIC_DIR, {
+    etag: false,
+    lastModified: false,
+    setHeaders: (res) => {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+    },
+  })
+);
 app.get("/__ping", (req, res) => res.send("OK"));
 
 const DEFAULT_PORT = Number(process.env.PORT) || 8080;
