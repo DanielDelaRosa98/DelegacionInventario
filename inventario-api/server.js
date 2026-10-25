@@ -610,17 +610,21 @@ const like = `%${q}%`;
 const st = (status || "").trim();
 const stCanon = canon(st);
 const filterCancel = stCanon === "CANCELADA" || stCanon === "CANCELADO";
-const canAllUsers = canManageSolicitudes(req);
+const userRole = normalizeRol(req.user?.rol, req.user?.username);
 const uidRaw = String(usuario_id || "").trim();
-const uidFilter = canAllUsers
-? (uidRaw ? Number(uidRaw) : null)
-: Number(req.user?.id || 0) || null;
+const uidFilter = uidRaw ? Number(uidRaw) : null;
 const useUidFilter = Number.isFinite(uidFilter) && uidFilter > 0;
+
 const ofiRaw = String(oficialia_id || "").trim();
-const ofiFilter = canAllUsers
-? (ofiRaw ? Number(ofiRaw) : null)
-: Number(req.user?.id_oficialia || 0) || null;
+const ofiFilter = ofiRaw ? Number(ofiRaw) : null;
 const useOfiFilter = Number.isFinite(ofiFilter) && ofiFilter > 0;
+
+let roleWhere = "";
+if (userRole === "ENCARGADO") {
+  roleWhere = "AND (id_oficialia IS NULL OR id_oficialia != 30030000)";
+} else if (userRole === "USUARIO") {
+  roleWhere = "AND (id_oficialia IS NULL OR (id_oficialia != 30030000 AND id_oficialia != 30030008))";
+}
 
 const sqlVista = `
 SELECT id, fecha_solicitud, tipo_solicitud, status,
@@ -634,6 +638,7 @@ username, nombre_usuario, id_oficialia, id_localidad
 AND (? = 0 OR status IN (?, ?))
 AND (? = 0 OR usuario_id = ?)
 AND (? = 0 OR id_oficialia = ?)
+${roleWhere}
 ORDER BY id DESC
 LIMIT ? OFFSET ?`;
 try {
@@ -811,28 +816,42 @@ app.get("/api/logs/accesos", authRequired, async (req, res) => {
 
 app.get("/api/oficialias", authRequired, async (req, res) => {
 try {
-const canAllUsers = canManageSolicitudes(req);
 const nameCol = await detectOficialiaNameCol();
 if (!nameCol) return res.json({ ok: true, data: [] });
-if (canAllUsers) {
 const [rows] = await poolRead.query(
-`SELECT id, ${qi(nameCol)} AS nombre
+`SELECT id, ${qi(nameCol)} AS nombre, oficial_reponsable
 FROM oficialias
+WHERE activo IS NULL OR activo = 1 OR activo = b'1'
 ORDER BY ${qi(nameCol)} ASC
 LIMIT 500`
 );
-return res.json({ ok: true, data: rows });
+
+const userRole = normalizeRol(req.user?.rol, req.user?.username);
+let filtered = rows;
+
+if (userRole === 'ADMIN') {
+  // admin tiene acceso a todas las áreas
+  filtered = rows;
+} else if (userRole === 'ENCARGADO') {
+  // encargado no puede ver el área/rol de admin (Administrador)
+  filtered = rows.filter(r => {
+    const id = Number(r.id || 0);
+    const name = String(r.nombre || '').trim().toLowerCase();
+    return id !== 30030000 && !name.includes('administrador') && !name.includes('direccion estatal');
+  });
+} else {
+  // departamento (USUARIO): ve todas las áreas excepto admin (Administrador) y encargado (Encargado de Inventario)
+  // Recursos Materiales (Jorge Luis Patron Murrillo) está completamente habilitado
+  filtered = rows.filter(r => {
+    const id = Number(r.id || 0);
+    const name = String(r.nombre || '').trim().toLowerCase();
+    const isAdminOfi = id === 30030000 || name.includes('administrador') || name.includes('direccion estatal');
+    const isEncargadoOfi = id === 30030008 || name.includes('encargado de inventario');
+    return !isAdminOfi && !isEncargadoOfi;
+  });
 }
-const ownOfi = Number(req.user?.id_oficialia || 0);
-if (!Number.isFinite(ownOfi) || ownOfi <= 0) return res.json({ ok: true, data: [] });
-const [rows] = await poolRead.query(
-`SELECT id, ${qi(nameCol)} AS nombre
-FROM oficialias
-WHERE id = ?
-LIMIT 1`,
-[ownOfi]
-);
-return res.json({ ok: true, data: rows });
+
+return res.json({ ok: true, data: filtered });
 } catch (e) {
 return httpError(res, 500, e.message);
 }
@@ -1248,10 +1267,10 @@ if (!row || requireFallback) {
 const nameCol = await detectOficialiaNameCol();
 const [r2] = await poolRead.query(
 `SELECT s.*,
+s.id_oficialia AS id_oficialia,
 u.username,
-u.ID_OFICIALIA AS id_oficialia,
 u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO,
-${nameCol ? `(SELECT ${qi(nameCol)} FROM oficialias WHERE id = u.ID_OFICIALIA LIMIT 1)` : `NULL`} AS oficialia_nombre,
+${nameCol ? `(SELECT ${qi(nameCol)} FROM oficialias WHERE id = s.id_oficialia LIMIT 1)` : `NULL`} AS oficialia_nombre,
 CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_usuario
 FROM solicitudes s
 LEFT JOIN usuario u ON u.id = s.usuario_id
@@ -1378,16 +1397,71 @@ async function resolveProductoIdByClaveOrId(conn, { producto_id = null, clave = 
 
 app.post("/api/solicitudes", authRequired, async (req, res) => {
 try {
-const { usuario_id, tipo_solicitud = "CONSUMIBLES", observaciones = null, items = [] } = req.body || {};
-const uid = usuario_id || req.user.id;
-const [u] = await poolRead.query(
-`SELECT u.id, u.username, u.ID_OFICIALIA AS ofi, o.id_localidad AS loc
-FROM usuario u JOIN oficialias o ON o.id=u.ID_OFICIALIA
-WHERE u.id=? LIMIT 1`,
-[uid]
-);
-if (!u.length) return httpError(res, 400, "Usuario no vAlido o sin oficialAa/localidad");
-const { ofi, loc } = u[0];
+const { usuario_id, id_oficialia, tipo_solicitud = "CONSUMIBLES", observaciones = null, items = [] } = req.body || {};
+
+let ofi = Number(id_oficialia || 0) || null;
+let loc = 0;
+let uid = Number(usuario_id || 0) || req.user.id;
+
+if (!ofi && usuario_id && Number(usuario_id) >= 1000) {
+  ofi = Number(usuario_id);
+  uid = req.user.id;
+}
+
+if (ofi) {
+  const [o] = await poolRead.query(
+    `SELECT id, id_localidad FROM oficialias WHERE id=? LIMIT 1`,
+    [ofi]
+  );
+  if (o.length) {
+    ofi = o[0].id;
+    loc = o[0].id_localidad || 0;
+  } else {
+    ofi = null;
+  }
+}
+
+if (!ofi) {
+  const [u] = await poolRead.query(
+    `SELECT u.id, u.username, u.ID_OFICIALIA AS ofi, o.id_localidad AS loc
+     FROM usuario u LEFT JOIN oficialias o ON o.id=u.ID_OFICIALIA
+     WHERE u.id=? LIMIT 1`,
+    [uid]
+  );
+  if (u.length && u[0].ofi) {
+    ofi = u[0].ofi;
+    loc = u[0].loc || 0;
+  }
+}
+
+if (!ofi) {
+  const [u] = await poolRead.query(
+    `SELECT u.id, u.ID_OFICIALIA AS ofi, o.id_localidad AS loc
+     FROM usuario u LEFT JOIN oficialias o ON o.id=u.ID_OFICIALIA
+     WHERE u.id=? LIMIT 1`,
+    [req.user.id]
+  );
+  if (u.length && u[0].ofi) {
+    ofi = u[0].ofi;
+    loc = u[0].loc || 0;
+  } else {
+    const [firstOfi] = await poolRead.query(`SELECT id, id_localidad FROM oficialias LIMIT 1`);
+    if (firstOfi.length) {
+      ofi = firstOfi[0].id;
+      loc = firstOfi[0].id_localidad || 0;
+    } else {
+      return httpError(res, 400, "Usuario no válido o sin oficialía/localidad");
+    }
+  }
+}
+
+const userRole = normalizeRol(req.user?.rol, req.user?.username);
+if (userRole !== 'ADMIN' && (ofi === 30030000 || String(ofi) === '30030000')) {
+  return httpError(res, 403, "No tienes permiso para solicitar materiales a nombre de Administración");
+}
+if (userRole === 'USUARIO' && (ofi === 30030008 || String(ofi) === '30030008')) {
+  return httpError(res, 403, "No tienes permiso para solicitar materiales a nombre de Encargado de Inventario");
+}
 
 const conn = await poolOps.getConnection();
 try {
@@ -2899,15 +2973,16 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
     {
       const deptoCol = await detectUsuarioDepartamentoCol();
       const [r] = await poolRead.query(
-        `SELECT s.*, u.username,
-          u.ID_OFICIALIA AS id_oficialia,
+        `SELECT s.*,
+          s.id_oficialia AS id_oficialia,
+          u.username,
           ${deptoCol ? `u.${qi(deptoCol)} AS departamento,` : `NULL AS departamento,`}
           CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_usuario,
-          o.nombre AS oficialia_nombre,
-          o.oficial_reponsable AS encargado_area
+          COALESCE(o.nombre, 'Sin Área') AS oficialia_nombre,
+          COALESCE(o.oficial_reponsable, '') AS encargado_area
         FROM solicitudes s
+        LEFT JOIN oficialias o ON o.id = s.id_oficialia
         LEFT JOIN usuario u ON u.id = s.usuario_id
-        LEFT JOIN oficialias o ON o.id = COALESCE(s.id_oficialia, u.ID_OFICIALIA)
         WHERE s.id = ? LIMIT 1`,
         [id]
       );
@@ -2971,14 +3046,14 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
 
     // Datos para la firma "AUTORIZA:"
     const autorizaCargo = process.env.VALE_AUTORIZA_CARGO || "Delegada de programas en BCS";
-    const autorizaNombre = process.env.VALE_AUTORIZA_NOMBRE || "Yanssen Weichselbaum Calderon";
+    const autorizaNombre = process.env.VALE_AUTORIZA_NOMBRE || "Diphna Yanssen Weichselbaum Calderon";
 
     // Función para dibujar el encabezado institucional
     function drawValeHeader() {
       const logoPath = path.join(__dirname, "public", "logo.png");
       if (fs.existsSync(logoPath)) {
         try {
-          doc.image(logoPath, leftX, 32, { fit: [130, 50], align: "left", valign: "top" });
+          doc.image(logoPath, leftX, 18, { fit: [140, 82], align: "left", valign: "top" });
         } catch {}
       }
 
@@ -3165,6 +3240,577 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
     doc.text(`Folio Solicitud: #${id}`, leftX, footerY, { width: 150, align: "left" });
     doc.text("Hoja 1 De 1", leftX, footerY, { width: tableWidth, align: "center" });
     doc.text("Delegación de BIENESTAR en Baja California Sur", leftX, footerY + 10, { width: tableWidth, align: "center" });
+
+    doc.end();
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
+// ============================================================================
+// FASE B: CONTROL DE INVENTARIO REGIONAL (Módulo Aislado)
+// ============================================================================
+
+app.get("/api/regiones", authRequired, async (req, res) => {
+  try {
+    const [rows] = await poolRead.query(
+      `SELECT id, clave, nombre, responsable_regional, activo, created_at
+       FROM regiones
+       WHERE activo IS NULL OR activo = 1
+       ORDER BY id ASC`
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
+app.get("/api/oficinas", authRequired, async (req, res) => {
+  try {
+    const regionId = Number(req.query?.region_id || 0);
+    const hasRegion = Number.isFinite(regionId) && regionId > 0;
+    const [rows] = await poolRead.query(
+      `SELECT o.id, o.region_id, r.nombre AS region_nombre, r.clave AS region_clave,
+              o.municipio, o.nombre, o.responsable_oficina, o.activo, o.created_at
+       FROM oficinas_regionales o
+       LEFT JOIN regiones r ON r.id = o.region_id
+       WHERE (o.activo IS NULL OR o.activo = 1)
+         AND (? = 0 OR o.region_id = ?)
+       ORDER BY o.region_id ASC, o.id ASC`,
+      [hasRegion ? 1 : 0, hasRegion ? regionId : 0]
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
+app.get("/api/rubros", authRequired, async (req, res) => {
+  try {
+    const [rows] = await poolRead.query(
+      `SELECT id, codigo, nombre_rubro, encargado_nombre, encargado_cargo, activo
+       FROM rubros_inventario
+       WHERE activo IS NULL OR activo = 1
+       ORDER BY id ASC`
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
+async function queryRegionalInventory({ region_id, oficina_id, rubro_id }) {
+  const regionId = Number(region_id || 0);
+  const oficinaId = Number(oficina_id || 0);
+  const rubroId = Number(rubro_id || 0);
+
+  const hasRegion = Number.isFinite(regionId) && regionId > 0;
+  const hasOficina = Number.isFinite(oficinaId) && oficinaId > 0;
+  const hasRubro = Number.isFinite(rubroId) && rubroId > 0;
+
+  // Si region_id se proporciona pero oficina_id es "Todas" (vacío): agregar el inventario de
+  // todas las oficinas de la región. SUM(cantidad_propia) agrupando por
+  // clave_bien, descripcion, marca_modelo, estatus_uso
+  // (ej. 10 sillas Guaymitas + 10 Cangrejos + 20 PEC Caribe = 40 sillas en Los Cabos).
+  if (!hasOficina && hasRegion) {
+    const [rows] = await poolRead.query(
+      `SELECT
+         MIN(io.id) AS id,
+         io.clave_bien,
+         io.descripcion,
+         io.marca_modelo,
+         GROUP_CONCAT(DISTINCT NULLIF(TRIM(io.numero_serie_placas), '') SEPARATOR ', ') AS numero_serie_placas,
+         MAX(io.unidad) AS unidad,
+         SUM(io.cantidad_propia) AS cantidad_propia,
+         SUM(io.cantidad_prestada_recibida) AS cantidad_prestada_recibida,
+         SUM(io.cantidad_prestada_enviada) AS cantidad_prestada_enviada,
+         MAX(io.estado_fisico) AS estado_fisico,
+         io.estatus_uso,
+         COUNT(DISTINCT io.oficina_id) AS total_oficinas,
+         GROUP_CONCAT(DISTINCT NULLIF(TRIM(io.observaciones), '') SEPARATOR ' | ') AS observaciones,
+         MAX(r.id) AS region_id,
+         MAX(r.nombre) AS region_nombre,
+         MAX(r.responsable_regional) AS responsable_regional,
+         NULL AS oficina_id,
+         GROUP_CONCAT(DISTINCT o.nombre SEPARATOR ', ') AS oficina_nombre,
+         MAX(io.rubro_id) AS rubro_id,
+         MAX(ru.nombre_rubro) AS nombre_rubro,
+         MAX(ru.encargado_nombre) AS encargado_nombre,
+         MAX(ru.encargado_cargo) AS encargado_cargo
+       FROM inventario_oficina io
+       INNER JOIN oficinas_regionales o ON o.id = io.oficina_id
+       INNER JOIN regiones r ON r.id = o.region_id
+       LEFT JOIN rubros_inventario ru ON ru.id = io.rubro_id
+       WHERE o.region_id = ?
+         AND (? = 0 OR io.rubro_id = ?)
+       GROUP BY io.clave_bien, io.descripcion, io.marca_modelo, io.estatus_uso
+       ORDER BY io.clave_bien ASC, io.descripcion ASC`,
+      [regionId, hasRubro ? 1 : 0, hasRubro ? rubroId : 0]
+    );
+    return { grouped: true, rows };
+  }
+
+  const [rows] = await poolRead.query(
+    `SELECT
+       io.id,
+       io.oficina_id,
+       o.nombre AS oficina_nombre,
+       o.municipio,
+       r.id AS region_id,
+       r.nombre AS region_nombre,
+       r.responsable_regional,
+       io.rubro_id,
+       ru.codigo AS rubro_codigo,
+       ru.nombre_rubro,
+       ru.encargado_nombre,
+       ru.encargado_cargo,
+       io.clave_bien,
+       io.descripcion,
+       io.marca_modelo,
+       io.numero_serie_placas,
+       io.unidad,
+       io.cantidad_propia,
+       io.cantidad_prestada_recibida,
+       io.cantidad_prestada_enviada,
+       io.estado_fisico,
+       io.estatus_uso,
+       io.observaciones,
+       io.updated_at
+     FROM inventario_oficina io
+     INNER JOIN oficinas_regionales o ON o.id = io.oficina_id
+     INNER JOIN regiones r ON r.id = o.region_id
+     LEFT JOIN rubros_inventario ru ON ru.id = io.rubro_id
+     WHERE (? = 0 OR o.region_id = ?)
+       AND (? = 0 OR io.oficina_id = ?)
+       AND (? = 0 OR io.rubro_id = ?)
+     ORDER BY r.id ASC, o.id ASC, io.clave_bien ASC`,
+    [
+      hasRegion ? 1 : 0, hasRegion ? regionId : 0,
+      hasOficina ? 1 : 0, hasOficina ? oficinaId : 0,
+      hasRubro ? 1 : 0, hasRubro ? rubroId : 0,
+    ]
+  );
+  return { grouped: false, rows };
+}
+
+app.get("/api/inventario-regional", authRequired, async (req, res) => {
+  try {
+    const { region_id, oficina_id, rubro_id } = req.query || {};
+    const { grouped, rows } = await queryRegionalInventory({ region_id, oficina_id, rubro_id });
+    return res.json({ ok: true, grouped, data: rows });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
+// Alta de un activo en el inventario de una oficina regional
+app.post("/api/inventario-regional", authRequired, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const oficinaId = Number(b.oficina_id || 0);
+    const rubroId = Number(b.rubro_id || 0);
+    const claveBien = String(b.clave_bien ?? "").trim();
+    const descripcion = String(b.descripcion ?? "").trim();
+    const marcaModelo = String(b.marca_modelo ?? "").trim() || null;
+    const seriePlacas = String(b.numero_serie_placas ?? "").trim() || null;
+    const cantidadRaw = b.cantidad_propia ?? b.cantidad;
+    const cantidad = cantidadRaw === undefined || cantidadRaw === null || cantidadRaw === ""
+      ? 1
+      : Number(cantidadRaw);
+    const estadoFisico = String(b.estado_fisico || "BUENO").trim().toUpperCase();
+
+    if (!Number.isInteger(oficinaId) || oficinaId <= 0) return httpError(res, 400, "Oficina requerida");
+    if (!Number.isInteger(rubroId) || rubroId <= 0) return httpError(res, 400, "Rubro requerido");
+    if (!claveBien) return httpError(res, 400, "Clave del bien requerida");
+    if (!descripcion) return httpError(res, 400, "Descripción requerida");
+    if (!Number.isInteger(cantidad) || cantidad < 1) return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 1");
+    if (!["BUENO", "REGULAR", "MALO"].includes(estadoFisico)) return httpError(res, 400, "Estado físico inválido (BUENO, REGULAR o MALO)");
+    if (claveBien.length > 60) return httpError(res, 400, "La clave del bien excede 60 caracteres");
+    if (descripcion.length > 255) return httpError(res, 400, "La descripción excede 255 caracteres");
+    if (marcaModelo && marcaModelo.length > 150) return httpError(res, 400, "Marca / Modelo excede 150 caracteres");
+    if (seriePlacas && seriePlacas.length > 100) return httpError(res, 400, "Serie / Placas excede 100 caracteres");
+
+    const [[ofi]] = await poolRead.query(`SELECT id FROM oficinas_regionales WHERE id = ? LIMIT 1`, [oficinaId]);
+    if (!ofi) return httpError(res, 400, "La oficina seleccionada no existe");
+    const [[rub]] = await poolRead.query(`SELECT id FROM rubros_inventario WHERE id = ? LIMIT 1`, [rubroId]);
+    if (!rub) return httpError(res, 400, "El rubro seleccionado no existe");
+
+    const [result] = await poolOps.query(
+      `INSERT INTO inventario_oficina
+         (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas, cantidad_propia, estado_fisico)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [oficinaId, rubroId, claveBien, descripcion, marcaModelo, seriePlacas, cantidad, estadoFisico]
+    );
+
+    return res.status(201).json({ ok: true, id: result.insertId });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
+app.post("/api/inventario-regional/formatos", authRequired, async (req, res) => {
+  try {
+    const body = req.body || {};
+    let regionId = Number(body.region_id ?? req.query?.region_id ?? 0) || null;
+    const oficinaId = Number(body.oficina_id ?? req.query?.oficina_id ?? 0) || null;
+    let rubroId = Number(body.rubro_id ?? req.query?.rubro_id ?? 0) || null;
+    const observaciones = body.observaciones ? String(body.observaciones).trim() : null;
+
+    // Validación estricta: no se permite generar el formato general (todos los filtros en "Todos")
+    if (!regionId && !oficinaId && !rubroId) {
+      return res.status(400).json({ error: "Para generar el formato PDF, debes filtrar por al menos una Región o Rubro." });
+    }
+
+    // 1. Obtener datos de Oficina si fue seleccionada
+    let oficinaRow = null;
+    if (oficinaId) {
+      const [ofRows] = await poolRead.query(
+        `SELECT id, region_id, municipio, nombre, responsable_oficina
+         FROM oficinas_regionales WHERE id = ? LIMIT 1`,
+        [oficinaId]
+      );
+      if (ofRows.length) {
+        oficinaRow = ofRows[0];
+        if (!regionId) regionId = Number(oficinaRow.region_id) || null;
+      }
+    }
+
+    // 2. Obtener datos de Región (para firma "Recibe")
+    let regionRow = null;
+    if (regionId) {
+      const [regRows] = await poolRead.query(
+        `SELECT id, clave, nombre, responsable_regional
+         FROM regiones WHERE id = ? LIMIT 1`,
+        [regionId]
+      );
+      if (regRows.length) regionRow = regRows[0];
+    }
+
+    // 3. Obtener datos de Rubro (para firma "Entrega")
+    let rubroRow = null;
+    if (rubroId) {
+      const [rubRows] = await poolRead.query(
+        `SELECT id, codigo, nombre_rubro, encargado_nombre, encargado_cargo
+         FROM rubros_inventario WHERE id = ? LIMIT 1`,
+        [rubroId]
+      );
+      if (rubRows.length) rubroRow = rubRows[0];
+    }
+
+    // 4. Obtener los registros del inventario según el filtro actual
+    const { grouped, rows: items } = await queryRegionalInventory({
+      region_id: regionId,
+      oficina_id: oficinaId,
+      rubro_id: rubroId,
+    });
+
+    // 5. Resolver los 4 bloques de firma dinámicos
+    // Firma 1: Entrega (Rubro / Encargado)
+    const firmaEncargadoNombre = rubroRow?.encargado_nombre || "TODOS LOS RUBROS / POR DEFINIR";
+    const firmaEncargadoCargo = rubroRow?.encargado_cargo || "Encargado de Rubro de Inventario";
+
+    // Firma 2: Autoriza (Delegada)
+    const firmaDelegadaNombre = "Diphna Yanssen Weichselbaum Calderon";
+    const firmaDelegadaCargo = "Delegada de Programas para el Desarrollo en BCS";
+
+    // Firma 3: Valida (Aprueba)
+    const firmaApruebaNombre = "Jorge Patron Murillo";
+    const firmaApruebaCargo = "Aprueba";
+
+    // Firma 4: Recibe (Responsable Regional según region_id)
+    const firmaRecibeNombre = regionRow?.responsable_regional || "POR CONFIRMAR";
+    const firmaRecibeCargo = regionRow
+      ? `Responsable Regional (${regionRow.nombre})`
+      : "Responsable Regional / Oficina";
+
+    // 6. Asegurar IDs válidos para las llaves foráneas NOT NULL de formatos_inventario_regional
+    let dbRegionId = regionRow?.id || (items[0]?.region_id ? Number(items[0].region_id) : null);
+    if (!dbRegionId) {
+      const [rFirst] = await poolRead.query(`SELECT id FROM regiones ORDER BY id ASC LIMIT 1`);
+      dbRegionId = rFirst[0]?.id || 1;
+    }
+
+    let dbRubroId = rubroRow?.id || (items[0]?.rubro_id ? Number(items[0].rubro_id) : null);
+    if (!dbRubroId) {
+      const [ruFirst] = await poolRead.query(`SELECT id FROM rubros_inventario ORDER BY id ASC LIMIT 1`);
+      dbRubroId = ruFirst[0]?.id || 1;
+    }
+
+    const now = new Date();
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const datePart = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}`;
+    const timePart = `${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
+    const randPart = String(Math.floor(100 + Math.random() * 900));
+    const folio = `REG-${datePart}-${timePart}-${randPart}`;
+
+    const regionLabel = regionRow ? regionRow.nombre : "Todas las Regiones";
+    const oficinaLabel = oficinaRow
+      ? `${oficinaRow.nombre} (${oficinaRow.municipio})`
+      : (regionRow ? "Concentrado Regional (Todas las oficinas)" : "Todas las Oficinas");
+    const rubroLabel = rubroRow ? rubroRow.nombre_rubro : "Todos los Rubros";
+
+    const tituloFormato = `CONTROL DE INVENTARIO REGIONAL - ${regionLabel.toUpperCase()}`.slice(0, 200);
+    const creadoPor = String(req.user?.username || req.user?.nombre || req.user?.id || "sistema").slice(0, 100);
+
+    const snapshotPayload = {
+      folio,
+      generated_at: now.toISOString(),
+      filters: {
+        region_id: regionId,
+        oficina_id: oficinaId,
+        rubro_id: rubroId,
+        grouped,
+      },
+      region: regionRow,
+      oficina: oficinaRow,
+      rubro: rubroRow,
+      firmas: {
+        entrega: { nombre: firmaEncargadoNombre, cargo: firmaEncargadoCargo },
+        vobo: { nombre: firmaDelegadaNombre, cargo: firmaDelegadaCargo },
+        autoriza: { nombre: firmaApruebaNombre, cargo: firmaApruebaCargo },
+        recibe: { nombre: firmaRecibeNombre, cargo: firmaRecibeCargo },
+      },
+      total_items: items.length,
+      items,
+    };
+
+    // Guardar snapshot en formatos_inventario_regional
+    await poolOps.query(
+      `INSERT INTO formatos_inventario_regional
+        (folio, region_id, oficina_id, rubro_id, titulo_formato,
+         firma_encargado_nombre, firma_encargado_cargo,
+         firma_delegada_nombre, firma_delegada_cargo,
+         firma_aprueba_nombre, firma_aprueba_cargo,
+         firma_recibe_nombre, firma_recibe_cargo,
+         snapshot_json, observaciones, creado_por)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        folio,
+        dbRegionId,
+        oficinaRow ? oficinaRow.id : null,
+        dbRubroId,
+        tituloFormato,
+        firmaEncargadoNombre,
+        firmaEncargadoCargo,
+        firmaDelegadaNombre,
+        firmaDelegadaCargo,
+        firmaApruebaNombre,
+        firmaApruebaCargo,
+        firmaRecibeNombre,
+        firmaRecibeCargo,
+        JSON.stringify(snapshotPayload),
+        observaciones,
+        creadoPor,
+      ]
+    );
+
+    // 7. Generar PDF con PDFKit
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="formato_inventario_regional_${folio}.pdf"`);
+
+    const doc = new PDFDocument({ size: "LETTER", margin: 36 });
+    doc.pipe(res);
+
+    const pageWidth = doc.page.width;   // 612 pt
+    const pageHeight = doc.page.height; // 792 pt
+    const leftX = 36;
+    const rightLimit = pageWidth - 36;  // 576 pt
+    const tableWidth = rightLimit - leftX; // 540 pt
+
+    const fechaTexto = `${pad2(now.getDate())}/${pad2(now.getMonth() + 1)}/${now.getFullYear()}`;
+
+    function drawRegionalHeader() {
+      const logoPath = path.join(__dirname, "public", "logo.png");
+      if (fs.existsSync(logoPath)) {
+        try {
+          doc.image(logoPath, leftX, 18, { fit: [140, 82], align: "left", valign: "top" });
+        } catch {}
+      }
+
+      doc.fillColor("#000000").font("Helvetica-Bold").fontSize(11)
+        .text("SECRETARÍA DE BIENESTAR", leftX, 32, { width: tableWidth, align: "center" });
+      doc.font("Helvetica-Bold").fontSize(10)
+        .text("DELEGACIÓN FEDERAL BAJA CALIFORNIA SUR", leftX, 47, { width: tableWidth, align: "center" });
+      doc.font("Helvetica-Bold").fontSize(10.5)
+        .text("FORMATO DE CONTROL Y RESGUARDO DE INVENTARIO REGIONAL", leftX, 64, { width: tableWidth, align: "center" });
+
+      // Bloque de datos de filtro / encabezado
+      const metaY1 = 104;
+      const metaY2 = 120;
+
+      doc.font("Helvetica-Bold").fontSize(8.5).text("REGIÓN:", leftX, metaY1);
+      doc.font("Helvetica").fontSize(8.5).text(regionLabel, leftX + 42, metaY1, { width: 160, lineBreak: false });
+      doc.moveTo(leftX + 40, metaY1 + 10).lineTo(leftX + 200, metaY1 + 10).lineWidth(0.5).strokeColor("#000000").stroke();
+
+      doc.font("Helvetica-Bold").fontSize(8.5).text("OFICINA:", leftX + 210, metaY1);
+      doc.font("Helvetica").fontSize(8.5).text(oficinaLabel, leftX + 254, metaY1, { width: 170, lineBreak: false });
+      doc.moveTo(leftX + 252, metaY1 + 10).lineTo(leftX + 425, metaY1 + 10).lineWidth(0.5).strokeColor("#000000").stroke();
+
+      doc.font("Helvetica-Bold").fontSize(8.5).text("FECHA:", leftX + 435, metaY1);
+      doc.font("Helvetica").fontSize(8.5).text(fechaTexto, leftX + 472, metaY1, { width: 68, align: "center" });
+      doc.moveTo(leftX + 470, metaY1 + 10).lineTo(rightLimit, metaY1 + 10).lineWidth(0.5).strokeColor("#000000").stroke();
+
+      doc.font("Helvetica-Bold").fontSize(8.5).text("RUBRO:", leftX, metaY2);
+      doc.font("Helvetica").fontSize(8.5).text(rubroLabel, leftX + 42, metaY2, { width: 280, lineBreak: false });
+      doc.moveTo(leftX + 40, metaY2 + 10).lineTo(leftX + 325, metaY2 + 10).lineWidth(0.5).strokeColor("#000000").stroke();
+
+      doc.font("Helvetica-Bold").fontSize(8.5).text("FOLIO:", leftX + 335, metaY2);
+      doc.font("Helvetica").fontSize(8).text(folio, leftX + 370, metaY2, { width: 168, align: "center", lineBreak: false });
+      doc.moveTo(leftX + 368, metaY2 + 10).lineTo(rightLimit, metaY2 + 10).lineWidth(0.5).strokeColor("#000000").stroke();
+    }
+
+    // Columnas de la tabla (Total = 540 pt)
+    // La columna "SERIE / PLACAS" solo aplica al rubro PARQUE_VEHICULAR (placas/series de vehículos).
+    // Para cualquier otro rubro (Mobiliario, Archivo, etc.) se omite por completo y su ancho
+    // se asigna a la descripción del artículo.
+    const showSerie = String(rubroRow?.codigo || "").trim().toUpperCase() === "PARQUE_VEHICULAR";
+    const colSerieW = 70;
+    const regionalCols = [
+      { key: "no",    label: "No.",            w: 24,                               align: "center", wrap: false },
+      { key: "clave", label: "CLAVE BIEN",     w: 64,                               align: "left",   wrap: true  },
+      { key: "desc",  label: "DESCRIPCIÓN",    w: showSerie ? 148 : 148 + colSerieW, align: "left",   wrap: true  },
+      { key: "marca", label: "MARCA / MODELO", w: 74,                               align: "left",   wrap: true  },
+      ...(showSerie
+        ? [{ key: "serie", label: "SERIE / PLACAS", w: colSerieW, align: "left", wrap: true }]
+        : []),
+      { key: "cant",  label: "CANT.",          w: 36,                               align: "center", wrap: false },
+      { key: "est",   label: "ESTATUS",        w: 50,                               align: "center", wrap: false },
+      { key: "obs",   label: "OBSERVACIONES",  w: 74,                               align: "left",   wrap: true  },
+    ];
+    {
+      let cx = leftX;
+      regionalCols.forEach((c) => { c.x = cx; cx += c.w; });
+    }
+    const colDividersX = regionalCols.slice(1).map((c) => c.x);
+
+    function drawRegionalTableHeader(topY) {
+      const h = 22;
+      doc.save();
+      doc.lineWidth(0.8).strokeColor("#000000").fillColor("#f3f4f6");
+      doc.rect(leftX, topY, tableWidth, h).fillAndStroke("#f3f4f6", "#000000");
+      colDividersX.forEach((cx) => {
+        doc.moveTo(cx, topY).lineTo(cx, topY + h).stroke();
+      });
+      doc.restore();
+
+      doc.fillColor("#000000").font("Helvetica-Bold").fontSize(7.2);
+      regionalCols.forEach((c) => {
+        doc.text(c.label, c.x + 2, topY + 7, { width: c.w - 4, align: "center" });
+      });
+
+      return topY + h;
+    }
+
+    drawRegionalHeader();
+    let currentY = drawRegionalTableHeader(140);
+
+    const minRows = 15;
+    const totalRows = Math.max(items.length, minRows);
+    const defaultRowH = 18;
+
+    for (let i = 0; i < totalRows; i++) {
+      const item = items[i] || null;
+      const cellText = {
+        no: item ? String(i + 1) : "",
+        clave: item ? String(item.clave_bien || "").trim() : "",
+        desc: item ? String(item.descripcion || "").trim() : "",
+        marca: item ? String(item.marca_modelo || "").trim() : "",
+        serie: item ? String(item.numero_serie_placas || "").trim() : "",
+        cant: item && item.cantidad_propia != null ? String(item.cantidad_propia) : "",
+        est: item ? String(item.estatus_uso || "").trim() : "",
+        obs: item ? String(item.observaciones || "").trim() : "",
+      };
+
+      doc.font("Helvetica").fontSize(7.5);
+      let maxTextH = 10;
+      regionalCols.forEach((c) => {
+        const t = cellText[c.key];
+        if (c.wrap && t) maxTextH = Math.max(maxTextH, doc.heightOfString(t, { width: c.w - 6 }));
+      });
+      const rowH = Math.max(defaultRowH, maxTextH + 6);
+
+      if (currentY + rowH > pageHeight - 165) {
+        doc.addPage();
+        drawRegionalHeader();
+        currentY = drawRegionalTableHeader(140);
+      }
+
+      doc.save();
+      doc.lineWidth(0.5).strokeColor("#000000");
+      doc.rect(leftX, currentY, tableWidth, rowH).stroke();
+      colDividersX.forEach((cx) => {
+        doc.moveTo(cx, currentY).lineTo(cx, currentY + rowH).stroke();
+      });
+      doc.restore();
+
+      if (item) {
+        const textY = currentY + 4;
+        doc.fillColor("#000000").font("Helvetica").fontSize(7.5);
+        regionalCols.forEach((c) => {
+          doc.text(cellText[c.key], c.x + 3, textY, { width: c.w - 6, align: c.align });
+        });
+      }
+
+      currentY += rowH;
+    }
+
+    // 8. Dibujar los 4 bloques de firma fijos al pie
+    const signBoxY = Math.max(currentY + 16, pageHeight - 145);
+    const signBoxH = 88;
+    const gap = 8;
+    const boxW = (tableWidth - gap * 3) / 4; // 129 pt cada caja
+
+    const boxes = [
+      {
+        x: leftX,
+        titulo: "ENTREGA:",
+        cargo: firmaEncargadoCargo,
+        nombre: firmaEncargadoNombre,
+      },
+      {
+        x: leftX + (boxW + gap) * 1,
+        titulo: "AUTORIZA:",
+        cargo: firmaDelegadaCargo,
+        nombre: firmaDelegadaNombre,
+      },
+      {
+        x: leftX + (boxW + gap) * 2,
+        titulo: "VALIDA:",
+        cargo: firmaApruebaCargo,
+        nombre: firmaApruebaNombre,
+      },
+      {
+        x: leftX + (boxW + gap) * 3,
+        titulo: "RECIBE:",
+        cargo: firmaRecibeCargo,
+        nombre: firmaRecibeNombre,
+      },
+    ];
+
+    const lineY = signBoxY + 54;
+
+    doc.save();
+    doc.lineWidth(0.7).strokeColor("#000000");
+    boxes.forEach((b) => {
+      doc.rect(b.x, signBoxY, boxW, signBoxH).stroke();
+      doc.moveTo(b.x + 8, lineY).lineTo(b.x + boxW - 8, lineY).stroke();
+    });
+    doc.restore();
+
+    boxes.forEach((b) => {
+      doc.fillColor("#000000").font("Helvetica-Bold").fontSize(7.5)
+        .text(b.titulo, b.x + 4, signBoxY + 5, { width: boxW - 8, align: "center" });
+      doc.font("Helvetica").fontSize(6.6)
+        .text(b.cargo, b.x + 4, signBoxY + 15, { width: boxW - 8, align: "center" });
+      doc.font("Helvetica-Bold").fontSize(6.8)
+        .text(b.nombre, b.x + 4, lineY + 4, { width: boxW - 8, align: "center" });
+    });
+
+    // Pie de página institucional
+    const footerY = signBoxY + signBoxH + 8;
+    doc.font("Helvetica").fontSize(7.2).fillColor("#333333");
+    doc.text(`Folio Formato: ${folio}`, leftX, footerY, { width: 200, align: "left" });
+    doc.text("Delegación de BIENESTAR en Baja California Sur - Control de Inventario Regional", leftX, footerY, { width: tableWidth, align: "right" });
 
     doc.end();
   } catch (e) {

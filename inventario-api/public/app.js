@@ -62,22 +62,15 @@
       }
     });  
 
-    // 2. Selector de área/usuario al crear solicitud
+    // 2. Selector de área/usuario al crear solicitud: habilitado para todos los usuarios
     const uidIn = $('sol_user_id');  
     if (uidIn){  
-      const editable = p.admin || p.encargado; 
-      if (!uidIn.value) uidIn.value = (CURRENT_USER?.id ?? '').toString();  
-      uidIn.disabled = !editable;  
-      uidIn.title = editable ? '' : 'Bloqueado (autorrelleno con tu usuario)';  
+      uidIn.disabled = false;  
+      uidIn.title = 'Selecciona el área solicitante';  
     }  
 
-    // 3. Botones de acciones sobre solicitudes
-    if ($('btn-sol-eliminar')) {$('btn-sol-eliminar').disabled = !p.solicitudes?.puedeEliminar;  
-      $('btn-sol-eliminar').title = p.solicitudes?.puedeEliminar ? '' : 'Eliminar solo Admin';  
-    }  
-    if ($('btn-sol-cancelar')) {$('btn-sol-cancelar').disabled = !p.solicitudes?.puedeCancelar;
-      $('btn-sol-cancelar').title = p.solicitudes?.puedeCancelar ? '' : 'Cancelar solo usuarios autorizados';
-    }
+    // 3. Menú y botones de acciones sobre solicitudes
+    updateSolicitudActionsVisibility(CONSULTA_STATUS);
   }
 
   let API = ''; 
@@ -111,7 +104,12 @@
     routeKey('GET', '/api/categorias'),
     routeKey('POST', '/api/productos'),
     routeKey('POST', '/api/lookup/unidad-categoria'),
-    routeKey('DELETE', '/api/solicitudes/:id')
+    routeKey('DELETE', '/api/solicitudes/:id'),
+    routeKey('GET', '/api/regiones'),
+    routeKey('GET', '/api/oficinas'),
+    routeKey('GET', '/api/rubros'),
+    routeKey('GET', '/api/inventario-regional'),
+    routeKey('POST', '/api/inventario-regional/formatos')
   ]);
   async function hasRoute(method, path){ return APP_ROUTES.has(routeKey(method, path)); }
 
@@ -119,94 +117,54 @@
     const createSel = $('sol_user_id');
     if (!createSel) return;
 
-    const p = uiPerms();
-    const rolActual = norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || 'USUARIO');
-    const isAdminUser = Boolean(p.admin || rolActual === 'ADMIN');
-    const isEncargadoUser = Boolean(p.encargado || rolActual === 'ENCARGADO');
-    const canSelectArea = isAdminUser || isEncargadoUser;
-    const ownId = Number(CURRENT_USER?.id || 0) || null;
     const currentCreate = createSel?.value || '';
-    let userData = [];
-    const ofiMap = new Map();
+    const ownOfiId = Number(CURRENT_USER?.id_oficialia || 0) || null;
+    let ofiRows = [];
 
     try{
       if (await hasRoute('GET','/api/oficialias')){
         const jo = await apiJSON('/api/oficialias');
-        (Array.isArray(jo?.data) ? jo.data : []).forEach(o => {
-          if (o?.id != null && safestr(o.nombre)) ofiMap.set(Number(o.id), safestr(o.nombre));
-        });
+        ofiRows = Array.isArray(jo?.data) ? jo.data : [];
       }
     }catch{}
 
-    try{
-      if (await hasRoute('GET','/api/usuarios')){
-        const j = await apiJSON('/api/usuarios?include_inactive=1');
-        userData = Array.isArray(j?.data) ? j.data : [];
-      }
-    }catch{}
-
-    if (!userData.length && ownId){
-      const ownOfiId = Number(CURRENT_USER?.id_oficialia || 0) || null;
-      const ownArea = ofiMap.get(ownOfiId) || safestr(CURRENT_USER?.oficialia_nombre || CURRENT_USER?.departamento) || [CURRENT_USER?.nombre, CURRENT_USER?.primer_ap, CURRENT_USER?.segundo_ap].filter(Boolean).join(' ').trim();
-      userData = [{
-        id: ownId,
-        username: CURRENT_USER?.username || '',
-        rol: rolActual,
-        id_oficialia: ownOfiId,
-        oficialia_nombre: ownArea,
-        area_nombre: ownArea,
-        nombre_completo: ownArea || CURRENT_USER?.username || `Área ${ownId}`
-      }];
+    if (!ofiRows.length && ownOfiId){
+      ofiRows = [{ id: ownOfiId, nombre: safestr(CURRENT_USER?.oficialia_nombre || CURRENT_USER?.departamento) || 'Mi Departamento' }];
     }
 
-    const activeUsers = userData.filter(u => {
-      const activo = Number(u?.activo?.data?.[0] ?? u?.activo ?? 1);
-      return activo !== 0;
-    });
-    const baseSource = activeUsers.length ? activeUsers : userData;
+    const p = uiPerms();
+    const rolActual = norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || 'USUARIO');
+    const isAdminUser = Boolean(p.admin || rolActual === 'ADMIN');
+    const isEncargadoUser = Boolean(p.encargado || rolActual === 'ENCARGADO');
 
-    // Filtrar según rol:
-    // - ADMIN: todas las áreas/departamentos
-    // - ENCARGADO: su propia área (Encargado / Recursos Materiales) + áreas de USUARIO
-    // - USUARIO: únicamente su propia área asignada
-    const createSource = baseSource.filter(u => {
-      const uId = Number(u.id || 0);
-      const uRol = norm(u.rol || (u.username === 'admin' ? 'ADMIN' : u.username === 'encargado' ? 'ENCARGADO' : 'USUARIO'));
+    let filteredOfi = ofiRows.filter(o => {
+      const id = Number(o.id || 0);
+      const name = String(o.nombre || '').trim().toLowerCase();
+      const isAdminOfi = id === 30030000 || name.includes('administrador') || name.includes('direccion estatal');
+      const isEncargadoOfi = id === 30030008 || name.includes('encargado de inventario');
       if (isAdminUser) return true;
-      if (isEncargadoUser) return uRol === 'ENCARGADO' || uRol === 'USUARIO' || uId === ownId;
-      return uId === ownId;
+      if (isEncargadoUser) return !isAdminOfi;
+      return !isAdminOfi && !isEncargadoOfi;
     });
 
-    const finalSource = createSource.length ? createSource : baseSource;
-    const options = finalSource.map(u => {
-      const id = Number(u.id || 0);
-      const ofiId = Number(u.id_oficialia ?? u.ID_OFICIALIA ?? 0);
-      const areaLabel = safestr(
-        u.oficialia_nombre ||
-        u.area_nombre ||
-        u.departamento ||
-        ofiMap.get(ofiId) ||
-        u.nombre_completo ||
-        u.fullname ||
-        u.username ||
-        `Área ${id}`
-      );
-      return `<option value="${id}">${areaLabel}</option>`;
+    // Generar opciones con todas las áreas/oficialías permitidas
+    const options = filteredOfi.map(o => {
+      const id = Number(o.id || 0);
+      const nombre = safestr(o.nombre) || `Área ${id}`;
+      return `<option value="${id}">${nombre}</option>`;
     }).join('');
-    
+
     createSel.innerHTML = options || '<option value="">Sin áreas disponibles</option>';
-    const validCurrent = currentCreate && finalSource.some(u => String(u.id) === String(currentCreate));
-    createSel.value = validCurrent ? currentCreate : String(ownId || finalSource[0]?.id || '');
-    createSel.disabled = !canSelectArea;
-    createSel.title = canSelectArea ? '' : 'Bloqueado con tu área asignada';
+    const validCurrent = currentCreate && filteredOfi.some(o => String(o.id) === String(currentCreate));
+    const defaultVal = filteredOfi.some(o => Number(o.id) === ownOfiId) ? String(ownOfiId) : String(filteredOfi[0]?.id || '');
+    createSel.value = validCurrent ? currentCreate : defaultVal;
+    createSel.disabled = false;
+    createSel.title = 'Selecciona el área solicitante';
   }
 
   async function loadSolicitudOficialias(){
     const listSel = $('list_oficialia');
     if (!listSel) return;
-    const p = uiPerms();
-    const canAllUsers = p.solicitudes?.puedeSurtir;
-    const ownOfi = Number(CURRENT_USER?.id_oficialia || 0) || null;
     const current = listSel.value || '';
     let rows = [];
     try{
@@ -215,15 +173,14 @@
         rows = Array.isArray(j?.data) ? j.data : [];
       }
     }catch{}
-    if (!rows.length && ownOfi){
-      rows = [{ id: ownOfi, nombre: `Oficialia ${ownOfi}` }];
+    if (!rows.length && CURRENT_USER?.id_oficialia){
+      rows = [{ id: Number(CURRENT_USER.id_oficialia), nombre: `Oficialia ${CURRENT_USER.id_oficialia}` }];
     }
     const options = rows.map(r => `<option value="${Number(r.id || 0)}">${safestr(r.nombre) || `Oficialia ${Number(r.id || 0)}`}</option>`).join('');
-    const allOption = canAllUsers ? '<option value="">Todas los departamentos</option>' : '';
-    listSel.innerHTML = allOption + (options || '<option value="">Sin departamentos</option>');
-    listSel.value = canAllUsers ? (current || '') : String(ownOfi || rows[0]?.id || '');
-    listSel.disabled = !canAllUsers;
-    listSel.title = canAllUsers ? '' : 'Solo puedes consultar tu departamento';
+    listSel.innerHTML = '<option value="">Todos los departamentos</option>' + (options || '');
+    listSel.value = current;
+    listSel.disabled = false;
+    listSel.title = 'Filtrar por departamento';
   }
 
   async function fetchUiConfig(){ 
@@ -290,7 +247,15 @@
     }
 
     if (id === 'panel_general') { if (typeof loadPanelGeneral === 'function') loadPanelGeneral(); }
+    if (id === 'solicitudes') { setSolicitudesTab('lista'); listarSolicitudes(); }
     if (id === 'almacen') { loadCategorias(); loadAlmacen(); }
+    if (id === 'regional') {
+      if (typeof loadRegionalFilters === 'function') {
+        loadRegionalFilters().then(() => {
+          if (typeof renderRegionalInventory === 'function') renderRegionalInventory();
+        });
+      }
+    }
     if (id === 'reporte') { setReporteView('home'); loadReporteUsuarios(); }
     if (id === 'graficas') { loadGraficas(); }
     if (id === 'auditoria') { if (typeof loadAuditoria === 'function') loadAuditoria(); }
@@ -521,7 +486,6 @@
     if ($('det_cant'))$('det_cant').value = '1';
     if ($('det_obs'))$('det_obs').value = '';
     if ($('sol_edit_id'))$('sol_edit_id').value = '';
-    if ($('list_oficialia') && !uiPerms().solicitudes?.puedeSurtir) $('list_oficialia').value = String(CURRENT_USER?.id_oficialia || '');
     if ($('msg_sol'))$('msg_sol').textContent = '';
     if ($('msg_det'))$('msg_det').textContent = '';
     if ($('msg_lookup'))$('msg_lookup').textContent = '';
@@ -532,6 +496,16 @@
     if ($('sol_detalle_box'))$('sol_detalle_box').innerHTML = '<div class="muted">Sin renglones.</div>';
     if ($('sol_detalle_badge'))$('sol_detalle_badge').textContent = 'Sin solicitud';
     if ($('sol_msg_detalle'))$('sol_msg_detalle').textContent = '';
+    if ($('sol_user_id')) {
+      const sel = $('sol_user_id');
+      const ownOfiStr = String(CURRENT_USER?.id_oficialia || '');
+      const hasOwn = Array.from(sel.options).some(o => o.value === ownOfiStr);
+      if (hasOwn) {
+        sel.value = ownOfiStr;
+      } else if (sel.options.length > 0) {
+        sel.selectedIndex = 0;
+      }
+    }
     if ($('btn-list-consultar'))$('btn-list-consultar').disabled = true;
     if ($('btn-solicitudes-tab-consulta'))$('btn-solicitudes-tab-consulta').disabled = true;
 
@@ -544,9 +518,9 @@
 
   function continuarAPaso2(){
     const uidIn  = $('sol_user_id');
-    const uidVal = (uidIn && uidIn.value) ? Number(uidIn.value) : (CURRENT_USER?.id ?? null);
+    const ofiVal = (uidIn && uidIn.value) ? Number(uidIn.value) : (CURRENT_USER?.id_oficialia ?? null);
     const msg = $('msg_sol');
-    if (!uidVal){
+    if (!ofiVal){
       toast('Área solicitante requerida');
       if (msg) msg.textContent = 'Selecciona el área solicitante';
       return;
@@ -555,7 +529,8 @@
     const obs  = $('obs_sol')?.value?.trim() || '';
 
     SOL_DRAFT = {
-      usuario_id: Number(uidVal),
+      usuario_id: CURRENT_USER?.id ?? null,
+      id_oficialia: Number(ofiVal),
       tipo_solicitud: tipo,
       observaciones: obs
     };
@@ -1097,7 +1072,44 @@
   function updateSolicitudActionsVisibility(status = ''){
     const card = $('sol_acciones_card');
     if (!card) return;
-    card.classList.toggle('hidden', norm(status) === 'CANCELADA');
+
+    // Ocultar el menú de acciones en el listado; solo mostrar cuando se entra a un registro de orden
+    const inConsulta = SOLICITUDES_TAB === 'consulta' && Boolean(DET_SOL_ID || LIST_SELECTED_ID);
+    card.classList.toggle('hidden', !inConsulta);
+    if (!inConsulta) return;
+
+    const p = uiPerms();
+    const rol = norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || 'USUARIO');
+    const isAdmin = Boolean(p.admin || rol === 'ADMIN');
+    const isEncargado = Boolean(p.encargado || rol === 'ENCARGADO');
+    const isCancelada = norm(status) === 'CANCELADA' || norm(status) === 'CANCELADO';
+
+    const btnCancelar = $('btn-sol-cancelar');
+    const btnEliminar = $('btn-sol-eliminar');
+    const btnPdf = $('btn-sol-pdf');
+
+    // el usuario "departamento" solo puede descargar los pdf que existen:
+    // ocultar cancelar y eliminar para departamento
+    if (btnCancelar) {
+      const showCancel = (isAdmin || isEncargado);
+      btnCancelar.classList.toggle('hidden', !showCancel);
+      btnCancelar.disabled = !showCancel || isCancelada;
+      btnCancelar.title = isCancelada ? 'La solicitud ya está cancelada' : (showCancel ? 'Cancelar esta solicitud' : 'Solo usuarios autorizados');
+    }
+
+    if (btnEliminar) {
+      // el administrador puede eliminarlas
+      btnEliminar.classList.toggle('hidden', !isAdmin);
+      btnEliminar.disabled = !isAdmin;
+      btnEliminar.title = isAdmin ? 'Eliminar permanentemente esta solicitud' : 'Eliminar solo Admin';
+    }
+
+    if (btnPdf) {
+      // descargar PDF disponible para todos
+      btnPdf.classList.remove('hidden');
+      btnPdf.disabled = false;
+      btnPdf.title = 'Descargar Vale PDF oficial';
+    }
   }
 
   function setListadoSelectedId(id){
@@ -1202,8 +1214,8 @@
     }
 
     const uidIn = $('sol_user_id');
-    const uidVal = (uidIn && uidIn.value) ? Number(uidIn.value) : (SOL_DRAFT?.usuario_id || CURRENT_USER?.id);
-    if (!uidVal){
+    const ofiVal = (uidIn && uidIn.value) ? Number(uidIn.value) : (SOL_DRAFT?.id_oficialia || CURRENT_USER?.id_oficialia);
+    if (!ofiVal){
       toast('Área solicitante requerida');
       return;
     }
@@ -1245,7 +1257,8 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          usuario_id: uidVal,
+          usuario_id: CURRENT_USER?.id || null,
+          id_oficialia: ofiVal,
           tipo_solicitud: tipo,
           observaciones: obs,
           items: itemsPayload
@@ -2254,6 +2267,345 @@
   }
 
   // =========================================================================
+  // FASE B: CONTROL DE INVENTARIO REGIONAL (Módulo Aislado)
+  // =========================================================================
+  let REGIONAL_CATALOGS = { regiones: [], oficinas: [], rubros: [] };
+  let REGIONAL_FILTERS_LOADED = false;
+
+  function escHtml(v){
+    return String(v ?? '').replace(/[&<>"']/g, ch => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+  }
+
+  function updateRegionalFirmasPreview(){
+    const box = $('reg_firmas_preview');
+    if (!box) return;
+    const regId = Number($('reg_filter_region')?.value || 0);
+    const rubId = Number($('reg_filter_rubro')?.value || 0);
+
+    const regObj = REGIONAL_CATALOGS.regiones.find(r => Number(r.id) === regId);
+    const rubObj = REGIONAL_CATALOGS.rubros.find(r => Number(r.id) === rubId);
+
+    const entregaTxt = rubObj
+      ? `${safestr(rubObj.encargado_nombre)} (${safestr(rubObj.encargado_cargo)})`
+      : 'Todos los rubros (selecciona un rubro para firma específica)';
+    const voboTxt = 'Diphna Yanssen Weichselbaum Calderon (Delegada de Programas para el Desarrollo en BCS)';
+    const autorizaTxt = 'Jorge Patron Murillo (Aprueba)';
+    const recibeTxt = regObj
+      ? `${safestr(regObj.responsable_regional || 'POR CONFIRMAR')} (${safestr(regObj.nombre)})`
+      : 'POR CONFIRMAR (selecciona una región para responsable regional)';
+
+    box.innerHTML = `
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap:8px;">
+        <div><b>1. Entrega:</b><br>${escHtml(entregaTxt)}</div>
+        <div><b>2. Vo. Bo. (Delegada):</b><br>${escHtml(voboTxt)}</div>
+        <div><b>3. Autoriza:</b><br>${escHtml(autorizaTxt)}</div>
+        <div><b>4. Recibe (Regional):</b><br>${escHtml(recibeTxt)}</div>
+      </div>
+    `;
+  }
+
+  async function loadRegionalOficinas(regionId = ''){
+    const ofiSel = $('reg_filter_oficina');
+    if (!ofiSel) return;
+    const prevVal = ofiSel.value || '';
+    try {
+      const qs = regionId ? `?region_id=${encodeURIComponent(regionId)}` : '';
+      const res = await apiJSON(`/api/oficinas${qs}`);
+      const rows = Array.isArray(res?.data) ? res.data : [];
+      REGIONAL_CATALOGS.oficinas = rows;
+      const opts = rows.map(o => {
+        const label = o.municipio
+          ? `${safestr(o.nombre)} — ${safestr(o.municipio)}`
+          : safestr(o.nombre);
+        return `<option value="${Number(o.id)}">${escHtml(label)}</option>`;
+      }).join('');
+      ofiSel.innerHTML = `<option value="">Todas</option>${opts}`;
+      if (prevVal && rows.some(o => String(o.id) === String(prevVal))) {
+        ofiSel.value = prevVal;
+      } else {
+        ofiSel.value = '';
+      }
+    } catch (e) {
+      ofiSel.innerHTML = '<option value="">Todas</option>';
+    }
+  }
+
+  async function loadRegionalFilters(force = false){
+    const regSel = $('reg_filter_region');
+    const ofiSel = $('reg_filter_oficina');
+    const rubSel = $('reg_filter_rubro');
+    if (!regSel || !ofiSel || !rubSel) return;
+    if (REGIONAL_FILTERS_LOADED && !force) {
+      updateRegionalFirmasPreview();
+      return;
+    }
+
+    const curReg = regSel.value || '';
+    const curRub = rubSel.value || '';
+
+    try {
+      const [regRes, rubRes] = await Promise.all([
+        apiJSON('/api/regiones'),
+        apiJSON('/api/rubros')
+      ]);
+
+      const regiones = Array.isArray(regRes?.data) ? regRes.data : [];
+      const rubros = Array.isArray(rubRes?.data) ? rubRes.data : [];
+      REGIONAL_CATALOGS.regiones = regiones;
+      REGIONAL_CATALOGS.rubros = rubros;
+
+      regSel.innerHTML = '<option value="">Todas</option>' + regiones.map(r => (
+        `<option value="${Number(r.id)}">${escHtml(safestr(r.nombre))}</option>`
+      )).join('');
+
+      rubSel.innerHTML = '<option value="">Todos</option>' + rubros.map(ru => (
+        `<option value="${Number(ru.id)}">${escHtml(`${safestr(ru.nombre_rubro)} (${safestr(ru.encargado_nombre)})`)}</option>`
+      )).join('');
+
+      if (curReg && regiones.some(r => String(r.id) === String(curReg))) regSel.value = curReg;
+      if (curRub && rubros.some(ru => String(ru.id) === String(curRub))) rubSel.value = curRub;
+
+      await loadRegionalOficinas(regSel.value || '');
+      REGIONAL_FILTERS_LOADED = true;
+      updateRegionalFirmasPreview();
+    } catch (e) {
+      if (!handleAuthError(e)) toast(e.message || 'Error al cargar catálogos regionales', false);
+    }
+  }
+
+  async function renderRegionalInventory(){
+    const tbody = $('reg_tbody');
+    const meta = $('reg_meta');
+    const badge = $('reg_mode_badge');
+    const msg = $('reg_msg');
+    if (!tbody) return;
+
+    updateRegionalFirmasPreview();
+    if (msg) msg.textContent = '';
+
+    const region_id = safestr($('reg_filter_region')?.value);
+    const oficina_id = safestr($('reg_filter_oficina')?.value);
+    const rubro_id = safestr($('reg_filter_rubro')?.value);
+
+    const params = new URLSearchParams();
+    if (region_id) params.set('region_id', region_id);
+    if (oficina_id) params.set('oficina_id', oficina_id);
+    if (rubro_id) params.set('rubro_id', rubro_id);
+
+    tbody.innerHTML = '<tr><td colspan="7" class="muted">Cargando inventario regional...</td></tr>';
+
+    try {
+      const qs = params.toString();
+      const res = await apiJSON(`/api/inventario-regional${qs ? `?${qs}` : ''}`);
+      const rows = Array.isArray(res?.data) ? res.data : [];
+      const isGrouped = Boolean(res?.grouped);
+
+      if (meta) {
+        meta.textContent = `${rows.length} registro${rows.length === 1 ? '' : 's'}`;
+      }
+      if (badge) {
+        badge.textContent = isGrouped
+          ? 'Vista agrupada por Clave Bien (Suma regional de oficinas)'
+          : 'Vista detallada por oficina';
+      }
+
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="muted">Sin registros de inventario para los filtros seleccionados.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = rows.map(r => {
+        const estatus = safestr(r.estatus_uso || 'ACTIVO').toUpperCase();
+        let statusClass = 'status-aprobada';
+        if (estatus === 'PRESTADO' || estatus === 'EN_REPARACION') statusClass = 'status-pendiente';
+        if (estatus === 'BAJA') statusClass = 'status-cancelada';
+
+        return `<tr>
+          <td><b>${escHtml(safestr(r.clave_bien || '-'))}</b></td>
+          <td>${escHtml(safestr(r.descripcion || '-'))}</td>
+          <td>${escHtml(safestr(r.marca_modelo || '-'))}</td>
+          <td>${escHtml(safestr(r.numero_serie_placas || '-'))}</td>
+          <td style="text-align:center; font-weight:600;">${Number(r.cantidad_propia ?? 0)}</td>
+          <td><span class="status-badge ${statusClass}">${escHtml(estatus)}</span></td>
+          <td>${escHtml(safestr(r.observaciones || '-'))}</td>
+        </tr>`;
+      }).join('');
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="7" class="muted" style="color:var(--danger);">${escHtml(e.message || 'Error al cargar inventario regional')}</td></tr>`;
+      if (!handleAuthError(e)) toast(e.message || 'Error al cargar inventario regional', false);
+    }
+  }
+
+  // ---- Modal "Agregar Activo" ----
+  async function openRegionalAddModal(){
+    const modal = $('modal-add-regional');
+    const form = $('form-add-regional');
+    const ofiSel = $('reg_add_oficina');
+    const rubSel = $('reg_add_rubro');
+    if (!modal || !form || !ofiSel || !rubSel) return;
+
+    form.reset();
+    if ($('reg_add_cantidad')) $('reg_add_cantidad').value = '1';
+    if ($('reg_add_msg')) $('reg_add_msg').textContent = '';
+
+    try {
+      if (!REGIONAL_CATALOGS.rubros.length) await loadRegionalFilters(true);
+      // Todas las oficinas (independiente del filtro de región), agrupadas por región
+      const res = await apiJSON('/api/oficinas');
+      const oficinas = Array.isArray(res?.data) ? res.data : [];
+      const byRegion = new Map();
+      oficinas.forEach(o => {
+        const key = safestr(o.region_nombre) || `Región ${o.region_id}`;
+        if (!byRegion.has(key)) byRegion.set(key, []);
+        byRegion.get(key).push(o);
+      });
+      ofiSel.innerHTML = '<option value="">- selecciona oficina -</option>' +
+        Array.from(byRegion.entries()).map(([regName, list]) => (
+          `<optgroup label="${escHtml(regName)}">` +
+          list.map(o => {
+            const label = o.municipio ? `${safestr(o.nombre)} — ${safestr(o.municipio)}` : safestr(o.nombre);
+            return `<option value="${Number(o.id)}">${escHtml(label)}</option>`;
+          }).join('') +
+          '</optgroup>'
+        )).join('');
+
+      rubSel.innerHTML = '<option value="">- selecciona rubro -</option>' +
+        REGIONAL_CATALOGS.rubros.map(ru => (
+          `<option value="${Number(ru.id)}">${escHtml(`${safestr(ru.nombre_rubro)} (${safestr(ru.encargado_nombre)})`)}</option>`
+        )).join('');
+
+      // Preseleccionar según los filtros activos de la vista
+      const curOfi = safestr($('reg_filter_oficina')?.value);
+      const curRub = safestr($('reg_filter_rubro')?.value);
+      if (curOfi && oficinas.some(o => String(o.id) === curOfi)) ofiSel.value = curOfi;
+      if (curRub && REGIONAL_CATALOGS.rubros.some(r => String(r.id) === curRub)) rubSel.value = curRub;
+    } catch (e) {
+      if (!handleAuthError(e)) toast(e.message || 'Error al cargar catálogos', false);
+      return;
+    }
+
+    modal.classList.remove('hidden');
+    setTimeout(() => (ofiSel.value ? $('reg_add_clave') : ofiSel)?.focus(), 0);
+  }
+
+  function closeRegionalAddModal(){
+    $('modal-add-regional')?.classList.add('hidden');
+  }
+
+  async function submitRegionalAddForm(ev){
+    ev?.preventDefault();
+    const msg = $('reg_add_msg');
+    const btn = $('btn-reg-add-save');
+
+    const payload = {
+      oficina_id: Number($('reg_add_oficina')?.value || 0),
+      rubro_id: Number($('reg_add_rubro')?.value || 0),
+      clave_bien: safestr($('reg_add_clave')?.value),
+      descripcion: safestr($('reg_add_desc')?.value),
+      marca_modelo: safestr($('reg_add_marca')?.value) || null,
+      numero_serie_placas: safestr($('reg_add_serie')?.value) || null,
+      cantidad_propia: safestr($('reg_add_cantidad')?.value) === '' ? 1 : Number($('reg_add_cantidad')?.value),
+      estado_fisico: safestr($('reg_add_estado')?.value) || 'BUENO'
+    };
+
+    const fail = (text, focusId) => {
+      if (msg) msg.textContent = text;
+      if (focusId) $(focusId)?.focus();
+    };
+    if (!payload.oficina_id) return fail('Selecciona la oficina.', 'reg_add_oficina');
+    if (!payload.rubro_id) return fail('Selecciona el rubro.', 'reg_add_rubro');
+    if (!payload.clave_bien) return fail('La clave del bien es requerida.', 'reg_add_clave');
+    if (!payload.descripcion) return fail('La descripción es requerida.', 'reg_add_desc');
+    if (!Number.isInteger(payload.cantidad_propia) || payload.cantidad_propia < 1) {
+      return fail('La cantidad debe ser un número entero mayor o igual a 1.', 'reg_add_cantidad');
+    }
+
+    try {
+      if (btn) btn.disabled = true;
+      if (msg) msg.textContent = 'Guardando...';
+      await apiJSON('/api/inventario-regional', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      toast(`Activo "${payload.clave_bien}" agregado correctamente`, true);
+      closeRegionalAddModal();
+      await renderRegionalInventory();
+    } catch (e) {
+      if (msg) msg.textContent = e.message || 'Error al guardar el activo';
+      if (!handleAuthError(e)) toast(e.message || 'Error al guardar el activo', false);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function generarFormatoRegionalPDF(){
+    const btn = $('btn-reg-pdf');
+    const msg = $('reg_msg');
+    const region_id = safestr($('reg_filter_region')?.value);
+    const oficina_id = safestr($('reg_filter_oficina')?.value);
+    const rubro_id = safestr($('reg_filter_rubro')?.value);
+
+    // No permitir generar el documento general (todos los filtros en "Todas"/"Todos")
+    if (!region_id && !oficina_id && !rubro_id) {
+      toast('No se puede generar el documento general. Por favor selecciona al menos una Región o un Rubro.', false);
+      return;
+    }
+
+    try {
+      if (btn) btn.disabled = true;
+      if (msg) msg.textContent = 'Generando formato PDF y guardando respaldo...';
+
+      const res = await api('/api/inventario-regional/formatos', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/pdf'
+        },
+        body: JSON.stringify({
+          region_id: region_id ? Number(region_id) : null,
+          oficina_id: oficina_id ? Number(oficina_id) : null,
+          rubro_id: rubro_id ? Number(rubro_id) : null
+        })
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        let errMsg = `HTTP ${res.status}`;
+        try {
+          const j = JSON.parse(errText);
+          errMsg = j?.error || j?.message || errMsg;
+        } catch {
+          if (errText) errMsg = errText;
+        }
+        throw new Error(errMsg);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const disp = res.headers.get('Content-Disposition') || '';
+      const match = disp.match(/filename="?([^"]+)"?/i);
+      link.download = match ? match[1] : `formato_inventario_regional_${Date.now()}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+      if (msg) msg.textContent = 'Formato PDF generado y registrado exitosamente.';
+      toast('Formato PDF (4 Firmas) descargado con éxito', true);
+    } catch (e) {
+      if (msg) msg.textContent = e.message || 'Error al generar PDF';
+      if (!handleAuthError(e)) toast(`Error generando PDF: ${e.message}`, false);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // =========================================================================
   // INICIALIZACIÓN (AQUÍ ESTÁN TODOS LOS EVENT LISTENERS)
   // =========================================================================
   document.addEventListener('DOMContentLoaded', async ()=>{
@@ -2473,10 +2825,15 @@
     $('btn-sol-pdf')?.addEventListener('click', ()=> descargarPDF({ resetAfter: false }));
     $('btn-sol-pdf-flow')?.addEventListener('click', ()=> descargarPDF({ resetAfter: true }));
 
-    // Selección de renglón en la tabla
+    // Selección y apertura de renglón en la tabla
     $('listado_box')?.addEventListener('click', (ev)=>{
       const tr = ev.target.closest('tbody tr[data-sol-id]'); if (!tr) return;
       setListadoSelectedId(tr.dataset.solId || tr.getAttribute('data-sol-id'));
+    });
+    $('listado_box')?.addEventListener('dblclick', (ev)=>{
+      const tr = ev.target.closest('tbody tr[data-sol-id]'); if (!tr) return;
+      const id = tr.dataset.solId || tr.getAttribute('data-sol-id');
+      if (id) consultarSolicitudById(id);
     });
 
     // Pestaña: Almacén (Inventario)
@@ -2493,6 +2850,26 @@
       if (btn.dataset.action === 'hist')      loadProductoHistorial(tr.dataset.clave || '');
       else if (btn.dataset.action === 'edit') startEditFromRow(tr);
       else if (btn.dataset.action === 'del')  eliminarFila(id);
+    });
+
+    // Pestaña: Inventario Regional (Fase B)
+    $('reg_filter_region')?.addEventListener('change', async (ev) => {
+      const regId = ev.target?.value || '';
+      await loadRegionalOficinas(regId);
+      await renderRegionalInventory();
+    });
+    $('reg_filter_oficina')?.addEventListener('change', () => renderRegionalInventory());
+    $('reg_filter_rubro')?.addEventListener('change', () => renderRegionalInventory());
+    $('btn-reg-filtrar')?.addEventListener('click', () => renderRegionalInventory());
+    $('btn-reg-pdf')?.addEventListener('click', () => generarFormatoRegionalPDF());
+    $('btn-reg-add')?.addEventListener('click', () => openRegionalAddModal());
+    $('form-add-regional')?.addEventListener('submit', submitRegionalAddForm);
+    $('modal-add-regional')?.addEventListener('click', (ev) => {
+      // Cerrar al hacer clic en el fondo o en botones con data-close-modal
+      if (ev.target === ev.currentTarget || ev.target.closest('[data-close-modal]')) closeRegionalAddModal();
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !$('modal-add-regional')?.classList.contains('hidden')) closeRegionalAddModal();
     });
 
     // Pestaña: Reportes y Gráficas
@@ -2512,6 +2889,8 @@
         toast(e.message || 'Error al abrir reporte', false);
       }
     });
+    $('btn-rep-print-detail')?.addEventListener('click', ()=> printReporte(REP_SELECTED_OFICIALIA || $('rep_oficialia')?.value || ''));
+    $('btn-rep-export-excel')?.addEventListener('click', exportReporteExcel);
     $('btn-graf-load')?.addEventListener('click', loadGraficas);
     $('graf_oficialia')?.addEventListener('change', loadGraficas);
     $('graf_fecha_inicio')?.addEventListener('change', loadGraficas);
@@ -2531,6 +2910,6 @@
     updateSolBadge();
     setSolicitudTab('crear');
     
-  }); // <-- FIN DEL EVENTO DOMContentLoaded
+  }); // <-- FIN DEL EVENTO DOMContentLoaded 
 
-})(); // <-- FIN DEL ARCHIVO APP.JS
+})(); // <-- FIN DEL ARCHIVO APP.JS 
