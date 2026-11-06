@@ -4,7 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Sistema - Control de Inventario</title>
-  <link rel="stylesheet" href="/styles.css?v=3" />
+  <link rel="stylesheet" href="/styles.css?v=5" />
 </head>
 <body>
 
@@ -16,7 +16,7 @@
         <img src="/logo.png" alt="Logo" onerror="this.style.display='none'">
         <div>
           <h2>Control de <br>Inventario</h2>
-          <span>Gestión de materiales</span>
+          <span>Delegación Baja California Sur</span>
         </div>
       </div>
       
@@ -48,6 +48,16 @@
           Inventario Regional
         </li>
 
+        <button class="nav-item hidden" data-view="inventario_estatal" id="nav-inventario-estatal">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+          Inventario Estatal
+        </button>
+
+        <button class="nav-item" data-view="vales_prestamo" id="nav-vales-prestamo">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect><path d="M9 14l2 2 4-4"></path></svg>
+          Vales Provisionales
+        </button>
+
         <button class="nav-item" data-view="reporte" id="nav-reportes">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
           Reportes e impresión
@@ -62,6 +72,11 @@
        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
        Auditoría (Accesos)
      </button>
+
+        <button class="nav-item hidden" data-view="usuarios" id="nav-usuarios">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+          Gestión de Usuarios
+        </button>
 
       </nav>
     </aside>
@@ -88,7 +103,8 @@
 
       <!-- Contenedor de Vistas -->
       <div id="view-container">
-        <div id="toast" class="muted hidden" style="margin-bottom: 12px; font-weight: 600;"></div>
+        <!-- Contenedor flotante de notificaciones (siempre visible en el viewport) -->
+        <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 
         <!-- 1. VISTA: Panel General (DASHBOARD NUEVO) -->
         <section id="view-panel_general" class="view-section active">
@@ -96,7 +112,7 @@
             <div class="view-title">
               <h3>Resumen Operativo</h3>
               <h1>Panel general</h1>
-              <p>Consulta el estado de las solicitudes y los materiales de tu delegación.</p>
+              <p>Consulta el estado de las solicitudes y los materiales de la Delegación Baja California Sur.</p>
             </div>
             <button class="btn-primary" id="btn-crear-rapido">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -154,7 +170,13 @@
               <div id="sol_flow_id" style="background:var(--bg-sidebar); color:white; padding:4px 10px; border-radius:999px; font-size:12px;">Sin solicitud</div>
             </div>
             
-            <div class="nav" style="margin-bottom:12px;">
+            <!-- Selector Principal de Modo: Consumibles vs Vale Provisional -->
+            <div class="nav" id="sol-mode-nav" style="margin-bottom:14px; gap:8px;">
+              <button id="btn-sol-modo-consumibles" class="tab active" type="button" style="font-weight:600;">📦 Materiales y Consumibles (Almacén General)</button>
+              <button id="btn-sol-modo-prestamo" class="tab" type="button" style="font-weight:600;">📋 Vale Provisional (Préstamo para Operativos)</button>
+            </div>
+
+            <div class="nav" id="sol-flow-tabs" style="margin-bottom:12px;">
               <button id="btn-sol-tab-crear" class="tab active" type="button">1. Nueva solicitud</button>
               <button id="btn-sol-tab-agregar" class="tab" type="button" disabled>2. Agregar detalle</button>
               <button id="btn-sol-tab-revision" class="tab" type="button" disabled>3. Detalle</button>
@@ -165,23 +187,63 @@
             <div id="sol-pane-crear" class="sol-pane">
               <div class="grid cols-3">
                 <div class="field">
-                  <label for="sol_user_id">Área Solicitante</label>
+                  <label for="sol_user_id">Área / Departamento Solicitante</label>
                   <select id="sol_user_id"></select>
                 </div>
                 <div class="field">
-                  <label for="tipo_solicitud">Tipo</label>
+                  <label for="sol_region">Región / Oficina Solicitante</label>
+                  <select id="sol_region">
+                    <option value="La Paz">La Paz (Delegación / Sede)</option>
+                    <option value="Los Cabos">Los Cabos (Guaymitas / PEC Caribe / Cangrejos)</option>
+                    <option value="Comondú / Loreto">Comondú / Loreto (Cd. Constitución / Insurgentes / Loreto)</option>
+                    <option value="Mulegé">Mulegé (Santa Rosalía / Vizcaíno / Guerrero Negro)</option>
+                  </select>
+                </div>
+                <div class="field hidden" id="sol_nombre_firma_wrap">
+                  <label for="sol_nombre_firma">Nombre del Jefe / Enlace Solicitante</label>
+                  <input id="sol_nombre_firma" placeholder="Nombre de quien solicita y firma el vale">
+                </div>
+              </div>
+              <div class="grid cols-2" style="margin-top:12px;">
+                <div class="field">
+                  <label for="tipo_solicitud">Tipo de Solicitud</label>
                   <select id="tipo_solicitud">
-                    <option value="CONSUMIBLES">CONSUMIBLES</option>
-                    <option value="ACTIVO_FIJO">ACTIVO_FIJO</option>
+                    <option value="CONSUMIBLES">MATERIALES Y CONSUMIBLES (Almacén General)</option>
+                    <option value="PRESTAMO_ACTIVOS">VALE PROVISIONAL (Préstamo para Operativos)</option>
                   </select>
                 </div>
                 <div class="field">
                   <label for="obs_sol">Para utilizarse en:</label>
-                  <input id="obs_sol" placeholder="Ej. utilizar en: informática y/o jefatura">
+                  <input id="obs_sol" placeholder="Ej. operativo regional, informática y/o jefatura">
                 </div>
               </div>
-              <div style="margin-top:16px;">
+
+              <!-- Pad de Firma Digital del Solicitante (Exclusivo Regiones Foráneas) -->
+              <div id="sol_firma_card_wrap" class="sig-pad-card hidden" style="margin-top:14px;">
+                <div class="sig-pad-header">
+                  <div>
+                    <div class="sig-pad-title">Firma Digital del Solicitante (Para envío inmediato a Almacén La Paz — Gabriel Fiol)</div>
+                    <div class="muted" style="font-size:12px;">Exclusivo para regiones foráneas (Los Cabos, Comondú/Loreto, Mulegé). Dibuja tu firma o sube una imagen PNG transparente.</div>
+                  </div>
+                  <span id="sol_firma_status_badge" class="status-badge status-pendiente">Sin firma capturada</span>
+                </div>
+                <div class="sig-pad-body">
+                  <div class="sig-canvas-wrap">
+                    <canvas id="sol_firma_canvas" width="460" height="130"></canvas>
+                  </div>
+                  <div class="sig-pad-actions">
+                    <button type="button" id="btn-clear-firma-sol" class="btn-secondary mini">Limpiar firma</button>
+                    <label for="sol_firma_file" class="btn-secondary mini" style="cursor:pointer; display:inline-flex; align-items:center; gap:4px; margin:0;">
+                      Subir imagen PNG de firma
+                    </label>
+                    <input type="file" id="sol_firma_file" accept="image/png,image/*" style="display:none;">
+                  </div>
+                </div>
+              </div>
+
+              <div style="margin-top:16px; display:flex; gap:10px; align-items:center;">
                 <button id="btn-crear-sol" class="btn-primary">Continuar a agregar productos &rarr;</button>
+                <button id="btn-limpiar-sol-paso1" type="button" class="btn-secondary">Limpiar Formulario</button>
                 <span id="msg_sol" class="msg"></span>
               </div>
             </div>
@@ -218,7 +280,8 @@
               </div>
               <div id="msg_det" class="msg"></div>
               <div id="det_preview" class="muted" style="margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:8px;">Sin renglones.</div>
-              <div class="actions" style="margin-top:14px; display:flex; justify-content:flex-end;">
+              <div class="actions" style="margin-top:14px; display:flex; justify-content:space-between; align-items:center;">
+                <button id="btn-cancelar-sol-paso2" type="button" class="btn-secondary">Cancelar y Reiniciar</button>
                 <button id="btn-sol-go-revision" class="btn-primary" type="button">Continuar a Detalle / Guardar (Paso 3) &rarr;</button>
               </div>
             </div>
@@ -228,6 +291,9 @@
               <div id="sol_detalle_badge" class="muted" style="margin-bottom:8px;">Sin solicitud</div>
               <div id="sol_detalle_box" class="card" style="box-shadow:none;"><div class="muted">Sin renglones.</div></div>
               <div id="sol_msg_detalle" class="msg"></div>
+              <div style="margin-top:14px; display:flex; justify-content:space-between; align-items:center;">
+                <button id="btn-cancelar-sol-paso3" type="button" class="btn-secondary">Cancelar y Reiniciar</button>
+              </div>
             </div>
 
             <!-- Paso 4 -->
@@ -236,7 +302,195 @@
                 <h3 style="margin:0 0 6px 0; color:#15803d;">¡Solicitud guardada con éxito!</h3>
                 <p id="sol_pdf_success_text" class="muted" style="margin:0; font-size:14px;">La solicitud ha sido registrada en el sistema. Descarga el vale oficial en formato PDF para recabar firmas.</p>
               </div>
-              <button id="btn-sol-pdf-flow" class="btn-primary">Descargar Vale PDF</button>
+              <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                <button id="btn-sol-pdf-flow" class="btn-primary">Descargar Vale PDF</button>
+                <button id="btn-sol-nueva-orden" class="btn-secondary" type="button">Nueva Solicitud</button>
+              </div>
+            </div>
+
+            <!-- Formulario Exclusivo: VALE PROVISIONAL PARA OPERATIVOS -->
+            <div id="pane-prestamo-activos" class="sol-pane hidden">
+              <div class="card" style="background:var(--surface); border:1px solid var(--border); box-shadow:none; padding:16px; margin-bottom:16px;">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+                  <div>
+                    <h3 style="margin:0 0 4px 0; color:var(--primary, #621132);">📋 Vale Provisional de Préstamo de Material y Equipo</h3>
+                    <p class="muted" style="margin:0; font-size:13px;">Registra el préstamo temporal de bienes o equipo para comisiones u operativos. Sujeto a devolución.</p>
+                  </div>
+                  <span class="status-badge status-aprobada">MODO: PRÉSTAMO TEMPORAL</span>
+                </div>
+
+                <div class="grid cols-3" style="margin-bottom:12px;">
+                  <div class="field">
+                    <label for="vp_rubro_id">Rubro del Préstamo *</label>
+                    <select id="vp_rubro_id">
+                      <option value="1">1. Archivo y Materiales (Gabriel Fiol)</option>
+                      <option value="2">2. Parque Vehicular (Evelia Contreras)</option>
+                      <option value="3">3. Mobiliario y Eventos (Jesús Salvador Palacios)</option>
+                      <option value="4">4. Tablets y Starlinks (Luis Eduardo Mayoral)</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="vp_departamento_id">Área / Departamento Solicitante *</label>
+                    <select id="vp_departamento_id"></select>
+                  </div>
+                  <div class="field">
+                    <label for="vp_solicitante_nombre">Nombre del Solicitante *</label>
+                    <input id="vp_solicitante_nombre" placeholder="Nombre completo de quien recibe">
+                  </div>
+                </div>
+
+                <div class="grid cols-3" style="margin-bottom:12px;">
+                  <div class="field">
+                    <label for="vp_solicitante_cargo">Cargo del Solicitante</label>
+                    <input id="vp_solicitante_cargo" placeholder="Ej. Enlace Operativo / Servidor de la Nación">
+                  </div>
+                  <div class="field">
+                    <label for="vp_solicitante_telefono">Teléfono de Contacto</label>
+                    <input id="vp_solicitante_telefono" placeholder="Ej. 612 123 4567">
+                  </div>
+                  <div class="field">
+                    <label for="vp_operativo_nombre">Nombre del Operativo / Evento *</label>
+                    <input id="vp_operativo_nombre" placeholder="Ej. Operativo Pago Pensión Bienestar">
+                  </div>
+                </div>
+
+                <!-- Configuración de Quien Recibe -->
+                <div style="background:rgba(98,17,50,0.03); border:1px solid rgba(98,17,50,0.15); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+                  <h4 id="vale-recibe-header" style="margin:0 0 8px 0; font-size:13px; color:var(--primary); font-weight:600;">✍️ Datos de Quien Recibe (Firma Receptor / Enlace)</h4>
+                  <div class="grid cols-3" style="gap:10px;">
+                    <div class="field">
+                      <label for="vale-recibe-preset">Seleccionar Enlace / Titular (Preset)</label>
+                      <select id="vale-recibe-preset">
+                        <option value="">-- Seleccionar o escribir manualmente --</option>
+                        <option value="SANDRA" data-nombre="Sandra Guadalupe Salvatierra Amador" data-cargo="Dirección Regional La Paz">Dirección Regional La Paz - Sandra Guadalupe Salvatierra Amador</option>
+                        <option value="LOS_CABOS" data-nombre="Enlace Regional Los Cabos" data-cargo="Enlace Regional Los Cabos">Enlace Regional Los Cabos</option>
+                        <option value="MULEGE" data-nombre="Diana Ramírez Hernández" data-cargo="Enlace Regional Mulegé">Enlace Regional Mulegé - Diana Ramírez Hernández</option>
+                        <option value="COMONDU" data-nombre="Enlace Regional Comondú / Loreto" data-cargo="Enlace Regional Comondú / Loreto">Enlace Regional Comondú / Loreto</option>
+                        <option value="INFORMATICA" data-nombre="Víctor Manuel Higuera Ruiz" data-cargo="Informática">Informática - Víctor Manuel Higuera Ruiz</option>
+                        <option value="COMUNICACION" data-nombre="Ericka Peralta Preciado" data-cargo="Comunicación Social">Comunicación Social - Ericka Peralta Preciado</option>
+                        <option value="SALUD" data-nombre="Juan Carlos Cuadros Espinoza" data-cargo="Salud Casa por Casa">Salud Casa por Casa - Juan Carlos Cuadros Espinoza</option>
+                        <option value="JURIDICO" data-nombre="Mayra Cruz Salazar Escobosa" data-cargo="Asuntos Juriddicos">Asuntos Jurídicos - Mayra Cruz Salazar Escobosa</option>
+                        <option value="NINOS" data-nombre="María de los Ángeles Valenzuela López" data-cargo="Niñas y Niños">Niñas y Niños - María de los Ángeles Valenzuela López</option>
+                        <option value="JCF" data-nombre="Juan Daniel Carrera Villaseca" data-cargo="Jóvenes Construyendo el Futuro">Jóvenes Construyendo el Futuro - Juan Daniel Carrera Villaseca</option>
+                        <option value="DISCAPACIDAD" data-nombre="Olga Camarillo Martínez" data-cargo="Programa de Discapacidad">Programa de Discapacidad - Olga Camarillo Martínez</option>
+                        <option value="ADULTO_MAYOR" data-nombre="Elizabeth González Wendy" data-cargo="Programa de Adulto Mayor">Programa de Adulto Mayor - Elizabeth González Wendy</option>
+                        <option value="MANUAL">-- Escribir nombre manualmente --</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="vale-recibe-nombre">Nombre de Quien Recibe *</label>
+                      <input id="vale-recibe-nombre" placeholder="Nombre completo de quien recibe">
+                    </div>
+                    <div class="field">
+                      <label for="vale-recibe-cargo">Cargo de Quien Recibe *</label>
+                      <input id="vale-recibe-cargo" placeholder="Cargo o departamento del receptor">
+                    </div>
+                  </div>
+                </div>
+
+                <div class="grid cols-3" style="margin-bottom:12px;">
+                  <div class="field">
+                    <label for="vp_lugar_comision">Lugar de Comisión / Destino *</label>
+                    <input id="vp_lugar_comision" placeholder="Ej. Los Planes / Cd. Constitución / Mulegé">
+                  </div>
+                  <div class="field">
+                    <label for="vp_modalidad">Tipo de Vale / Modalidad *</label>
+                    <select id="vp_modalidad">
+                      <option value="2_FIRMAS">Vale Provisional Delegación (2 Firmas)</option>
+                      <option value="4_FIRMAS">Vale Préstamo Regional / Especial (4 Firmas - Indefinido u Opcional)</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="vp_fecha_salida">Fecha de Salida *</label>
+                    <input id="vp_fecha_salida" type="date">
+                  </div>
+                </div>
+
+                <div class="grid cols-1" id="vp_fecha_devolucion_wrap" style="margin-bottom:12px; max-width:480px;">
+                  <div class="field">
+                    <label for="vp_fecha_devolucion_estimada" id="vp_fecha_devolucion_label">Fecha Estimada de Devolución *</label>
+                    <input id="vp_fecha_devolucion_estimada" type="date">
+                    <small id="vp_fecha_devolucion_hint" class="muted" style="display:none; font-size:11.5px; margin-top:4px;">
+                      ℹ️ Modalidad 4 Firmas: Dejar en blanco si es por Tiempo Indefinido (valor por defecto) o selecciona una fecha estimada.
+                    </small>
+                  </div>
+                </div>
+
+                <!-- Agregar Ítems al Vale -->
+                <div style="border-top:1px dashed var(--border); padding-top:14px; margin-top:14px;">
+                  <h4 style="margin:0 0 10px 0; font-size:14px;">📦 Artículos y Bienes a Prestar</h4>
+                  <div class="grid cols-4" style="align-items:end; gap:8px;">
+                    <div class="field" style="grid-column: span 2;">
+                      <label for="vp_item_select">Selecciona del Catálogo Disponible</label>
+                      <select id="vp_item_select">
+                        <option value="">- Cargando catálogo... -</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="vp_item_cant">Cantidad</label>
+                      <input id="vp_item_cant" type="number" min="1" value="1">
+                    </div>
+                    <div class="field">
+                      <label for="vp_item_estado">Estado Físico Salida</label>
+                      <select id="vp_item_estado">
+                        <option value="BUEN ESTADO">BUEN ESTADO</option>
+                        <option value="REGULAR">REGULAR</option>
+                        <option value="CON DETALLES">CON DETALLES</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="grid cols-3" style="align-items:end; gap:8px; margin-top:8px;">
+                    <div class="field">
+                      <label for="vp_item_serie">Serie / Placas / Modelo (Opcional)</label>
+                      <input id="vp_item_serie" placeholder="Ej. Placas, VIN o Número de serie">
+                    </div>
+                    <div class="field">
+                      <label for="vp_item_obs">Observaciones del Artículo</label>
+                      <input id="vp_item_obs" placeholder="Ej. Con cargador y funda / Llanta de refacción">
+                    </div>
+                    <div>
+                      <button id="btn-vp-add-item" type="button" class="btn-secondary" style="width:100%;">+ Agregar al Vale</button>
+                    </div>
+                  </div>
+
+                  <!-- Tabla de artículos agregados -->
+                  <div style="margin-top:14px; overflow-x:auto;">
+                    <table class="table" id="vp_items_table" style="width:100%; font-size:13px;">
+                      <thead>
+                        <tr>
+                          <th style="width:30px;">#</th>
+                          <th>Descripción</th>
+                          <th>Serie / Modelo</th>
+                          <th style="width:60px; text-align:center;">Cant.</th>
+                          <th style="width:110px;">Estado Salida</th>
+                          <th>Observaciones</th>
+                          <th style="width:60px; text-align:center;">Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody id="vp_items_tbody">
+                        <tr><td colspan="7" class="text-center muted" style="padding:16px;">No has agregado ningún artículo al vale provisional.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div class="field" style="margin-top:12px;">
+                    <label for="vp_obs_prestamo">Observaciones Generales del Préstamo</label>
+                    <textarea id="vp_obs_prestamo" rows="2" placeholder="Observaciones adicionales, justificación del operativo o acuerdos de entrega..." style="width:100%; border-radius:6px; padding:8px; font-family:inherit;"></textarea>
+                  </div>
+                </div>
+
+                <div style="margin-top:18px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                  <button id="btn-vp-cancelar-form" type="button" class="btn-secondary">Volver a Solicitud de Consumibles</button>
+                  <div style="display:flex; gap:10px; align-items:center;">
+                    <span id="vp_form_msg" class="msg"></span>
+                    <button id="btn-vp-guardar" type="button" class="btn-primary" style="padding:8px 20px;">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                      Generar Vale Provisional
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -306,7 +560,7 @@
               <div id="respaldo-consulta-card" class="card">
                 <h3 style="margin:0 0 6px 0;">Respaldo de Vale Firmado (Opcional)</h3>
                 <p class="muted" style="margin:0 0 12px 0; font-size:13px;">
-                  Una vez recabadas las firmas físicas (Solicita, Autoriza y Recibe), puedes adjuntar el escaneo en PDF o imagen como respaldo digital.
+                  Una vez recabadas las firmas del vale (Solicitante, Entrega, Recibe y Autoriza), puedes adjuntar el escaneo en PDF o imagen como respaldo digital.
                 </p>
                 <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                   <input type="file" id="sol_file_respaldo" accept=".pdf,image/*" style="max-width:100%;">
@@ -321,6 +575,9 @@
 
         <!-- 4. VISTA: Almacen (Inventario) -->
         <section id="view-almacen" class="view-section" style="display: none;">
+          <!-- Banner de alerta de stock mínimo -->
+          <div id="alm_alerta_banner" class="hidden" style="margin-bottom:14px; padding:12px 16px; background:#fef2f2; border:1px solid #fecaca; border-left:5px solid #dc2626; border-radius:8px; color:#991b1b; font-weight:600; display:none; align-items:center; justify-content:space-between; gap:12px;"></div>
+
           <div class="card">
             <h3>Búsqueda en Inventario</h3>
             <div class="grid cols-4">
@@ -362,7 +619,7 @@
               <table>
                 <thead>
                   <tr>
-                    <th>CLAVE</th><th>DESCRIPCIÓN</th><th>Categoría</th><th>Unidad</th><th>Stock</th><th>Estatus</th><th>Acciones</th>
+                    <th>CLAVE</th><th>DESCRIPCIÓN</th><th>Categoría</th><th>Unidad</th><th>Stock</th><th>Stock Mín.</th><th>Origen / Control</th><th>Estatus</th><th>Acciones</th>
                   </tr>
                 </thead>
                 <tbody id="alm_tbody"></tbody>
@@ -396,11 +653,29 @@
                 <input id="alm_stock" type="number" step="1" placeholder="Cantidad" value="">
               </div>
               <div class="field">
+                <label for="alm_stock_minimo">Stock Mínimo (Alerta)</label>
+                <input id="alm_stock_minimo" type="number" min="0" step="1" placeholder="Ej. 5" value="0">
+              </div>
+              <div class="field">
+                <label for="alm_origen_adquisicion">Origen de Adquisición</label>
+                <select id="alm_origen_adquisicion">
+                  <option value="COMPRA_DELEGACION">COMPRA DELEGACIÓN</option>
+                  <option value="POR_CONTRATO">POR CONTRATO</option>
+                  <option value="OTRO">OTRO</option>
+                </select>
+              </div>
+              <div class="field">
                 <label for="alm_estado">Estatus</label>
                 <select id="alm_estado">
                   <option value="ACTIVO">ACTIVO</option>
                   <option value="INACTIVO">INACTIVO</option>
                 </select>
+              </div>
+            </div>
+            <div class="grid cols-2" style="margin-top:12px;">
+              <div class="field">
+                <label for="alm_observaciones_control">Observaciones de Control / Origen (Uso interno, no aparece en vale PDF)</label>
+                <input id="alm_observaciones_control" type="text" placeholder="Ej. Adquirido por contrato anual / Compra directa">
               </div>
               <div style="align-self:end; display:flex; gap:8px;">
                 <button id="btn-alm-crear" class="btn-primary">Guardar</button>
@@ -473,24 +748,26 @@
                     <th>Cantidad Propia</th>
                     <th>Estatus Uso</th>
                     <th>Observaciones</th>
+                    <th>Acciones</th>
                   </tr>
                 </thead>
                 <tbody id="reg_tbody">
-                  <tr><td colspan="7" class="muted">Cargando inventario regional...</td></tr>
+                  <tr><td colspan="8" class="muted">Cargando inventario regional...</td></tr>
                 </tbody>
               </table>
             </div>
           </div>
 
-          <!-- Modal: Agregar Activo Regional -->
+          <!-- Modal: Agregar / Editar Activo Regional (con soporte híbrido para PARQUE_VEHICULAR) -->
           <div id="modal-add-regional" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-add-regional-title">
             <div class="modal-box">
               <div class="modal-header">
-                <h3 id="modal-add-regional-title" style="margin:0;">Agregar Activo</h3>
+                <h3 id="modal-add-regional-title" style="margin:0; color:var(--primary);">Agregar Activo</h3>
                 <button type="button" class="btn-icon modal-close" data-close-modal="modal-add-regional" title="Cerrar">&times;</button>
               </div>
               <form id="form-add-regional" novalidate>
-                <div class="grid cols-2">
+                <input type="hidden" id="reg_add_id" value="">
+                <div class="grid cols-3">
                   <div class="field">
                     <label for="reg_add_oficina">Oficina *</label>
                     <select id="reg_add_oficina" name="oficina_id" required>
@@ -505,11 +782,11 @@
                   </div>
                   <div class="field">
                     <label for="reg_add_clave">Clave del Bien *</label>
-                    <input id="reg_add_clave" name="clave_bien" type="text" maxlength="60" required>
+                    <input id="reg_add_clave" name="clave_bien" type="text" maxlength="60" placeholder="Ej. AT-001 / MT-001" required>
                   </div>
                   <div class="field">
                     <label for="reg_add_desc">Descripción *</label>
-                    <input id="reg_add_desc" name="descripcion" type="text" maxlength="255" required>
+                    <input id="reg_add_desc" name="descripcion" type="text" maxlength="255" placeholder="Descripción del bien o vehículo" required>
                   </div>
                   <div class="field">
                     <label for="reg_add_marca">Marca / Modelo</label>
@@ -529,15 +806,494 @@
                       <option value="BUENO">BUENO</option>
                       <option value="REGULAR">REGULAR</option>
                       <option value="MALO">MALO</option>
+                      <option value="BAJA">BAJA</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="reg_add_estatus">Estatus de Uso</label>
+                    <select id="reg_add_estatus" name="estatus_uso">
+                      <option value="ACTIVO">ACTIVO</option>
+                      <option value="PRESTADO">PRESTADO</option>
+                      <option value="EN_REPARACION">EN REPARACIÓN</option>
+                      <option value="BAJA">BAJA</option>
                     </select>
                   </div>
                 </div>
+
+                <!-- SECCIÓN EXCLUSIVA PARA PARQUE_VEHICULAR (Esquema Híbrido) -->
+                <div id="reg_vehiculo_section" class="hidden">
+                  <div class="veh-section" style="border-left-color: var(--accent);">
+                    <div class="veh-section-title" style="margin-bottom:4px;">
+                      <span>A) Datos del Resguardante (Llenado manual en formato impreso)</span>
+                    </div>
+                    <p class="muted" style="margin:0; font-size:12.5px;">
+                      En el PDF generado se imprimirá en blanco la sección <b>DATOS DEL RESGUARDANTE</b> (Nombre Completo, RFC, Puesto, Adscripción/Región, Programa/Operativo, Licencia No. y Vigencia de Licencia) para su llenado a mano al momento de la firma.
+                    </p>
+                  </div>
+
+                  <div class="veh-section">
+                    <div class="veh-section-title">
+                      <span>B1) Datos de la Unidad Vehicular</span>
+                    </div>
+                    <div class="grid cols-4">
+                      <div class="field">
+                        <label for="veh_marca">Marca</label>
+                        <input id="veh_marca" type="text" placeholder="Ej. Toyota / Nissan">
+                      </div>
+                      <div class="field">
+                        <label for="veh_tipo">Tipo</label>
+                        <input id="veh_tipo" type="text" placeholder="Ej. Pick Up / Sedán">
+                      </div>
+                      <div class="field">
+                        <label for="veh_modelo">Modelo (Año)</label>
+                        <input id="veh_modelo" type="text" placeholder="Ej. 2022">
+                      </div>
+                      <div class="field">
+                        <label for="veh_color">Color</label>
+                        <input id="veh_color" type="text" placeholder="Ej. Blanco">
+                      </div>
+                      <div class="field">
+                        <label for="veh_placas">Placas</label>
+                        <input id="veh_placas" type="text" placeholder="Ej. ADE-2344">
+                      </div>
+                      <div class="field">
+                        <label for="veh_serie_vin">Número de Serie (VIN)</label>
+                        <input id="veh_serie_vin" type="text" placeholder="17 caracteres VIN">
+                      </div>
+                      <div class="field">
+                        <label for="veh_cilindros">Cilindros</label>
+                        <input id="veh_cilindros" type="text" placeholder="Ej. 4 Cil.">
+                      </div>
+                      <div class="field">
+                        <label for="veh_poliza_seguro">No. de Póliza de Seguro</label>
+                        <input id="veh_poliza_seguro" type="text" placeholder="Número de póliza">
+                      </div>
+                      <div class="field">
+                        <label for="veh_odometro_km">Lectura de Odómetro (Km)</label>
+                        <input id="veh_odometro_km" type="text" placeholder="Ej. 45,230">
+                      </div>
+                      <div class="field">
+                        <label for="veh_nivel_gasolina">Nivel de Gasolina</label>
+                        <select id="veh_nivel_gasolina">
+                          <option value="">- Seleccionar -</option>
+                          <option value="Vacío">Vacío</option>
+                          <option value="1/4">1/4</option>
+                          <option value="1/2">1/2</option>
+                          <option value="3/4">3/4</option>
+                          <option value="Lleno">Lleno</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="veh-section">
+                    <div class="veh-section-title">
+                      <span>B2) Estado General del Vehículo (B = Bueno | R = Regular | M = Malo)</span>
+                    </div>
+                    <div class="grid cols-4">
+                      <div class="field">
+                        <label for="veh_est_estado_mecanico">Estado Mecánico</label>
+                        <select id="veh_est_estado_mecanico">
+                          <option value="B">B (Bueno)</option>
+                          <option value="R">R (Regular)</option>
+                          <option value="M">M (Malo)</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="veh_est_estado_electrico">Estado Eléctrico</label>
+                        <select id="veh_est_estado_electrico">
+                          <option value="B">B (Bueno)</option>
+                          <option value="R">R (Regular)</option>
+                          <option value="M">M (Malo)</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="veh_est_estado_carroceria">Estado de Carrocería</label>
+                        <select id="veh_est_estado_carroceria">
+                          <option value="B">B (Bueno)</option>
+                          <option value="R">R (Regular)</option>
+                          <option value="M">M (Malo)</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="veh_est_llanta_1">Neumático (Llanta 1)</label>
+                        <select id="veh_est_llanta_1">
+                          <option value="B">B (Bueno)</option>
+                          <option value="R">R (Regular)</option>
+                          <option value="M">M (Malo)</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="veh_est_llanta_2">Neumático (Llanta 2)</label>
+                        <select id="veh_est_llanta_2">
+                          <option value="B">B (Bueno)</option>
+                          <option value="R">R (Regular)</option>
+                          <option value="M">M (Malo)</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="veh_est_llanta_3">Neumático (Llanta 3)</label>
+                        <select id="veh_est_llanta_3">
+                          <option value="B">B (Bueno)</option>
+                          <option value="R">R (Regular)</option>
+                          <option value="M">M (Malo)</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="veh_est_llanta_4">Neumático (Llanta 4)</label>
+                        <select id="veh_est_llanta_4">
+                          <option value="B">B (Bueno)</option>
+                          <option value="R">R (Regular)</option>
+                          <option value="M">M (Malo)</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="veh_est_llanta_5">Neumático (Llanta 5 / Refacción)</label>
+                        <select id="veh_est_llanta_5">
+                          <option value="B">B (Bueno)</option>
+                          <option value="R">R (Regular)</option>
+                          <option value="M">M (Malo)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="veh-section">
+                    <div class="veh-section-title">
+                      <span>B3) Checklist de Accesorios, Herramienta y Documentación (Sí / No / N/A)</span>
+                      <div style="display:flex; gap:6px;">
+                        <button type="button" class="mini" id="btn-veh-chk-all-si">Marcar todo Sí</button>
+                        <button type="button" class="mini" id="btn-veh-chk-all-no">Marcar todo No</button>
+                        <button type="button" class="mini" id="btn-veh-chk-all-na">Marcar todo N/A</button>
+                      </div>
+                    </div>
+                    <div id="veh_checklist_container" class="veh-checklist-grid"></div>
+                  </div>
+                </div>
+
+                <div class="field" style="margin-top:12px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                    <label for="reg_add_obs" style="margin-bottom:0;">Observaciones generales de la unidad / bien</label>
+                    <button type="button" id="btn-reg-ver-historial-modal" class="mini hidden" style="font-size:11px; padding:2px 8px;" title="Ver historial cronológico de movimientos">⏱️ Ver Historial</button>
+                  </div>
+                  <textarea id="reg_add_obs" name="observaciones" rows="2" placeholder="Observaciones adicionales (opcional)"></textarea>
+                </div>
+
                 <div id="reg_add_msg" class="msg"></div>
                 <div class="modal-actions">
                   <button type="button" class="btn-secondary" data-close-modal="modal-add-regional">Cancelar</button>
                   <button type="submit" id="btn-reg-add-save" class="btn-primary">Guardar Activo</button>
                 </div>
               </form>
+            </div>
+          </div>
+
+          <!-- Modal: Transferir Activo entre Oficinas Regionales -->
+          <div id="modal-transferir-regional" class="modal-overlay hidden" role="dialog" aria-modal="true">
+            <div class="modal-box" style="max-width:540px;">
+              <div class="modal-header">
+                <h3 style="margin:0; color:var(--primary);">Transferir Activo entre Oficinas</h3>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-transferir-regional" title="Cerrar">&times;</button>
+              </div>
+              <form id="form-transferir-regional" novalidate>
+                <input type="hidden" id="reg_trans_id" value="">
+                <div id="reg_trans_info" style="padding:10px 12px; background:var(--bg-app); border:1px solid var(--border); border-radius:8px; margin-bottom:14px; font-size:13px;"></div>
+                <div class="grid cols-2">
+                  <div class="field">
+                    <label for="reg_trans_oficina_destino">Oficina Destino *</label>
+                    <select id="reg_trans_oficina_destino" required>
+                      <option value="">- selecciona oficina destino -</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="reg_trans_cantidad">Cantidad a Transferir *</label>
+                    <input id="reg_trans_cantidad" type="number" min="1" step="1" value="1" required>
+                  </div>
+                </div>
+                <div class="field" style="margin-top:12px;">
+                  <label for="reg_trans_motivo">Motivo / Observación de Transferencia</label>
+                  <input id="reg_trans_motivo" type="text" placeholder="Ej. Reubicación de mobiliario / préstamo definitivo">
+                </div>
+                <div id="reg_trans_msg" class="msg"></div>
+                <div class="modal-actions">
+                  <button type="button" class="btn-secondary" data-close-modal="modal-transferir-regional">Cancelar</button>
+                  <button type="submit" id="btn-reg-trans-save" class="btn-primary">Confirmar Transferencia</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <!-- Modal: Historial de Movimientos de Vehículo -->
+          <div id="modal-historial-vehiculo" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-historial-vehiculo-title">
+            <div class="modal-box" style="max-width:640px;">
+              <div class="modal-header">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span style="font-size:20px;">⏱️</span>
+                  <h3 id="modal-historial-vehiculo-title" style="margin:0; color:var(--primary);">Historial de Movimientos</h3>
+                </div>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-historial-vehiculo" title="Cerrar">&times;</button>
+              </div>
+              <div id="historial_vehiculo_info" style="padding:10px 14px; background:var(--bg-app); border:1px solid var(--border); border-radius:8px; margin-bottom:14px; font-size:13px;"></div>
+              
+              <div style="margin-bottom:12px;">
+                <label style="display:block; font-weight:600; margin-bottom:6px; font-size:13px; color:var(--text);">Registro Cronológico de Transferencias y Movimientos:</label>
+                <div id="historial_vehiculo_lista" style="display:flex; flex-direction:column; gap:8px; max-height:220px; overflow-y:auto; padding:2px;"></div>
+              </div>
+
+              <div class="field">
+                <label for="historial_vehiculo_texto" style="font-weight:600; margin-bottom:4px; font-size:12px; color:var(--muted);">Área de texto de solo lectura:</label>
+                <textarea id="historial_vehiculo_texto" rows="3" readonly style="width:100%; font-family:var(--font-mono, monospace); font-size:12px; background:#f9f9f9; border:1px solid var(--border); border-radius:6px; padding:8px; resize:vertical;"></textarea>
+              </div>
+
+              <div class="modal-actions" style="margin-top:16px;">
+                <button type="button" class="btn-secondary" data-close-modal="modal-historial-vehiculo">Cerrar</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4c. VISTA: Inventario Estatal Consolidado (Exclusivo Rodrigo Molina, Jorge Patrón y Admin) -->
+        <section id="view-inventario_estatal" class="view-section" style="display: none;">
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px; margin-bottom:16px;">
+              <div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <h3 style="margin:0;">Panel de Inventario Estatal Consolidado</h3>
+                  <span class="status-badge status-aprobada" style="font-size:11px;">Exclusivo: Rodrigo Molina &amp; Jorge Patrón</span>
+                </div>
+                <p class="muted" style="margin:4px 0 0 0; font-size:13px;">Visión centralizada de todo el inventario delegacional, bienes muebles, parque vehicular, tecnología y consumibles en Baja California Sur.</p>
+              </div>
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button id="btn-estatal-refrescar" class="btn-secondary" type="button">Actualizar</button>
+                <button id="btn-estatal-exportar" class="btn-primary" type="button">Exportar Excel (XLS)</button>
+                <button id="btn-estatal-imprimir" class="btn-secondary" type="button">Imprimir</button>
+              </div>
+            </div>
+
+            <!-- KPIs Estatales -->
+            <div class="kpi-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:16px;">
+              <div class="card" style="padding:14px; border-left:4px solid var(--primary, #621132); margin:0;">
+                <div class="muted" style="font-size:12px;">Total Activos Regionales</div>
+                <div id="kpi-estatal-total" style="font-size:24px; font-weight:700; color:var(--primary, #621132);">0</div>
+                <div class="muted" style="font-size:11px;">En las 4 regiones de BCS</div>
+              </div>
+              <div class="card" style="padding:14px; border-left:4px solid #0284c7; margin:0;">
+                <div class="muted" style="font-size:12px;">Parque Vehicular</div>
+                <div id="kpi-estatal-vehiculos" style="font-size:24px; font-weight:700; color:#0284c7;">0</div>
+                <div class="muted" style="font-size:11px;">Unidades automotrices</div>
+              </div>
+              <div class="card" style="padding:14px; border-left:4px solid #16a34a; margin:0;">
+                <div class="muted" style="font-size:12px;">Mobiliario y Eventos</div>
+                <div id="kpi-estatal-mobiliario" style="font-size:24px; font-weight:700; color:#16a34a;">0</div>
+                <div class="muted" style="font-size:11px;">Bienes en oficinas</div>
+              </div>
+              <div class="card" style="padding:14px; border-left:4px solid #9333ea; margin:0;">
+                <div class="muted" style="font-size:12px;">Tablets y Starlinks</div>
+                <div id="kpi-estatal-tablets" style="font-size:24px; font-weight:700; color:#9333ea;">0</div>
+                <div class="muted" style="font-size:11px;">Equipos de conectividad</div>
+              </div>
+              <div class="card" style="padding:14px; border-left:4px solid #ea580c; margin:0;">
+                <div class="muted" style="font-size:12px;">Almacén Central (Stock)</div>
+                <div id="kpi-estatal-almacen" style="font-size:24px; font-weight:700; color:#ea580c;">0</div>
+                <div id="kpi-estatal-articulos" class="muted" style="font-size:11px;">0 artículos consumibles</div>
+              </div>
+            </div>
+
+            <!-- Filtros rápidos -->
+            <div class="grid cols-3" style="gap:10px;">
+              <div class="field">
+                <label for="estatal_filter_q">Búsqueda rápida</label>
+                <input id="estatal_filter_q" placeholder="Clave, descripción, serie, oficina...">
+              </div>
+              <div class="field">
+                <label for="estatal_filter_region">Región</label>
+                <select id="estatal_filter_region">
+                  <option value="">Todas las Regiones</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="estatal_filter_rubro">Rubro de Inventario</label>
+                <select id="estatal_filter_rubro">
+                  <option value="">Todos los Rubros</option>
+                  <option value="1">1. Archivo y Materiales (Gabriel Fiol)</option>
+                  <option value="2">2. Parque Vehicular (Evelia Contreras)</option>
+                  <option value="3">3. Mobiliario y Eventos (Jesús Salvador)</option>
+                  <option value="4">4. Tablets y Starlinks (Luis Eduardo)</option>
+                </select>
+              </div>
+            </div>
+            <div id="estatal_msg" class="msg"></div>
+          </div>
+
+          <!-- Tabla de Resultados -->
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
+              <div class="muted">Listado Consolidado — <span id="estatal_meta">0 registros</span></div>
+              <div id="estatal_regiones_badge" class="muted" style="font-size:12px;"></div>
+            </div>
+            <div class="table-scroll">
+              <table id="estatal_table">
+                <thead>
+                  <tr>
+                    <th>Clave Bien</th>
+                    <th>Rubro</th>
+                    <th>Descripción</th>
+                    <th>Marca / Modelo</th>
+                    <th>Serie / Placas</th>
+                    <th style="text-align:center;">Cant.</th>
+                    <th>Región</th>
+                    <th>Oficina / Ubicación</th>
+                    <th>Estado Físico</th>
+                    <th>Estatus</th>
+                  </tr>
+                </thead>
+                <tbody id="estatal_tbody">
+                  <tr><td colspan="10" class="muted">Cargando inventario consolidado...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4b. VISTA: Vales Provisionales (Préstamo para Operativos) -->
+        <section id="view-vales_prestamo" class="view-section" style="display: none;">
+          <div class="view-header">
+            <div class="view-title">
+              <h3>Control de Préstamos Temporales</h3>
+              <h1>Vales Provisionales</h1>
+              <p>Seguimiento de salidas y devoluciones de bienes y equipo asignados a operativos de campo.</p>
+            </div>
+            <button class="btn-primary" id="btn-nuevo-vale-desde-lista">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              Nuevo Vale Provisional
+            </button>
+          </div>
+
+          <div class="card">
+            <!-- Barra de Filtros -->
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:16px;">
+              <div style="flex:1; min-width:200px;">
+                <input id="vp_filter_q" placeholder="Buscar por folio, solicitante u operativo..." style="width:100%;">
+              </div>
+              <div style="min-width:160px;">
+                <select id="vp_filter_firmas" style="width:100%;">
+                  <option value="TODOS">Todos los Tipos de Vale</option>
+                  <option value="2">2 Firmas (Delegación)</option>
+                  <option value="4">4 Firmas (Regional / Especial)</option>
+                </select>
+              </div>
+              <div style="min-width:160px;">
+                <select id="vp_filter_estado" style="width:100%;">
+                  <option value="TODOS">Todos los Estados</option>
+                  <option value="SOLICITADO">SOLICITADO</option>
+                  <option value="AUTORIZADO_EN_PRESTAMO">AUTORIZADO (EN PRÉSTAMO)</option>
+                  <option value="DEVUELTO">DEVUELTO</option>
+                  <option value="CANCELADO">CANCELADO</option>
+                </select>
+              </div>
+              <div style="min-width:180px;">
+                <select id="vp_filter_rubro" style="width:100%;">
+                  <option value="0">Todos los Rubros</option>
+                  <option value="1">1. Archivo y Materiales</option>
+                  <option value="2">2. Parque Vehicular</option>
+                  <option value="3">3. Mobiliario y Eventos</option>
+                  <option value="4">4. Tablets y Starlinks</option>
+                </select>
+              </div>
+              <div style="min-width:180px;">
+                <select id="vp_filter_depto" style="width:100%;">
+                  <option value="0">Todos los Departamentos</option>
+                </select>
+              </div>
+              <button id="btn-vp-filter-refresh" class="btn-secondary" title="Actualizar">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              </button>
+            </div>
+
+            <!-- Tabla de Vales -->
+            <div id="vp_table_container" style="overflow-x:auto;">
+              <table class="table" id="vp_main_table" style="width:100%;">
+                <thead>
+                  <tr>
+                    <th>Folio</th>
+                    <th>Tipo Vale</th>
+                    <th>Rubro</th>
+                    <th>Departamento</th>
+                    <th>Operativo / Comisión</th>
+                    <th>Solicitante</th>
+                    <th>F. Salida</th>
+                    <th>F. Devolución</th>
+                    <th>Estado</th>
+                    <th style="text-align:center;">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody id="vp_main_tbody">
+                  <tr><td colspan="10" class="text-center muted" style="padding:24px;">Cargando vales provisionales...</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="vp_main_msg" class="msg" style="margin-top:10px;"></div>
+          </div>
+
+          <!-- Modal: Devolución de Vale Provisional -->
+          <div id="modal-devolucion-vale" class="modal-overlay hidden" role="dialog" aria-modal="true" style="z-index:9999;">
+            <div class="modal-box" style="max-width:760px; width:95%; max-height:90vh; overflow-y:auto; padding:20px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:14px;">
+                <div>
+                  <h3 style="margin:0; color:var(--primary, #621132);">📥 Registrar Devolución de Bienes en Préstamo</h3>
+                  <span id="vp_dev_folio_badge" class="status-badge status-aprobada" style="margin-top:4px;">Folio</span>
+                </div>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-devolucion-vale" title="Cerrar">&times;</button>
+              </div>
+
+              <div id="vp_dev_info_box" style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:10px; margin-bottom:14px; font-size:13px;">
+                <!-- Resumen del vale -->
+              </div>
+
+              <div class="field" style="margin-bottom:14px; max-width:280px;">
+                <label for="vp_dev_fecha_real" style="font-weight:600; color:var(--primary, #621132);">📅 Fecha de Regreso / Devolución Real *</label>
+                <input id="vp_dev_fecha_real" type="date" required style="width:100%;">
+                <small class="muted" style="font-size:11px;">Indica cuándo regresaron los artículos a resguardo.</small>
+              </div>
+
+              <h4 style="margin:0 0 8px 0; font-size:13.5px;">Recepción e Inspección Física de Artículos:</h4>
+              <div style="overflow-x:auto; margin-bottom:14px;">
+                <table class="table" style="width:100%; font-size:12.5px;">
+                  <thead>
+                    <tr>
+                      <th>Bien / Material</th>
+                      <th style="width:50px; text-align:center;">Cant.</th>
+                      <th style="width:170px;">Estado al Devolver</th>
+                      <th>Observaciones de Recepción</th>
+                    </tr>
+                  </thead>
+                  <tbody id="vp_dev_items_tbody">
+                    <!-- Filas dinámicas -->
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="field" style="margin-bottom:14px;">
+                <label for="vp_dev_obs_general">Observaciones Generales de la Devolución</label>
+                <textarea id="vp_dev_obs_general" rows="2" placeholder="Notas sobre el estado general del equipo entregado, faltantes o incidencias..." style="width:100%; border-radius:6px; padding:8px; font-family:inherit;"></textarea>
+              </div>
+
+              <div class="field" style="margin-bottom:14px;">
+                <label for="vp_dev_pdf_firmado" style="font-weight:600; color:var(--primary, #621132);">
+                  📎 Adjuntar Vale Firmado (PDF escaneado con firmas de salida y regreso) <span style="font-weight:normal; color:var(--muted);">(Opcional)</span>
+                </label>
+                <input type="file" id="vp_dev_pdf_firmado" accept="application/pdf" style="width:100%; padding:6px; border:1px solid var(--border); border-radius:6px; background:var(--surface);">
+                <small class="muted" style="font-size:11px;">Puedes subir el documento PDF escaneado con firmas autógrafas para su resguardo digital en el servidor.</small>
+              </div>
+
+              <div id="vp_dev_msg" class="msg" style="margin-bottom:10px;"></div>
+
+              <div class="modal-actions" style="display:flex; justify-content:flex-end; gap:10px;">
+                <button type="button" class="btn-secondary" data-close-modal="modal-devolucion-vale">Cancelar</button>
+                <button id="btn-confirmar-devolucion-vale" class="btn-primary" type="button" style="background:#15803d; border-color:#15803d;">
+                  ✓ Confirmar Devolución e Ingresar a Inventario
+                </button>
+              </div>
             </div>
           </div>
         </section>
@@ -662,11 +1418,106 @@
        </div>
      </section>
 
+        <!-- 8. VISTA: Gestión de Perfiles de Usuarios (Exclusivo Admin) -->
+        <section id="view-usuarios" class="view-section" style="display: none;">
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
+              <div>
+                <h3 style="margin:0;">Gestión de Usuarios y Perfiles</h3>
+                <p class="muted" style="margin:4px 0 0 0; font-size:13px;">Edita el nombre completo, región asignada, departamento/oficialía y restablece contraseñas con cifrado seguro.</p>
+              </div>
+              <button id="btn-usuarios-refresh" class="btn-secondary" type="button">Actualizar lista</button>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Usuario</th>
+                    <th>Nombre Completo</th>
+                    <th>Rol</th>
+                    <th>Región Asignada</th>
+                    <th>Departamento / Oficialía</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody id="usuarios_tbody">
+                  <tr><td colspan="7" class="muted">Cargando usuarios...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Modal: Editar Perfil de Usuario (Solo Admin) -->
+          <div id="modal-edit-usuario" class="modal-overlay hidden" role="dialog" aria-modal="true">
+            <div class="modal-box" style="max-width:620px;">
+              <div class="modal-header">
+                <h3 style="margin:0; color:var(--primary);">Editar Perfil de Usuario</h3>
+                <button type="button" class="btn-icon modal-close" id="btn-x-edit-usuario" data-close-modal="modal-edit-usuario" data-close-usr-modal="true" data-bs-dismiss="modal" title="Cerrar">&times;</button>
+              </div>
+              <form id="form-edit-usuario" novalidate>
+                <input type="hidden" id="usr_edit_id" value="">
+                <div class="grid cols-2">
+                  <div class="field">
+                    <label for="usr_edit_username">Usuario (Login)</label>
+                    <input id="usr_edit_username" type="text" readonly class="readonly">
+                  </div>
+                  <div class="field">
+                    <label for="usr_edit_rol">Rol en el Sistema</label>
+                    <select id="usr_edit_rol">
+                      <option value="USUARIO">USUARIO (Departamento / Enlace Regional)</option>
+                      <option value="ENCARGADO">ENCARGADO (Rubro Regional / Almacén)</option>
+                      <option value="ADMIN">ADMIN (Administrador General)</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="grid cols-3" style="margin-top:12px;">
+                  <div class="field">
+                    <label for="usr_edit_nombre">Nombre(s) *</label>
+                    <input id="usr_edit_nombre" name="nombre" type="text" placeholder="Nombre(s)" required>
+                  </div>
+                  <div class="field">
+                    <label for="usr_edit_primer_ap">Primer Apellido</label>
+                    <input id="usr_edit_primer_ap" name="primer_apellido" type="text" placeholder="Primer apellido">
+                  </div>
+                  <div class="field">
+                    <label for="usr_edit_segundo_ap">Segundo Apellido</label>
+                    <input id="usr_edit_segundo_ap" name="segundo_apellido" type="text" placeholder="Segundo apellido">
+                  </div>
+                </div>
+                <div class="grid cols-2" style="margin-top:12px;">
+                  <div class="field">
+                    <label for="usr_edit_region">Región Asignada</label>
+                    <select id="usr_edit_region">
+                      <option value="">La Paz (Delegación Central por defecto)</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="usr_edit_oficialia">Departamento / Oficialía</label>
+                    <select id="usr_edit_oficialia">
+                      <option value="">- Sin oficialía asignada -</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field" style="margin-top:12px;">
+                  <label for="usr_edit_password">Nueva Contraseña (dejar en blanco para mantener la actual)</label>
+                  <input id="usr_edit_password" type="password" autocomplete="new-password" placeholder="Escribe nueva contraseña solo si deseas cambiarla">
+                </div>
+                <div id="usr_edit_msg" class="msg"></div>
+                <div class="modal-actions">
+                  <button type="button" class="btn-secondary" id="btn-cancelar-edit-usuario" data-close-modal="modal-edit-usuario" data-close-usr-modal="true" data-bs-dismiss="modal">Cancelar</button>
+                  <button type="submit" id="btn-usr-edit-save" class="btn-primary">Guardar Cambios</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
+
       </div>
     </main>
   </div>
  
-  <script src="/app.js?v=13"></script>
+  <script src="/app.js?v=33"></script>
 
   <script>
     // Filtro de seguridad rápido para evitar parpadeos si no hay sesión

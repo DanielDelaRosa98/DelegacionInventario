@@ -22,10 +22,11 @@
       min-height: 100dvh;
       width: 100%;
     }
-    /* Mitad superior azul */
+    /* Mitad superior guinda institucional */
     .login-top {
       min-height: 46vh;
-      background: #1a5596;
+      background: linear-gradient(135deg, #621132 0%, #4E0D28 100%);
+      border-bottom: 4px solid #B38E5D;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -66,7 +67,7 @@
       max-width: 520px;
     }
     .login-title {
-      color: #153e70;
+      color: #621132;
       font-size: 20px;
       font-weight: 700;
       margin: 0 0 28px 0;
@@ -78,27 +79,27 @@
       margin-bottom: 26px;
     }
     .login-icon {
-      color: #1a5596;
+      color: #621132;
       width: 30px;
       height: 30px;
       flex-shrink: 0;
     }
     .login-input-wrap {
       flex: 1;
-      border-bottom: 1.5px solid #c8d0da;
+      border-bottom: 1.5px solid #d6c5cb;
       padding-bottom: 6px;
       display: flex;
       align-items: center;
       transition: border-color 0.2s ease;
     }
     .login-input-wrap:focus-within {
-      border-bottom-color: #1a5596;
+      border-bottom-color: #621132;
     }
     .login-input-wrap input {
       width: 100%;
       border: none;
       background: transparent;
-      color: #334155;
+      color: #2d1f24;
       font-size: 16px;
       padding: 4px 0;
       outline: none;
@@ -109,7 +110,7 @@
     .btn-eye {
       background: transparent;
       border: none;
-      color: #1a5596;
+      color: #621132;
       padding: 4px;
       cursor: pointer;
       display: flex;
@@ -117,7 +118,7 @@
       justify-content: center;
     }
     .btn-eye:hover {
-      color: #0f3868;
+      color: #4E0D28;
     }
     .login-actions {
       display: flex;
@@ -139,13 +140,13 @@
       width: 18px;
       height: 18px;
       margin: 0;
-      accent-color: #1a5596;
+      accent-color: #621132;
       cursor: pointer;
     }
     .btn-submit {
-      background: #1a5596;
+      background: #621132;
       color: #ffffff;
-      border: none;
+      border: 1px solid #B38E5D;
       border-radius: 999px;
       padding: 10px 48px;
       font-size: 16px;
@@ -154,7 +155,7 @@
       transition: background 0.2s ease, transform 0.1s ease;
     }
     .btn-submit:hover {
-      background: #134277;
+      background: #4E0D28;
     }
     .btn-submit:active {
       transform: scale(0.98);
@@ -215,7 +216,10 @@
     <div class="login-top">
       <div class="login-brand">
         <img src="/logo.png" alt="Logo Inventarios" onerror="this.style.display='none'">
-        <h1>Inventarios</h1>
+        <div>
+          <h1>Inventarios</h1>
+          <div style="color:#B38E5D; font-size:15px; font-weight:600; letter-spacing:0.6px; margin-top:4px;">Delegación Baja California Sur</div>
+        </div>
       </div>
     </div>
 
@@ -320,7 +324,7 @@
         const username = userInput.value.trim();
         const password = passInput.value;
 
-        msg.style.color = '#1a5596';
+        msg.style.color = '#621132';
         msg.textContent = 'Validando...';
         btnLogin.disabled = true;
 

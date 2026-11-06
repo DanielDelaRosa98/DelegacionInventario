@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  db:
+    image: mariadb:10.11
+    container_name: inventario_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASS:-secreta123}
+      MYSQL_DATABASE: inventario
+    volumes:
+      - ./database_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    networks:
+      - inventario_net
+
+  app:
+    image: node:20-alpine
+    container_name: inventario_web
+    restart: unless-stopped
+    working_dir: /usr/src/app
+    volumes:
+      - ./:/usr/src/app
+      - ./respaldos_sistema:/usr/src/app/respaldos_sistema
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: inventario
+      DB_USER_READ: root
+      DB_PASS_READ: ${DB_PASS:-secreta123}
+      DB_USER_OPS: root
+      DB_PASS_OPS: ${DB_PASS:-secreta123}
+      JWT_SECRET: clave_secreta_inventario_bcs_2026
+      COOKIE_SECURE: "false"
+    command: sh -c "npm install && node server.js"
+    depends_on:
+      - db
+    networks:
+      - inventario_net
+
+networks:
+  inventario_net:
+    driver: bridge
