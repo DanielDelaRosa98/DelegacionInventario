@@ -88,10 +88,6 @@
 
     <!-- MAIN CONTENT (Derecha) -->
     <main id="main-content">
-      <div id="modo-prueba-banner" class="modo-prueba-banner hidden" role="status">
-        🧪 <strong>FASE DE PRUEBA GRUPAL ACTIVA</strong> — Las solicitudes y vales creados son de práctica y NO descuentan ni afectan ningún inventario real.
-      </div>
-      
       <!-- Topbar -->
       <header id="topbar">
         <div class="topbar-left" style="display:flex; align-items:center; gap:10px;">
@@ -1486,29 +1482,6 @@
 
         <!-- 8. VISTA: Gestión de Perfiles de Usuarios (Exclusivo Admin) -->
         <section id="view-usuarios" class="view-section" style="display: none;">
-          <!-- Control de Fase de Prueba Grupal (v61) -->
-          <div class="card" id="card-control-prueba-grupal" style="margin-bottom:16px; border:2px solid #f59e0b; background:linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);">
-            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
-              <div>
-                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                  <h3 style="margin:0; color:#92400e;">🧪 Control de Fase de Prueba Grupal</h3>
-                  <span id="badge-modo-prueba-estado" class="badge" style="background:#f59e0b; color:#fff; font-weight:700; padding:4px 10px; border-radius:999px;">MODO PRUEBA ACTIVO</span>
-                </div>
-                <p style="margin:6px 0 0 0; font-size:13px; color:#78350f; max-width:780px;">
-                  Mientras el <strong>Modo de Prueba Grupal</strong> esté activo, todas las nuevas <strong>Solicitudes de Almacén</strong> y <strong>Vales Provisionales</strong> se etiquetan con <code>🧪 PRUEBA</code> y <strong>NO descuentan ni bloquean existencias reales</strong> en Almacén, Parque Vehicular, Mobiliario ni Tabletas. El Vale real <strong>#3 (Víctor Huerta)</strong> permanece protegido y excluido de la purga.
-                </p>
-              </div>
-              <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                <button id="btn-toggle-modo-prueba" class="btn-primary" type="button" style="background:#b45309; border-color:#92400e;">
-                  🔄 Cambiar Estado Modo Prueba
-                </button>
-                <button id="btn-purgar-pruebas" class="btn-secondary" type="button" style="background:#fee2e2; color:#991b1b; border:1px solid #f87171; font-weight:700;">
-                  🧹 Purgar todos los registros de prueba (Conservar Vale #3)
-                </button>
-              </div>
-            </div>
-          </div>
-
           <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
               <div>
@@ -1648,8 +1621,10 @@
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
               <input type="file" id="tab_excel_file_input" accept=".xlsx,.xls" style="display:none;">
-              <button type="button" id="btn-tab-bitacora" class="btn-secondary hidden" title="Consultar bitácora de movimientos de tabletas (Solo Administrador)">📜 Log de Movimientos (Tabletas)</button>
-              <button type="button" id="btn-tab-importar-excel" class="btn-secondary" title="Subir Excel actualizado para completar nombres de resguardantes por No. de Resguardo o IMEI">📥 Importar Nombres (Excel)</button>
+              <button type="button" id="btn-tab-agregar" class="btn-primary hidden" title="Dar de alta una nueva tableta o activo en el padrón oficial">+ Agregar Tableta</button>
+              <button type="button" id="btn-tab-nuevo-resguardo" class="btn-secondary hidden" title="Seleccionar una tableta disponible y generar un nuevo resguardo personal">➕ Nuevo Resguardo</button>
+              <button type="button" id="btn-tab-bitacora" class="btn-secondary hidden" title="Consultar bitácora e historial de movimientos de tabletas">📜 Log de Movimientos (Tabletas)</button>
+              <button type="button" id="btn-tab-importar-excel" class="btn-secondary hidden" title="Subir Excel actualizado para completar nombres de resguardantes por No. de Resguardo o IMEI">📥 Importar Nombres (Excel)</button>
               <button type="button" id="btn-tab-refresh" class="btn-primary">🔄 Actualizar</button>
             </div>
           </div>
@@ -1821,6 +1796,12 @@
               </div>
               <form id="form-tab-asignar" novalidate>
                 <input type="hidden" id="tab_asig_id" value="">
+                <div class="field" style="margin-bottom:10px;">
+                  <label for="tab_asig_select_tableta">Seleccionar Tableta Disponible *</label>
+                  <select id="tab_asig_select_tableta" required>
+                    <option value="">Selecciona una tableta disponible...</option>
+                  </select>
+                </div>
                 <div id="tab_asig_equipo_info" style="background:#F0FDF4; border:1px solid #BBF7D0; padding:10px 12px; border-radius:6px; margin-bottom:12px; font-size:13px;"></div>
                 <div class="grid cols-2" style="gap:10px;">
                   <div class="field">
@@ -1991,10 +1972,12 @@
                   <label for="tab_bit_filter_accion">Acción</label>
                   <select id="tab_bit_filter_accion">
                     <option value="">Todas</option>
+                    <option value="ALTA_TABLETA">ALTA_TABLETA</option>
                     <option value="GENERAR_DEVOLUCION">GENERAR_DEVOLUCION</option>
                     <option value="CONFIRMAR_RECIBIDO">CONFIRMAR_RECIBIDO</option>
                     <option value="ASIGNAR_RESGUARDO">ASIGNAR_RESGUARDO</option>
                     <option value="EDITAR_TABLETA">EDITAR_TABLETA</option>
+                    <option value="ELIMINAR_TABLETA">ELIMINAR_TABLETA</option>
                     <option value="IMPORTAR_NOMBRES">IMPORTAR_NOMBRES</option>
                     <option value="PRESTAMO_PROVISIONAL">PRESTAMO_PROVISIONAL</option>
                     <option value="REINTEGRO_PROVISIONAL">REINTEGRO_PROVISIONAL</option>
@@ -2029,6 +2012,100 @@
               <div class="modal-actions">
                 <button type="button" class="btn-secondary" data-close-modal="modal-tab-bitacora">Cerrar</button>
               </div>
+            </div>
+          </div>
+
+          <!-- Modal 5: Agregar Nueva Tableta / Activo (Admin y Luis Eduardo) -->
+          <div id="modal-tab-agregar" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-tab-agregar-title">
+            <div class="modal-box" style="max-width:740px;">
+              <div class="modal-header">
+                <h3 id="modal-tab-agregar-title" style="margin:0; color:var(--primary);">➕ Agregar Nueva Tableta / Activo</h3>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-tab-agregar" title="Cerrar">&times;</button>
+              </div>
+              <form id="form-tab-agregar" novalidate>
+                <div class="grid cols-3" style="gap:10px;">
+                  <div class="field">
+                    <label for="tab_add_no_resg">Código / No. Resguardo *</label>
+                    <input id="tab_add_no_resg" type="number" min="1" required placeholder="Ej. 277">
+                  </div>
+                  <div class="field">
+                    <label for="tab_add_serie">Número de Serie *</label>
+                    <input id="tab_add_serie" type="text" required placeholder="Número de serie del equipo">
+                  </div>
+                  <div class="field">
+                    <label for="tab_add_imei">IMEI *</label>
+                    <input id="tab_add_imei" type="text" required placeholder="IMEI de 15 dígitos">
+                  </div>
+                  <div class="field">
+                    <label for="tab_add_marca">Marca *</label>
+                    <input id="tab_add_marca" type="text" value="Compac" required placeholder="Compac">
+                  </div>
+                  <div class="field">
+                    <label for="tab_add_modelo">Modelo *</label>
+                    <input id="tab_add_modelo" type="text" value="QTab LTE" required placeholder="QTab LTE">
+                  </div>
+                  <div class="field">
+                    <label for="tab_add_descripcion">Descripción</label>
+                    <input id="tab_add_descripcion" type="text" value="Tablet Compac" placeholder="Tablet Compac">
+                  </div>
+                  <div class="field">
+                    <label for="tab_add_region">Región / Municipio *</label>
+                    <select id="tab_add_region" required>
+                      <option value="LA PAZ">LA PAZ</option>
+                      <option value="LOS CABOS">LOS CABOS</option>
+                      <option value="COMONDU">COMONDU</option>
+                      <option value="MULEGE">MULEGE</option>
+                    </select>
+                  </div>
+                  <div class="field" style="grid-column: span 2;">
+                    <label for="tab_add_oficina">Oficina / Programa *</label>
+                    <select id="tab_add_oficina" required>
+                      <option value="Delegación La Paz">Delegación La Paz</option>
+                      <option value="Región La Paz">Región La Paz</option>
+                      <option value="PCD - Programa de Discapacidad">PCD - Programa de Discapacidad</option>
+                      <option value="PAM - Programa Adulto Mayor">PAM - Programa Adulto Mayor</option>
+                      <option value="Región Los Cabos">Región Los Cabos</option>
+                      <option value="Región Comondú">Región Comondú</option>
+                      <option value="Región Mulegé">Región Mulegé</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="tab_add_estado_asig">Estatus Inicial *</label>
+                    <select id="tab_add_estado_asig" required>
+                      <option value="DISPONIBLE" selected>DISPONIBLE</option>
+                      <option value="EN_RESGUARDO">EN_RESGUARDO</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="tab_add_estatus">Estado Físico</label>
+                    <select id="tab_add_estatus">
+                      <option value="BUENO" selected>BUENO</option>
+                      <option value="INCOMPLETO">INCOMPLETO</option>
+                      <option value="DAÑADO">DAÑADO</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="tab_add_caja_no">No. Caja</label>
+                    <input id="tab_add_caja_no" type="text" placeholder="Opcional (Ej. 14)">
+                  </div>
+                </div>
+                <div class="grid cols-2" style="gap:10px; margin-top:8px;">
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="tab_add_cargador" checked> Incluye Cargador Original
+                  </label>
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="tab_add_caja" checked> Incluye Caja Original
+                  </label>
+                </div>
+                <div class="field" style="margin-top:10px;">
+                  <label for="tab_add_obs">Accesorios / Observaciones</label>
+                  <textarea id="tab_add_obs" rows="2" placeholder="Accesorios incluidos, estado físico u observaciones adicionales..."></textarea>
+                </div>
+                <div class="modal-actions">
+                  <button type="button" class="btn-secondary" data-close-modal="modal-tab-agregar">Cancelar</button>
+                  <button type="submit" class="btn-primary" id="btn-tab-add-submit">💾 Guardar Nueva Tableta</button>
+                </div>
+              </form>
             </div>
           </div>
         </section>

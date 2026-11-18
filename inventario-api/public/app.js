@@ -222,6 +222,56 @@
     );
   }
 
+  // Control de Acceso Estricto al Módulo de Tabletas Digitales:
+  // Solo Admin, Luis Eduardo (operativo completo) y Jorge/Rodrigo (solo lectura). Gabriel Fiol y demás usuarios quedan bloqueados.
+  function canViewTabletas(user = CURRENT_USER) {
+    const u = user || CURRENT_USER || {};
+    const uname = String(u.username || UI_PERMISOS?.user || '').toLowerCase().trim();
+    const role = String(u.rol || u.role || UI_PERMISOS?.rol || '').toUpperCase().trim();
+    const fullName = [u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO, u.primer_ap, u.segundo_ap, u.nombre_completo]
+      .filter(Boolean)
+      .join(' ')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+
+    if (uname === 'gabrielfiol' || uname === 'fiol' || uname === 'encargado' || fullName.includes('fiol')) {
+      return false;
+    }
+    if (role === 'ADMIN' || uname === 'admin') return true;
+    if (['luiseduardo', 'luismayoral'].includes(uname) || fullName.includes('luis eduardo') || fullName.includes('mayoral geraldo')) {
+      return true;
+    }
+    if (['jorge', 'jorgepatron', 'rodrigo'].includes(uname) || fullName.includes('jorge luis patron') || fullName.includes('rodrigo molina')) {
+      return true;
+    }
+    return false;
+  }
+
+  function canEditTabletas(user = CURRENT_USER) {
+    const u = user || CURRENT_USER || {};
+    const uname = String(u.username || UI_PERMISOS?.user || '').toLowerCase().trim();
+    const role = String(u.rol || u.role || UI_PERMISOS?.rol || '').toUpperCase().trim();
+    const fullName = [u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO, u.primer_ap, u.segundo_ap, u.nombre_completo]
+      .filter(Boolean)
+      .join(' ')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+
+    if (uname === 'gabrielfiol' || uname === 'fiol' || uname === 'encargado' || fullName.includes('fiol')) {
+      return false;
+    }
+    if (['jorge', 'jorgepatron', 'rodrigo'].includes(uname)) {
+      return false;
+    }
+    if (role === 'ADMIN' || uname === 'admin') return true;
+    if (['luiseduardo', 'luismayoral'].includes(uname) || fullName.includes('luis eduardo') || fullName.includes('mayoral geraldo')) {
+      return true;
+    }
+    return false;
+  }
+
   // Regla de Negocio: solo Administrador puede elegir cualquier departamento (Gabriel Fiol solicita bajo su área)
   const canUserSelectAnyDepartment = () => {
     const uname = norm(CURRENT_USER?.username || UI_PERMISOS?.user || '');
@@ -495,29 +545,6 @@
     }
   }
 
-  function syncModoPruebaBannerAndControls() {
-    const activo = Boolean(UI_PERMISOS?.modo_prueba_grupal ?? true);
-    const banner = $('modo-prueba-banner');
-    if (banner) {
-      banner.classList.toggle('hidden', !activo);
-      banner.style.display = activo ? 'block' : 'none';
-    }
-    const badge = $('badge-modo-prueba-estado');
-    if (badge) {
-      badge.textContent = activo ? '🧪 MODO PRUEBA ACTIVO (Cero afectación a BD)' : '🟢 MODO PRODUCCIÓN REAL ACTIVO';
-      badge.style.background = activo ? '#f59e0b' : '#16a34a';
-      badge.style.color = '#ffffff';
-    }
-    const btnToggle = $('btn-toggle-modo-prueba');
-    if (btnToggle) {
-      btnToggle.textContent = activo
-        ? '🟢 Desactivar Modo Prueba (Pasar a Producción Real)'
-        : '🧪 Activar Modo Prueba Grupal';
-      btnToggle.style.background = activo ? '#15803d' : '#b45309';
-      btnToggle.style.borderColor = activo ? '#166534' : '#92400e';
-    }
-  }
-
   function applyPermassions(){  
     const p = uiPerms();
     const uname = String(CURRENT_USER?.username || UI_PERMISOS?.user || '').toLowerCase().trim();
@@ -534,8 +561,13 @@
       } else if (v === 'inventario_estatal') {
         btn.classList.toggle('hidden', !canViewInventarioGeneral());
       } else if (v === 'tabletas') {
-        const canTab = Boolean(p.puedeAccederTabletas);
+        const canTab = canViewTabletas(CURRENT_USER);
         btn.classList.toggle('hidden', !canTab);
+        if (!canTab) {
+          btn.style.display = 'none';
+        } else {
+          btn.style.removeProperty('display');
+        }
       } else if (v === 'reporte' || v === 'graficas') {
         btn.classList.toggle('hidden', hideReportesGraficas);
         if (hideReportesGraficas) {
@@ -566,8 +598,16 @@
     }
 
     // 2B. Botones del módulo de Tabletas Digitales según permisos estrictos
-    if ($('btn-tab-bitacora')) $('btn-tab-bitacora').classList.toggle('hidden', !p.admin);
-    if ($('btn-tab-importar-excel')) $('btn-tab-importar-excel').classList.toggle('hidden', !p.puedeEditarTabletas);
+    const canViewTab = canViewTabletas(CURRENT_USER);
+    const canEditTab = canEditTabletas(CURRENT_USER);
+    if (!canViewTab && $('view-tabletas')) {
+      $('view-tabletas').classList.add('hidden');
+      $('view-tabletas').style.display = 'none';
+    }
+    if ($('btn-tab-agregar')) $('btn-tab-agregar').classList.toggle('hidden', !canEditTab);
+    if ($('btn-tab-nuevo-resguardo')) $('btn-tab-nuevo-resguardo').classList.toggle('hidden', !canEditTab);
+    if ($('btn-tab-importar-excel')) $('btn-tab-importar-excel').classList.toggle('hidden', !canEditTab);
+    if ($('btn-tab-bitacora')) $('btn-tab-bitacora').classList.toggle('hidden', !canViewTab);
 
     // 2C. Acceso a Vales Provisionales (v61: Oculto para Gabriel Fiol ya que Rubro 1 se solicita por Solicitudes de Almacén; Luis Mayoral restringido a Rubro 4)
     const isLuisRubro4 = !p.admin && getAssignedRubroId() === 4;
@@ -618,8 +658,6 @@
         $('vp_filter_rubro').classList.remove('readonly');
       }
     }
-
-    syncModoPruebaBannerAndControls();
 
     // 3. Selector de área/usuario al crear solicitud: bloqueado si no es admin ni gabrielfiol
     const uidIn = $('sol_user_id');  
@@ -731,8 +769,10 @@
     routeKey('POST', '/api/migracion/consolidar-bodega-rm-jesus'),
     routeKey('PUT', '/api/usuarios/:id/perfil'),
     routeKey('GET', '/api/tabletas'),
+    routeKey('POST', '/api/tabletas'),
     routeKey('GET', '/api/tabletas/bitacora'),
     routeKey('PUT', '/api/tabletas/:id'),
+    routeKey('DELETE', '/api/tabletas/:id'),
     routeKey('POST', '/api/tabletas/importar-nombres'),
     routeKey('POST', '/api/tabletas/:id/generar-devolucion'),
     routeKey('PUT', '/api/tabletas/movimientos/:movId/confirmar-devolucion'),
@@ -741,10 +781,7 @@
     routeKey('PUT', '/api/vales-prestamo/:id/devolver'),
     routeKey('PUT', '/api/vales-prestamo/:id/cancelar'),
     routeKey('PUT', '/api/solicitudes/:id/estado'),
-    routeKey('PATCH', '/api/solicitudes/:id/estado'),
-    routeKey('GET', '/api/admin/modo-prueba'),
-    routeKey('PUT', '/api/admin/modo-prueba'),
-    routeKey('DELETE', '/api/admin/purgar-pruebas')
+    routeKey('PATCH', '/api/solicitudes/:id/estado')
   ]);
   async function hasRoute(method, path){ return APP_ROUTES.has(routeKey(method, path)); }
 
@@ -979,8 +1016,8 @@
       toast('No tienes acceso al módulo de Inventario Regional', false);
       return showView('panel_general');
     }
-    if (id === 'tabletas' && !uiPerms().puedeAccederTabletas) {
-      toast('Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales y Administración', false);
+    if (id === 'tabletas' && !canViewTabletas(CURRENT_USER)) {
+      toast('Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales (Jorge Patrón / Rodrigo Molina) y Administración', false);
       return showView('panel_general');
     }
     document.querySelectorAll('.view-section, #view-container > section').forEach(sec => {
@@ -2069,7 +2106,10 @@
     const isAuditorOnly = isAuditorUser();
     const puedeSurtir = !isAuditorOnly && Boolean(p.solicitudes?.puedeSurtir) && !isClosed;
     const canDownloadPdf = Boolean(p.solicitudes?.puedeDescargarPdf || p.admin || p.encargado || isAuditorOnly);
-    const allowEditQty = puedeSurtir && (stNorm === 'EN_PROCESO' || stNorm === 'PARA_FIRMAS');
+    const isStep2 = ['EN_PROCESO', 'EN_REVISION', 'PASO_2'].includes(stNorm);
+    const isLockedFromStep3 = ['PARA_FIRMAS', 'PASO_3', 'COMPLETADA', 'SURTIDA', 'SURTIDO', 'ENTREGADA', 'ENTREGADO', 'APROBADA', 'PASO_4', 'CANCELADA', 'CANCELADO', 'RECHAZADA', 'RECHAZADO'].includes(stNorm);
+    // Los inputs de cantidad_surtida y observaciones SOLO están habilitados en el Paso 2 (EN_PROCESO / EN_REVISION)
+    const allowEditQty = Boolean(puedeSurtir && isStep2 && !isLockedFromStep3);
 
     return `
       <div class="table-scroll">
@@ -2097,7 +2137,7 @@
               const stockAlm = Number(r.stock_almacen ?? r.STOCK_ALMACEN ?? r.STOCK ?? r.stock ?? 0) || 0;
               const hasSurtida = r.cantidad_surtida !== null && r.cantidad_surtida !== undefined && r.cantidad_surtida !== '';
               const rawAtend = hasSurtida ? Number(r.cantidad_surtida) : (Number(r.atendida ?? r.ATENDIDA ?? 0) || 0);
-              const defaultAtend = (!hasSurtida && rawAtend === 0 && stNorm === 'EN_PROCESO')
+              const defaultAtend = (!hasSurtida && rawAtend === 0 && isStep2)
                 ? Math.max(0, Math.min(cant, stockAlm))
                 : rawAtend;
               const obs   = safestr(r.observaciones ?? r.OBSERVACIONES) || '';
@@ -2108,7 +2148,7 @@
                 : `<span style="${stockStyle}">${stockAlm}</span>`;
 
               if (puedeSurtir) {
-                const maxPermitido = UI_PERMISOS?.modo_prueba_grupal ? cant : Math.min(cant, Math.max(stockAlm, defaultAtend));
+                const maxPermitido = Math.min(cant, Math.max(stockAlm, defaultAtend));
                 return `<tr data-det="${escHtml(detId)}" data-clave="${escHtml(clave)}" data-desc="${escHtml(desc)}" data-cant="${cant}" data-stock="${stockAlm}">
                   <td><b>${escHtml(clave)}</b></td>
                   <td>${escHtml(desc)}</td>
@@ -2119,12 +2159,16 @@
                   <td>${
                     allowEditQty
                       ? `<input class="mini-in in-atendida" type="number" min="0" max="${maxPermitido}" step="1" value="${defaultAtend}" style="width:80px; font-weight:700;">`
-                      : `<b>${defaultAtend}</b> <span class="muted" style="font-size:11px;">(Acepta la orden para editar)</span>`
+                      : (isLockedFromStep3
+                          ? `<input class="mini-in in-atendida readonly" type="number" value="${defaultAtend}" disabled readonly tabindex="-1" style="width:80px; font-weight:700; background:#f1f5f9; color:#334155; cursor:not-allowed;" title="Cantidad bloqueada desde el Paso 3 (Para Firmas)">`
+                          : `<b>${defaultAtend}</b> <span class="muted" style="font-size:11px;">(Acepta la orden para editar)</span>`)
                   }</td>
                   <td>${
                     allowEditQty
                       ? `<input class="mini-in in-obs" type="text" value="${escHtml(obs)}" placeholder="Opcional" style="max-width:200px;">`
-                      : escHtml(obs || '-')
+                      : (isLockedFromStep3
+                          ? `<input class="mini-in in-obs readonly" type="text" value="${escHtml(obs)}" disabled readonly tabindex="-1" placeholder="-" style="max-width:200px; background:#f1f5f9; color:#475569; cursor:not-allowed;" title="Observaciones bloqueadas desde el Paso 3 (Para Firmas)">`
+                          : escHtml(obs || '-'))
                   }</td>
                 </tr>`;
               }
@@ -2134,8 +2178,16 @@
                 <td>${escHtml(cat)}</td>
                 <td>${escHtml(uni)}</td>
                 <td>${cant}</td>
-                <td><b>${rawAtend}</b></td>
-                <td>${escHtml(obs || '-')}</td>
+                <td>${
+                  isLockedFromStep3
+                    ? `<input class="mini-in in-atendida readonly" type="number" value="${rawAtend}" disabled readonly tabindex="-1" style="width:80px; font-weight:700; background:#f1f5f9; color:#334155; cursor:not-allowed;">`
+                    : `<b>${rawAtend}</b>`
+                }</td>
+                <td>${
+                  isLockedFromStep3
+                    ? `<input class="mini-in in-obs readonly" type="text" value="${escHtml(obs)}" disabled readonly tabindex="-1" placeholder="-" style="max-width:200px; background:#f1f5f9; color:#475569; cursor:not-allowed;">`
+                    : escHtml(obs || '-')
+                }</td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -2162,7 +2214,7 @@
           ` : ''}
           ${stNorm === 'PARA_FIRMAS' ? `
             <div style="font-size:13px; color:#6b21a8;">
-              <b>Paso 3 de 4 (PARA FIRMAS):</b> Imprime el Vale PDF (ya incluye la firma digital del solicitante y las cantidades surtidas) para recabar firmas físicas. Al entregar el material, márcala como Completada.
+              <b>🔒 Paso 3 de 4 (PARA FIRMAS):</b> Las cantidades surtidas y observaciones han quedado bloqueadas. Imprime el Vale PDF para recabar firmas físicas y, al entregar el material, márcala como Completada.
             </div>
             <div style="display:flex; gap:10px; flex-wrap:wrap;">
               <button class="btn-secondary" id="btn-sol-imprimir-vale-firmas" type="button" style="background:#f3e8ff; color:#6b21a8; border:1px solid #c084fc; font-weight:700;">
@@ -2558,7 +2610,6 @@
     if (!tbody) return { payload: [], validationError: null };
     const payload = [];
     let validationError = null;
-    const isModoPrueba = Boolean(UI_PERMISOS?.modo_prueba_grupal);
 
     tbody.querySelectorAll('tr').forEach(tr => {
       if (validationError) return;
@@ -2585,7 +2636,7 @@
         validationError = `La cantidad a surtir (${atendida}) no puede superar la cantidad solicitada (${cant}) para ${nombre}.`;
         return;
       }
-      if (!isModoPrueba && atendida > stock) {
+      if (atendida > stock) {
         if (stock <= 0) {
           validationError = `No hay stock disponible para ${nombre} (Existencia actual: 0).`;
         } else {
@@ -2619,7 +2670,9 @@
     const estUpper = String(nuevoEstado || '').trim().toUpperCase();
     let itemsPayload = [];
 
-    if (estUpper === 'PARA_FIRMAS' || estUpper === 'COMPLETADA') {
+    // Las cantidades surtidas y observaciones solo se capturan y congelan al pasar del Paso 2 al Paso 3 (PARA_FIRMAS).
+    // Al pasar del Paso 3 al Paso 4 (COMPLETADA), el backend descuenta estrictamente lo congelado en BD.
+    if (estUpper === 'PARA_FIRMAS') {
       const { payload, validationError } = collectConsultaItemsPayload('sol_consulta_detalle');
       if (validationError) {
         showSurtirAlert(validationError);
@@ -2647,7 +2700,7 @@
       } else if (estUpper === 'COMPLETADA') {
         const msgComp = res?.inventario_descontado
           ? '✅ Orden completada y existencias descontadas del almacén con éxito.'
-          : '✅ Orden completada en Modo de Prueba Grupal (sin afectar inventarios reales).';
+          : '✅ Orden completada exitosamente.';
         toast(msgComp, true);
       } else {
         toast(`Estado actualizado a ${estUpper}`, true);
@@ -4399,7 +4452,7 @@
         : 'Agregar Activo';
     }
     if ($('reg_add_cantidad')) {
-      $('reg_add_cantidad').min = isAdminUser ? '0' : '1';
+      $('reg_add_cantidad').min = (isAdminUser || editRow?.id) ? '0' : '1';
       $('reg_add_cantidad').value = editRow?.cantidad_propia != null ? String(editRow.cantidad_propia) : '1';
     }
     if ($('reg_add_estado')) $('reg_add_estado').value = safestr(editRow?.estado_fisico || 'BUENO').toUpperCase();
@@ -4471,6 +4524,10 @@
       const res = await apiJSON(`/api/oficinas${activeModalRubro ? `?rubro_id=${activeModalRubro}` : ''}`);
       const rawOficinas = Array.isArray(res?.data) ? res.data : [];
       const oficinas = filterOficinasForRegionalSelector(rawOficinas, activeModalRubro);
+      if (editRow && editRow.oficina_id && !oficinas.some(o => Number(o.id) === Number(editRow.oficina_id))) {
+        const matchRaw = rawOficinas.find(o => Number(o.id) === Number(editRow.oficina_id));
+        if (matchRaw) oficinas.push(matchRaw);
+      }
       const byRegion = new Map();
       oficinas.forEach(o => {
         const key = safestr(o.region_nombre) || `Región ${o.region_id}`;
@@ -4652,10 +4709,10 @@
       norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || '') === 'ADMIN' ||
       norm(CURRENT_USER?.username || UI_PERMISOS?.user || '') === 'ADMIN'
     );
-    const minCant = isAdminUser ? 0 : 1;
+    const minCant = (isAdminUser || editId) ? 0 : 1;
     if (!Number.isInteger(payload.cantidad_propia) || payload.cantidad_propia < minCant) {
       return fail(
-        isAdminUser
+        minCant === 0
           ? 'La cantidad debe ser un número entero mayor o igual a 0.'
           : 'La cantidad debe ser un número entero mayor o igual a 1.',
         'reg_add_cantidad'
@@ -4971,83 +5028,8 @@
     modal.style.display = 'none';
   }
 
-  // ---- Gestión de Usuarios y Perfiles (Exclusivo Admin - CRUD V42 + Control Modo Prueba v61) ----
+  // ---- Gestión de Usuarios y Perfiles (Exclusivo Admin - CRUD) ----
   let ADMIN_USUARIOS_ROWS = [];
-
-  async function refreshModoPruebaEstado() {
-    try {
-      const res = await apiJSON('/api/admin/modo-prueba');
-      if (res && res.ok) {
-        if (!UI_PERMISOS) UI_PERMISOS = {};
-        UI_PERMISOS.modo_prueba_grupal = Boolean(res.modo_prueba_grupal);
-        syncModoPruebaBannerAndControls();
-      }
-    } catch (_) {}
-  }
-
-  async function toggleModoPruebaGrupal() {
-    if (!uiPerms().admin) {
-      toast('Acción exclusiva para el Administrador.', false);
-      return;
-    }
-    const actual = Boolean(UI_PERMISOS?.modo_prueba_grupal ?? true);
-    const nuevo = !actual;
-    const msgConfirm = nuevo
-      ? '¿Activar el MODO DE PRUEBA GRUPAL?\n\nMientras esté activo, las nuevas Solicitudes de Almacén y Vales Provisionales se marcarán como 🧪 PRUEBA y NO descontarán ni bloquearán inventarios reales.'
-      : '¿Desactivar el Modo de Prueba Grupal y pasar a MODO PRODUCCIÓN REAL?\n\nA partir de este momento, las nuevas órdenes y vales provisionales descontarán existencias reales en la base de datos.';
-    if (!confirm(msgConfirm)) return;
-
-    const btn = $('btn-toggle-modo-prueba');
-    if (btn) btn.disabled = true;
-    try {
-      const res = await apiJSON('/api/admin/modo-prueba', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activo: nuevo })
-      });
-      if (!UI_PERMISOS) UI_PERMISOS = {};
-      UI_PERMISOS.modo_prueba_grupal = Boolean(res.modo_prueba_grupal);
-      syncModoPruebaBannerAndControls();
-      toast(res.message || (nuevo ? '🧪 Modo de Prueba Grupal ACTIVADO' : '🟢 Modo Producción Real ACTIVADO'), true);
-    } catch (e) {
-      if (!handleAuthError(e)) toast('Error al cambiar Modo de Prueba: ' + (e.message || e), false);
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }
-
-  async function purgarRegistrosDePrueba() {
-    if (!uiPerms().admin) {
-      toast('Acción exclusiva para el Administrador.', false);
-      return;
-    }
-    const conf = confirm(
-      '🧹 ¿Deseas PURGAR todos los registros de prueba (es_prueba = 1)?\n\n' +
-      '• Se eliminarán todas las Solicitudes de Almacén y Vales Provisionales de prueba.\n' +
-      '• Se conservará intacto el Vale real #3 de Víctor Huerta (es_prueba = 0).\n' +
-      '• Se restaurarán las existencias y tabletas a su estado limpio.'
-    );
-    if (!conf) return;
-
-    const btn = $('btn-purgar-pruebas');
-    if (btn) btn.disabled = true;
-    try {
-      const res = await apiJSON('/api/admin/purgar-pruebas', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      const msg = res.message || `Purga completada: ${res.solicitudes_eliminadas ?? 0} solicitudes y ${res.vales_eliminados ?? 0} vales de prueba eliminados.`;
-      toast(msg, true);
-      alert(`✅ ${msg}`);
-      try { await loadPanelGeneral(); } catch (_) {}
-      try { await listarSolicitudes(); } catch (_) {}
-      try { await loadValesProvisionales(); } catch (_) {}
-    } catch (e) {
-      if (!handleAuthError(e)) toast('Error al purgar registros de prueba: ' + (e.message || e), false);
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }
 
   async function loadUsuariosAdmin(){
     const tbody = $('usuarios_tbody');
@@ -5057,7 +5039,6 @@
       tbody.innerHTML = '<tr><td colspan="7" class="muted">Acceso exclusivo para Administrador.</td></tr>';
       return;
     }
-    refreshModoPruebaEstado();
     tbody.innerHTML = '<tr><td colspan="7" class="muted">Cargando usuarios...</td></tr>';
     if (msg) msg.textContent = '';
 
@@ -7397,9 +7378,7 @@
       if (ev.target === ev.currentTarget || ev.target.closest('[data-close-modal]')) closeVehiculoHistorialModal();
     });
 
-    // Pestaña: Gestión de Usuarios (Admin - CRUD V42 + Control Fase de Prueba Grupal v61)
-    $('btn-toggle-modo-prueba')?.addEventListener('click', () => toggleModoPruebaGrupal());
-    $('btn-purgar-pruebas')?.addEventListener('click', () => purgarRegistrosDePrueba());
+    // Pestaña: Gestión de Usuarios (Admin - CRUD)
     $('btn-usuarios-refresh')?.addEventListener('click', () => loadUsuariosAdmin());
     $('btn-usuario-nuevo')?.addEventListener('click', () => openNewUsuarioModal());
     $('btn-backup-db')?.addEventListener('click', () => downloadDatabaseBackup());
@@ -7876,26 +7855,110 @@
     openTabletaModal('modal-tab-devolucion');
   }
 
-  function openModalAsignarTableta(t) {
-    if (!t) return;
-    $('tab_asig_id').value = t.id;
-    $('tab_asig_equipo_info').innerHTML = `
-      <b>Asignación de Tableta No. Resguardo #${Number(t.no_resguardo)}</b> — ${escHtml(safestr(t.marca || 'Compac'))} ${escHtml(safestr(t.modelo || 'QTab LTE'))}<br>
-      <span class="muted">IMEI: <b>${escHtml(safestr(t.imei))}</b> | Serie: <b>${escHtml(safestr(t.numero_serie))}</b> | Caja: <b>${escHtml(safestr(t.no_caja || 'S/N'))}</b></span>
-    `;
-    $('tab_asig_nombre').value = '';
-    $('tab_asig_cargo').value = 'Servidor de la nación';
-    $('tab_asig_region').value = safestr(t.region || 'LA PAZ').toUpperCase();
-    $('tab_asig_oficina').value = safestr(t.oficina_programa || 'Delegación La Paz');
-    $('tab_asig_cargador').checked = Number(t.tiene_cargador ?? 1) === 1;
-    $('tab_asig_caja').checked = Number(t.tiene_caja ?? 1) === 1;
-    $('tab_asig_estatus').value = safestr(t.estatus_fisico || 'BUENO').toUpperCase();
-    $('tab_asig_obs').value = safestr(t.observaciones);
+  let TABLETAS_DISPONIBLES_CACHE = [];
+
+  function syncAsignarTabletaInfoFromRow(t) {
+    if (!t) {
+      if ($('tab_asig_id')) $('tab_asig_id').value = '';
+      if ($('tab_asig_equipo_info')) {
+        $('tab_asig_equipo_info').innerHTML = '<span class="muted">Selecciona una tableta disponible de la lista superior.</span>';
+      }
+      return;
+    }
+    if ($('tab_asig_id')) $('tab_asig_id').value = t.id;
+    if ($('tab_asig_select_tableta') && String($('tab_asig_select_tableta').value) !== String(t.id)) {
+      $('tab_asig_select_tableta').value = String(t.id);
+    }
+    if ($('tab_asig_equipo_info')) {
+      $('tab_asig_equipo_info').innerHTML = `
+        <b>Asignación de Tableta No. Resguardo #${Number(t.no_resguardo)}</b> — ${escHtml(safestr(t.marca || 'Compac'))} ${escHtml(safestr(t.modelo || 'QTab LTE'))}<br>
+        <span class="muted">IMEI: <b>${escHtml(safestr(t.imei))}</b> | Serie: <b>${escHtml(safestr(t.numero_serie))}</b> | Caja: <b>${escHtml(safestr(t.no_caja || 'S/N'))}</b></span>
+      `;
+    }
+    if ($('tab_asig_region')) $('tab_asig_region').value = safestr(t.region || 'LA PAZ').toUpperCase();
+    if ($('tab_asig_oficina')) $('tab_asig_oficina').value = safestr(t.oficina_programa || 'Delegación La Paz');
+    if ($('tab_asig_cargador')) $('tab_asig_cargador').checked = Number(t.tiene_cargador ?? 1) === 1;
+    if ($('tab_asig_caja')) $('tab_asig_caja').checked = Number(t.tiene_caja ?? 1) === 1;
+    if ($('tab_asig_estatus')) $('tab_asig_estatus').value = safestr(t.estatus_fisico || 'BUENO').toUpperCase();
+    if ($('tab_asig_obs')) $('tab_asig_obs').value = safestr(t.observaciones);
+  }
+
+  async function openModalAsignarTableta(t = null) {
+    if (!canEditTabletas(CURRENT_USER)) {
+      toast('Modo solo lectura: no tienes permisos para generar resguardos de tabletas.', false);
+      return;
+    }
+    if ($('tab_asig_nombre')) $('tab_asig_nombre').value = '';
+    if ($('tab_asig_cargo')) $('tab_asig_cargo').value = 'Servidor de la nación';
+
+    const sel = $('tab_asig_select_tableta');
+    if (sel) {
+      sel.innerHTML = '<option value="">Cargando tabletas disponibles...</option>';
+    }
     openTabletaModal('modal-tab-asignar');
+
+    try {
+      const res = await apiJSON('/api/tabletas?estado_asignacion=DISPONIBLE');
+      const dispRows = Array.isArray(res?.data) ? res.data : [];
+      TABLETAS_DISPONIBLES_CACHE = dispRows;
+
+      if (sel) {
+        if (!dispRows.length) {
+          sel.innerHTML = '<option value="">No hay tabletas con estatus DISPONIBLE</option>';
+        } else {
+          sel.innerHTML = dispRows.map(d => {
+            const label = `Resguardo #${Number(d.no_resguardo)} — ${safestr(d.marca || 'Compac')} ${safestr(d.modelo || 'QTab LTE')} (Serie: ${safestr(d.numero_serie)} | IMEI: ${safestr(d.imei)})`;
+            return `<option value="${Number(d.id)}">${escHtml(label)}</option>`;
+          }).join('');
+        }
+      }
+
+      const target = (t && dispRows.find(d => Number(d.id) === Number(t.id))) || t || dispRows[0] || null;
+      syncAsignarTabletaInfoFromRow(target);
+    } catch (_) {
+      syncAsignarTabletaInfoFromRow(t);
+    }
+  }
+
+  async function openModalAgregarTableta() {
+    if (!canEditTabletas(CURRENT_USER)) {
+      toast('Modo solo lectura: no tienes permisos para agregar tabletas.', false);
+      return;
+    }
+    let nextResg = 277;
+    try {
+      const maxLocal = TABLETAS_ROWS.reduce((acc, r) => Math.max(acc, Number(r.no_resguardo || 0)), 0);
+      if (maxLocal > 0) nextResg = maxLocal + 1;
+      const res = await apiJSON('/api/tabletas');
+      const allRows = Array.isArray(res?.data) ? res.data : [];
+      const maxRemote = allRows.reduce((acc, r) => Math.max(acc, Number(r.no_resguardo || 0)), 0);
+      if (maxRemote >= nextResg) nextResg = maxRemote + 1;
+    } catch (_) {}
+
+    if ($('tab_add_no_resg')) $('tab_add_no_resg').value = nextResg;
+    if ($('tab_add_serie')) $('tab_add_serie').value = '';
+    if ($('tab_add_imei')) $('tab_add_imei').value = '';
+    if ($('tab_add_marca')) $('tab_add_marca').value = 'Compac';
+    if ($('tab_add_modelo')) $('tab_add_modelo').value = 'QTab LTE';
+    if ($('tab_add_descripcion')) $('tab_add_descripcion').value = 'Tablet Compac';
+    if ($('tab_add_region')) $('tab_add_region').value = 'LA PAZ';
+    if ($('tab_add_oficina')) $('tab_add_oficina').value = 'Delegación La Paz';
+    if ($('tab_add_estado_asig')) $('tab_add_estado_asig').value = 'DISPONIBLE';
+    if ($('tab_add_estatus')) $('tab_add_estatus').value = 'BUENO';
+    if ($('tab_add_caja_no')) $('tab_add_caja_no').value = '';
+    if ($('tab_add_cargador')) $('tab_add_cargador').checked = true;
+    if ($('tab_add_caja')) $('tab_add_caja').checked = true;
+    if ($('tab_add_obs')) $('tab_add_obs').value = '';
+
+    openTabletaModal('modal-tab-agregar');
   }
 
   function openModalEditarTableta(t) {
     if (!t) return;
+    if (!canEditTabletas(CURRENT_USER)) {
+      toast('Modo solo lectura: no tienes permisos para editar tabletas.', false);
+      return;
+    }
     const isAdm = Boolean(uiPerms().admin);
     $('tab_edit_id').value = t.id;
     $('tab_edit_no_resg').value = Number(t.no_resguardo || '');
@@ -7971,7 +8034,7 @@
   function renderTabletasTable(rows) {
     const tbody = $('tab_tbody');
     if (!tbody) return;
-    const canEdit = Boolean(uiPerms().puedeEditarTabletas);
+    const canEdit = canEditTabletas(CURRENT_USER);
 
     if (!rows || !rows.length) {
       tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center; padding:18px;">No hay tabletas en esta pestaña con los filtros aplicados.</td></tr>';
@@ -7997,7 +8060,7 @@
       if (estadoAsig === 'DISPONIBLE') {
         resgHtml = Number(t.sin_resguardo_previo) === 1
           ? `<span class="badge-tableta-excel-rojo">🔴 Proveniente de Excel sin resguardo (17 en rojo)</span>`
-          : `<span class="badge-tableta-devuelta">📦 Devuelta a almacén</span>`;
+          : `<span class="badge-tableta-devuelta">📦 Disponible en almacén</span>`;
       } else if (estadoAsig === 'DEVOLUCION_PENDIENTE') {
         const devNombre = safestr(t.devolucion_nombre_persona || t.nombre_resguardante || '-');
         const folioTxt = safestr(t.devolucion_folio || '-');
@@ -8045,12 +8108,14 @@
           </div>
         `;
       } else {
-        actionsHtml = `
-          <div style="display:flex; flex-wrap:wrap; gap:4px;">
-            ${canEdit ? `<button type="button" class="mini btn-primary btn-tab-asig" data-id="${id}">➕ Asignar y Generar Resguardo</button>` : ''}
-            ${canEdit ? `<button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos">✏️</button>` : ''}
-          </div>
-        `;
+        actionsHtml = canEdit
+          ? `
+            <div style="display:flex; flex-wrap:wrap; gap:4px;">
+              <button type="button" class="mini btn-primary btn-tab-asig" data-id="${id}">➕ Asignar y Generar Resguardo</button>
+              <button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos">✏️</button>
+            </div>
+          `
+          : `<span class="muted" style="font-size:11.5px;">Solo lectura</span>`;
       }
 
       return `<tr>
@@ -8079,6 +8144,13 @@
     const tbody = $('tab_tbody');
     const meta = $('tab_meta');
     if (!tbody) return;
+
+    const canViewTab = canViewTabletas(CURRENT_USER);
+    const canEditTab = canEditTabletas(CURRENT_USER);
+    if ($('btn-tab-agregar')) $('btn-tab-agregar').classList.toggle('hidden', !canEditTab);
+    if ($('btn-tab-nuevo-resguardo')) $('btn-tab-nuevo-resguardo').classList.toggle('hidden', !canEditTab);
+    if ($('btn-tab-importar-excel')) $('btn-tab-importar-excel').classList.toggle('hidden', !canEditTab);
+    if ($('btn-tab-bitacora')) $('btn-tab-bitacora').classList.toggle('hidden', !canViewTab);
 
     const region = safestr($('tab_filter_region')?.value);
     const oficina = safestr($('tab_filter_oficina')?.value);
@@ -8140,6 +8212,14 @@
     $('tab_filter_extra')?.addEventListener('change', () => loadTabletasModule());
     $('tab_filter_q')?.addEventListener('input', () => loadTabletasModule());
     $('btn-tab-refresh')?.addEventListener('click', () => loadTabletasModule());
+    $('btn-tab-agregar')?.addEventListener('click', () => openModalAgregarTableta());
+    $('btn-tab-nuevo-resguardo')?.addEventListener('click', () => openModalAsignarTableta(null));
+
+    $('tab_asig_select_tableta')?.addEventListener('change', (ev) => {
+      const selId = Number(ev.target.value || 0);
+      const found = TABLETAS_DISPONIBLES_CACHE.find(d => Number(d.id) === selId) || TABLETAS_ROWS.find(d => Number(d.id) === selId) || null;
+      syncAsignarTabletaInfoFromRow(found);
+    });
 
     // Delegación de eventos en tabla
     $('tab_tbody')?.addEventListener('click', async (ev) => {
@@ -8198,7 +8278,7 @@
       }
     });
 
-    // Botón Log de Movimientos (Tabletas) - Exclusivo Admin
+    // Botón Log de Movimientos (Tabletas) - Visible para Admin, Luis Eduardo, Jorge y Rodrigo
     $('btn-tab-bitacora')?.addEventListener('click', () => {
       openTabletaModal('modal-tab-bitacora');
       loadBitacoraTabletas();
@@ -8236,12 +8316,63 @@
     });
 
     // Cerrar modales de tabletas
-    ['modal-tab-devolucion', 'modal-tab-asignar', 'modal-tab-editar', 'modal-tab-bitacora'].forEach(mid => {
+    ['modal-tab-devolucion', 'modal-tab-asignar', 'modal-tab-editar', 'modal-tab-bitacora', 'modal-tab-agregar'].forEach(mid => {
       $(mid)?.addEventListener('click', (ev) => {
         if (ev.target === ev.currentTarget || ev.target.closest('[data-close-modal]')) {
           closeTabletaModal(mid);
         }
       });
+    });
+
+    // Submit Modal Agregar Nueva Tableta / Activo
+    $('form-tab-agregar')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const numero_serie = safestr($('tab_add_serie')?.value);
+      const imei = safestr($('tab_add_imei')?.value);
+      if (!numero_serie || !imei) {
+        toast('El Número de Serie y el IMEI son obligatorios', false);
+        return;
+      }
+      const estadoInicial = safestr($('tab_add_estado_asig')?.value || 'DISPONIBLE').toUpperCase();
+      try {
+        const payload = {
+          no_resguardo: Number($('tab_add_no_resg')?.value) || undefined,
+          numero_serie,
+          imei,
+          marca: safestr($('tab_add_marca')?.value) || 'Compac',
+          modelo: safestr($('tab_add_modelo')?.value) || 'QTab LTE',
+          descripcion: safestr($('tab_add_descripcion')?.value) || 'Tablet Compac',
+          region: safestr($('tab_add_region')?.value || 'LA PAZ'),
+          oficina_programa: safestr($('tab_add_oficina')?.value || 'Delegación La Paz'),
+          estado_asignacion: estadoInicial,
+          estatus_fisico: safestr($('tab_add_estatus')?.value || 'BUENO'),
+          no_caja: safestr($('tab_add_caja_no')?.value),
+          tiene_cargador: $('tab_add_cargador')?.checked ? 1 : 0,
+          tiene_caja: $('tab_add_caja')?.checked ? 1 : 0,
+          observaciones: safestr($('tab_add_obs')?.value),
+        };
+        const r = await apiJSON('/api/tabletas', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        closeTabletaModal('modal-tab-agregar');
+        toast(r.message || 'Nueva tableta agregada exitosamente', true);
+
+        // Si se dio de alta como DISPONIBLE, activar la pestaña DISPONIBLE y refrescar selectores de inmediato
+        if (estadoInicial === 'DISPONIBLE') {
+          TABLETAS_ACTIVE_TAB = 'DISPONIBLE';
+          document.querySelectorAll('#view-tabletas .tab-pill-btn').forEach(b => {
+            b.classList.toggle('active', b.dataset.tab === 'DISPONIBLE');
+          });
+        }
+        await loadTabletasModule();
+        if (typeof loadVpCatalogo === 'function') {
+          try { await loadVpCatalogo(); } catch (_) {}
+        }
+      } catch (err) {
+        if (!handleAuthError(err)) toast(err.message || 'Error al agregar nueva tableta', false);
+      }
     });
 
     // Submit Modal Devolución
@@ -8279,7 +8410,11 @@
     // Submit Modal Asignar y Generar Resguardo
     $('form-tab-asignar')?.addEventListener('submit', async (ev) => {
       ev.preventDefault();
-      const id = Number($('tab_asig_id')?.value || 0);
+      const id = Number($('tab_asig_select_tableta')?.value || $('tab_asig_id')?.value || 0);
+      if (!id) {
+        toast('Selecciona una tableta disponible para asignar el resguardo', false);
+        return;
+      }
       const nombre_resguardante = safestr($('tab_asig_nombre')?.value);
       if (!nombre_resguardante) {
         toast('El nombre completo del nuevo resguardante es obligatorio', false);
@@ -8305,6 +8440,9 @@
         toast(r.message || 'Resguardo personal generado', true);
         if (r.pdf_url) window.open(r.pdf_url, '_blank');
         loadTabletasModule();
+        if (typeof loadVpCatalogo === 'function') {
+          try { await loadVpCatalogo(); } catch (_) {}
+        }
       } catch (err) {
         if (!handleAuthError(err)) toast(err.message || 'Error al generar resguardo', false);
       }

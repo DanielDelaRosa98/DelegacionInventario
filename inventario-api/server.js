@@ -435,17 +435,8 @@ async function crearRespaldoAutomaticoBD(versionAnterior, nuevaVersion) {
   }
 }
 
-async function isModoPruebaGrupalActivo(dbHandle = poolRead) {
-  try {
-    const [rows] = await dbHandle.query(
-      `SELECT valor FROM configuracion_sistema WHERE clave = 'MODO_PRUEBA_GRUPAL' LIMIT 1`
-    );
-    if (!rows || !rows.length) return true;
-    const v = String(rows[0].valor ?? "1").trim().toUpperCase();
-    return v === "1" || v === "TRUE" || v === "SI";
-  } catch (_) {
-    return true;
-  }
+async function isModoPruebaGrupalActivo() {
+  return false;
 }
 
 function canDownloadSolicitudPdf(req) {
@@ -678,23 +669,82 @@ function canViewReportes(req) {
   return isAdmin(req);
 }
 
-function canAccessTabletas(req) {
-  if (!req?.user) return false;
-  if (isAdmin(req)) return true;
-  const u = normalizeUser(req.user.username);
-  const rubro = Number(getUserRubroId(req) || 0);
-  if (normalizeRol(req.user.rol, req.user.username) === 'ENCARGADO') return true;
-  if (["luismayoral", "luiseduardo", "luis", "jorge", "jorgepatron", "rodrigo"].includes(u)) return true;
-  if (rubro === 4) return true;
+function canViewTabletas(userOrReq) {
+  const u = userOrReq?.user ? userOrReq.user : userOrReq;
+  if (!u) return false;
+  const uname = normalizeUser(u.username);
+  const role = String(u.rol || u.role || "").trim().toUpperCase();
+  const fullName = [u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO, u.primer_ap, u.segundo_ap, u.nombre_completo]
+    .filter(Boolean)
+    .join(" ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  // Gabriel Fiol y demás encargados/usuarios generales NO tienen acceso a Tabletas Digitales
+  if (uname === "gabrielfiol" || uname === "fiol" || uname === "encargado" || fullName.includes("fiol")) {
+    return false;
+  }
+
+  // 1. Admin: Acceso total
+  if (role === "ADMIN" || uname === "admin") return true;
+
+  // 2. Luis Eduardo Mayoral Geraldo: Acceso operativo completo
+  if (
+    ["luiseduardo", "luismayoral"].includes(uname) ||
+    fullName.includes("luis eduardo") ||
+    fullName.includes("mayoral geraldo")
+  ) {
+    return true;
+  }
+
+  // 3. Jorge Patrón y Rodrigo Molina: Acceso estrictamente de solo lectura
+  if (
+    ["jorge", "jorgepatron", "rodrigo"].includes(uname) ||
+    fullName.includes("jorge luis patron") ||
+    fullName.includes("rodrigo molina")
+  ) {
+    return true;
+  }
+
   return false;
 }
 
-function canEditTabletas(req) {
-  if (!req?.user) return false;
-  if (isAdmin(req)) return true;
-  const u = normalizeUser(req.user.username);
-  const rubro = Number(getUserRubroId(req) || 0);
-  if (["luismayoral", "luiseduardo", "luis"].includes(u) || rubro === 4) return true;
+function canAccessTabletas(req) {
+  return canViewTabletas(req);
+}
+
+function canEditTabletas(userOrReq) {
+  const u = userOrReq?.user ? userOrReq.user : userOrReq;
+  if (!u) return false;
+  const uname = normalizeUser(u.username);
+  const role = String(u.rol || u.role || "").trim().toUpperCase();
+  const fullName = [u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO, u.primer_ap, u.segundo_ap, u.nombre_completo]
+    .filter(Boolean)
+    .join(" ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  if (uname === "gabrielfiol" || uname === "fiol" || uname === "encargado" || fullName.includes("fiol")) {
+    return false;
+  }
+  if (["jorge", "jorgepatron", "rodrigo"].includes(uname)) {
+    return false;
+  }
+
+  // 1. Admin
+  if (role === "ADMIN" || uname === "admin") return true;
+
+  // 2. Luis Eduardo Mayoral Geraldo
+  if (
+    ["luiseduardo", "luismayoral"].includes(uname) ||
+    fullName.includes("luis eduardo") ||
+    fullName.includes("mayoral geraldo")
+  ) {
+    return true;
+  }
+
   return false;
 }
 
@@ -1261,359 +1311,14 @@ function normalizeMobClave(claveRaw, descRaw) {
   return String(descRaw || "").trim().toUpperCase();
 }
 
-async function consolidarBodegaRMJesus(poolOrConn = poolOps, options = {}) {
-  const forceResetQuantities = Boolean(options.forceResetQuantities);
-  if (!poolOrConn) return { ok: false, error: "Sin conexión a BD" };
-  const isPool = typeof poolOrConn.getConnection === "function";
-  const conn = isPool ? await poolOrConn.getConnection() : poolOrConn;
-  try {
-    if (isPool) await conn.beginTransaction();
-
-    // 1. Obtener o crear ID de "RM (Recursos Materiales)" en La Paz (region_id = 1)
-    const [regRows] = await conn.query(`SELECT id FROM regiones WHERE clave = 'LA_PAZ' OR id = 1 ORDER BY id ASC LIMIT 1`);
-    const regLaPazId = regRows[0]?.id || 1;
-
-    const [rmRows] = await conn.query(
-      `SELECT id FROM oficinas_regionales
-       WHERE region_id = ? AND (nombre = 'RM (Recursos Materiales)' OR nombre = 'RM' OR nombre LIKE '%Recursos Materiales%')
-       ORDER BY (nombre = 'RM (Recursos Materiales)') DESC, id ASC LIMIT 1`,
-      [regLaPazId]
-    );
-    let rmOfiId = rmRows[0]?.id || null;
-    if (!rmOfiId) {
-      const [insRm] = await conn.query(
-        `INSERT INTO oficinas_regionales (region_id, municipio, nombre, responsable_oficina, activo)
-         VALUES (?, 'La Paz', 'RM (Recursos Materiales)', 'Jorge Luis Patrón Murillo', 1)`,
-        [regLaPazId]
-      );
-      rmOfiId = insRm.insertId;
-    } else {
-      await conn.query(
-        `UPDATE oficinas_regionales
-         SET nombre = 'RM (Recursos Materiales)', municipio = 'La Paz', responsable_oficina = 'Jorge Luis Patrón Murillo', activo = 1
-         WHERE id = ?`,
-        [rmOfiId]
-      );
-    }
-
-    // 2. Obtener o crear ID de "Coordinación Regional La Paz" (region_id = 1)
-    const [coordRows] = await conn.query(
-      `SELECT id FROM oficinas_regionales
-       WHERE region_id = ? AND (nombre = 'Coordinación Regional La Paz' OR nombre = 'Coordinacion Regional La Paz' OR nombre LIKE '%Coordinación Regional La Paz%' OR nombre LIKE '%Coordinacion Regional La Paz%')
-       ORDER BY id ASC LIMIT 1`,
-      [regLaPazId]
-    );
-    let coordLaPazId = coordRows[0]?.id || null;
-    if (!coordLaPazId) {
-      const [insCoord] = await conn.query(
-        `INSERT INTO oficinas_regionales (region_id, municipio, nombre, responsable_oficina, activo)
-         VALUES (?, 'La Paz', 'Coordinación Regional La Paz', 'SANDRA GPE. SALVATIERRA AMADOR', 1)`,
-        [regLaPazId]
-      );
-      coordLaPazId = insCoord.insertId;
-    } else {
-      await conn.query(
-        `UPDATE oficinas_regionales
-         SET nombre = 'Coordinación Regional La Paz', municipio = 'La Paz', responsable_oficina = 'SANDRA GPE. SALVATIERRA AMADOR', activo = 1
-         WHERE id = ?`,
-        [coordLaPazId]
-      );
-    }
-
-    // 3. Consultar todos los registros de Mobiliario (rubro_id = 3) en La Paz (excluyendo S/A Sin Asignar para no absorber pendientes)
-    const [allLpRows] = await conn.query(
-      `SELECT io.*, o.region_id, o.nombre AS oficina_nombre
-       FROM inventario_oficina io
-       LEFT JOIN oficinas_regionales o ON o.id = io.oficina_id
-       WHERE io.rubro_id = 3
-         AND (o.region_id = ? OR io.es_bodega_delegacion = 1 OR io.oficina_id IN (1, ?, ?))
-         AND COALESCE(o.region_id, ?) NOT IN (2, 3, 4)
-         AND (o.nombre IS NULL OR (o.nombre NOT LIKE '%S/A%' AND o.nombre NOT LIKE '%Sin Asignar%'))
-       ORDER BY io.id ASC FOR UPDATE`,
-      [regLaPazId, rmOfiId, coordLaPazId, regLaPazId]
-    );
-
-    const bodegaGroups = new Map();
-    const coordGroups = new Map();
-
-    for (const r of allLpRows) {
-      const baseKey = String(r.clave_bien || "").trim().toUpperCase() || normalizeMobClave(r.clave_bien, r.descripcion);
-      const isCoordRow = Number(r.oficina_id) === Number(coordLaPazId) && Number(r.es_bodega_delegacion || 0) === 0;
-      if (isCoordRow) {
-        if (!coordGroups.has(baseKey)) coordGroups.set(baseKey, []);
-        coordGroups.get(baseKey).push(r);
-      } else {
-        if (!bodegaGroups.has(baseKey)) bodegaGroups.set(baseKey, []);
-        bodegaGroups.get(baseKey).push(r);
-      }
-    }
-
-    let duplicadosEliminados = 0;
-    let referenciasReasignadas = 0;
-    const masterByKey = new Map();
-
-    // 3a. Deduplicar bodega general y consolidar en RM (Recursos Materiales)
-    for (const [baseKey, group] of bodegaGroups.entries()) {
-      // Preferir el registro que ya esté en rmOfiId, o el de menor ID
-      group.sort((a, b) => {
-        const aInRm = Number(a.oficina_id) === Number(rmOfiId) ? 0 : 1;
-        const bInRm = Number(b.oficina_id) === Number(rmOfiId) ? 0 : 1;
-        if (aInRm !== bInRm) return aInRm - bInRm;
-        return Number(a.id) - Number(b.id);
-      });
-      const master = group[0];
-      masterByKey.set(baseKey, master);
-
-      for (let i = 1; i < group.length; i++) {
-        const dup = group[i];
-        const [updArt] = await conn.query(
-          `UPDATE vales_prestamo_detalle SET articulo_id = ? WHERE articulo_id = ?`,
-          [master.id, dup.id]
-        );
-        referenciasReasignadas += Number(updArt?.affectedRows || 0);
-        await conn.query(
-          `UPDATE vales_prestamo_detalle SET inventario_id = ? WHERE inventario_id = ?`,
-          [master.id, dup.id]
-        ).catch(() => {});
-
-        await conn.query(`DELETE FROM inventario_oficina WHERE id = ?`, [dup.id]);
-        duplicadosEliminados++;
-      }
-
-      const cleanClave = /^MOB-\d{3}$/.test(baseKey) ? baseKey : String(master.clave_bien || baseKey).trim();
-      await conn.query(
-        `UPDATE inventario_oficina
-         SET oficina_id = ?,
-             es_bodega_delegacion = 1,
-             clave_bien = ?
-         WHERE id = ?`,
-        [rmOfiId, cleanClave, master.id]
-      );
-      master.oficina_id = rmOfiId;
-      master.es_bodega_delegacion = 1;
-      master.clave_bien = cleanClave;
-    }
-
-    // Asegurar que los 22 artículos del catálogo oficial de Jesús existan en RM (Recursos Materiales)
-    for (const catItem of CATALOGO_LAPAZ_JESUS) {
-      if (!masterByKey.has(catItem.clave)) {
-        const [insMaster] = await conn.query(
-          `INSERT INTO inventario_oficina
-             (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas,
-              unidad, cantidad_propia, cantidad_disponible, cantidad_prestada_recibida, cantidad_prestada_enviada,
-              estado_fisico, estatus_uso, es_bodega_delegacion, origen_adquisicion)
-           VALUES (?, 3, ?, ?, 'S/M', 'S/N', 'PIEZA', ?, ?, 0, 0, 'BUENO', 'ACTIVO', 1, 'COMPRA_DELEGACION')`,
-          [rmOfiId, catItem.clave, catItem.descripcion, catItem.rm_def, catItem.rm_def]
-        );
-        masterByKey.set(catItem.clave, {
-          id: insMaster.insertId,
-          oficina_id: rmOfiId,
-          rubro_id: 3,
-          clave_bien: catItem.clave,
-          descripcion: catItem.descripcion,
-          cantidad_propia: catItem.rm_def,
-          cantidad_disponible: catItem.rm_def,
-          es_bodega_delegacion: 1,
-        });
-      }
-    }
-
-    // 3b. Deduplicar Coordinación Regional La Paz (es_bodega_delegacion = 0)
-    const coordMasterByKey = new Map();
-    for (const [baseKey, group] of coordGroups.entries()) {
-      group.sort((a, b) => Number(a.id) - Number(b.id));
-      const coordMaster = group[0];
-      coordMasterByKey.set(baseKey, coordMaster);
-      const rmMaster = masterByKey.get(baseKey);
-
-      // Si algún vale de préstamo apuntaba por error a un registro regional de Sandra, reasignarlo al maestro de RM
-      for (const r of group) {
-        if (rmMaster) {
-          const [updCoordRef] = await conn.query(
-            `UPDATE vales_prestamo_detalle SET articulo_id = ? WHERE articulo_id = ?`,
-            [rmMaster.id, r.id]
-          );
-          referenciasReasignadas += Number(updCoordRef?.affectedRows || 0);
-          await conn.query(
-            `UPDATE vales_prestamo_detalle SET inventario_id = ? WHERE inventario_id = ?`,
-            [rmMaster.id, r.id]
-          ).catch(() => {});
-        }
-      }
-
-      for (let i = 1; i < group.length; i++) {
-        const dup = group[i];
-        await conn.query(`DELETE FROM inventario_oficina WHERE id = ?`, [dup.id]);
-        duplicadosEliminados++;
-      }
-
-      const cleanClave = /^MOB-\d{3}$/.test(baseKey) ? baseKey : String(coordMaster.clave_bien || baseKey).trim();
-      await conn.query(
-        `UPDATE inventario_oficina
-         SET oficina_id = ?,
-             es_bodega_delegacion = 0,
-             clave_bien = ?,
-             cantidad_disponible = cantidad_propia
-         WHERE id = ?`,
-        [coordLaPazId, cleanClave, coordMaster.id]
-      );
-      coordMaster.oficina_id = coordLaPazId;
-      coordMaster.es_bodega_delegacion = 0;
-      coordMaster.clave_bien = cleanClave;
-    }
-
-    // 4. Asegurar existencias exactas de Sandra (ej. MOB-001 = 81) y de RM (ej. MOB-001 = 181 propias)
-    for (const catItem of CATALOGO_LAPAZ_JESUS) {
-      const rmMaster = masterByKey.get(catItem.clave);
-      let coordMaster = coordMasterByKey.get(catItem.clave);
-
-      if (catItem.sandra_def > 0 && !coordMaster) {
-        const [insCoordItem] = await conn.query(
-          `INSERT INTO inventario_oficina
-             (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas,
-              unidad, cantidad_propia, cantidad_disponible, cantidad_prestada_recibida, cantidad_prestada_enviada,
-              estado_fisico, estatus_uso, es_bodega_delegacion, origen_adquisicion, observaciones_control)
-           VALUES (?, 3, ?, ?, 'S/M', 'S/N', 'PIEZA', ?, ?, 0, 0, 'BUENO', 'ACTIVO', 0, 'COMPRA_DELEGACION', 'TRASPASO_DESDE_BODEGA_JESUS')`,
-          [coordLaPazId, catItem.clave, catItem.descripcion, catItem.sandra_def, catItem.sandra_def]
-        );
-        coordMaster = {
-          id: insCoordItem.insertId,
-          oficina_id: coordLaPazId,
-          clave_bien: catItem.clave,
-          descripcion: catItem.descripcion,
-          cantidad_propia: catItem.sandra_def,
-          cantidad_disponible: catItem.sandra_def,
-          es_bodega_delegacion: 0,
-        };
-        coordMasterByKey.set(catItem.clave, coordMaster);
-      }
-
-      const currentRmPropia = Number(rmMaster?.cantidad_propia || 0);
-      const currentCoordPropia = Number(coordMaster?.cantidad_propia || 0);
-      const sumLaPaz = currentRmPropia + currentCoordPropia;
-
-      // Si la suma de La Paz está desfasada respecto al total oficial (ej. por préstamos descontados de cantidad_propia o duplicados)
-      // o si se invocó explícitamente el endpoint de consolidación, ajustar a la distribución oficial (ej. 81 Regional + 181 RM = 262)
-      if (forceResetQuantities || sumLaPaz !== catItem.total_lapaz || (catItem.clave === "MOB-001" && currentCoordPropia === 81 && currentRmPropia !== 181)) {
-        const targetCoord = coordMaster
-          ? (forceResetQuantities ? catItem.sandra_def : (currentCoordPropia > 0 && currentCoordPropia <= catItem.total_lapaz ? currentCoordPropia : catItem.sandra_def))
-          : 0;
-        const targetRm = Math.max(0, catItem.total_lapaz - targetCoord);
-
-        if (coordMaster) {
-          await conn.query(
-            `UPDATE inventario_oficina
-             SET cantidad_propia = ?,
-                 cantidad_disponible = ?,
-                 es_bodega_delegacion = 0,
-                 oficina_id = ?
-             WHERE id = ?`,
-            [targetCoord, targetCoord, coordLaPazId, coordMaster.id]
-          );
-          coordMaster.cantidad_propia = targetCoord;
-          coordMaster.cantidad_disponible = targetCoord;
-        }
-        if (rmMaster) {
-          await conn.query(
-            `UPDATE inventario_oficina
-             SET cantidad_propia = ?,
-                 es_bodega_delegacion = 1,
-                 oficina_id = ?
-             WHERE id = ?`,
-            [targetRm, rmOfiId, rmMaster.id]
-          );
-          rmMaster.cantidad_propia = targetRm;
-        }
-      }
-    }
-
-    // 5. Vincular detalles de vales de rubro 3 a su registro maestro en RM y recalcular cantidad_disponible = GREATEST(0, cantidad_propia - prestado)
-    const [rmFinalRows] = await conn.query(
-      `SELECT id, clave_bien, descripcion, cantidad_propia
-       FROM inventario_oficina
-       WHERE rubro_id = 3 AND (oficina_id = ? OR es_bodega_delegacion = 1)
-       FOR UPDATE`,
-      [rmOfiId]
-    );
-
-    const resumenBodega = [];
-    for (const rmItem of rmFinalRows) {
-      // Asegurar que cualquier detalle de vale de rubro 3 que coincida en clave o descripción apunte a este ID maestro
-      const [updByClave] = await conn.query(
-        `UPDATE vales_prestamo_detalle vpd
-         INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
-         SET vpd.articulo_id = ?
-         WHERE vp.rubro_id = 3
-           AND (
-             UPPER(TRIM(vpd.clave)) = UPPER(TRIM(?))
-             OR UPPER(TRIM(vpd.descripcion)) = UPPER(TRIM(?))
-           )
-           AND (vpd.articulo_id IS NULL OR vpd.articulo_id <> ?)`,
-        [rmItem.id, rmItem.clave_bien || "", rmItem.descripcion || "", rmItem.id]
-      );
-      referenciasReasignadas += Number(updByClave?.affectedRows || 0);
-
-      const [[prestRow]] = await conn.query(
-        `SELECT COALESCE(SUM(vpd.cantidad), 0) AS prestado
-         FROM vales_prestamo_detalle vpd
-         INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
-         WHERE vpd.articulo_id = ?
-           AND COALESCE(vp.es_prueba, 0) = 0
-           AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')`,
-        [rmItem.id]
-      );
-      const prestado = Math.max(0, Number(prestRow?.prestado || 0));
-      const cantPropia = Math.max(0, Number(rmItem.cantidad_propia || 0));
-      const cantDisponible = Math.max(0, cantPropia - prestado);
-      const estatusUso = cantDisponible === 0 && cantPropia > 0 ? "PRESTADO" : "ACTIVO";
-
-      await conn.query(
-        `UPDATE inventario_oficina
-         SET oficina_id = ?,
-             es_bodega_delegacion = 1,
-             cantidad_disponible = ?,
-             cantidad_prestada_enviada = ?,
-             estatus_uso = ?
-         WHERE id = ?`,
-        [rmOfiId, cantDisponible, prestado, estatusUso, rmItem.id]
-      );
-
-      resumenBodega.push({
-        id: rmItem.id,
-        clave_bien: rmItem.clave_bien,
-        descripcion: rmItem.descripcion,
-        cantidad_propia: cantPropia,
-        prestado_activo: prestado,
-        cantidad_disponible: cantDisponible,
-      });
-    }
-
-    if (isPool) await conn.commit();
-    return {
-      ok: true,
-      rm_oficina_id: rmOfiId,
-      coord_lapaz_oficina_id: coordLaPazId,
-      duplicados_eliminados: duplicadosEliminados,
-      referencias_vales_reasignadas: referenciasReasignadas,
-      total_articulos_rm: resumenBodega.length,
-      sillas_grises_rm: resumenBodega.find((x) => x.clave_bien === "MOB-001") || null,
-      resumen_bodega: resumenBodega,
-    };
-  } catch (err) {
-    if (isPool) await conn.rollback().catch(() => {});
-    console.warn("[WARN] consolidarBodegaRMJesus:", err?.message || err);
-    return { ok: false, error: err?.message || String(err) };
-  } finally {
-    if (isPool && conn) conn.release();
-  }
-}
-
 // ============================================================================
-// FASE 3: LÓGICA DUAL DE INVENTARIO Y RECÁLCULO
-// Lógica 1 (Préstamos - Jesús, Luis, Evelia): Modelo de Reserva.
-// Se descuentan del stock todos los renglones cuyo estado sea NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO').
-// Lógica 2 (Almacén General - Fiol/gabrielfiol/encargado): Modelo Físico Estricto.
-// SOLO se descuentan del stock los renglones cuyo estado sea explícitamente 'ENTREGADO', 'SURTIDO', 'COMPLETADA', etc.
+// LÓGICA DUAL DE INVENTARIO Y RECÁLCULO ESTRICTO POR ID ÚNICO
+// - Nunca altera cantidad_propia ni fusiona/agrupa registros con códigos o IDs distintos.
+// - Lógica 1 (Préstamos - Jesús [Rubro 3], Evelia [Rubro 2], Luis [Rubro 4]): Modelo de Reserva.
+//   Descuenta mediante subconsulta correlacionada estrictamente por ID único (io.id / t.id)
+//   los renglones de vales activos NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO').
+// - Lógica 2 (Almacén General - Fiol / encargados): Modelo Físico Estricto.
+//   SOLO se descuentan solicitudes en estatus final de entrega.
 // ============================================================================
 async function repararInventarioBodegaDelegacionRM(poolOrConn = poolOps, options = {}) {
   if (!poolOrConn) return { ok: false, error: "Sin conexión a BD" };
@@ -1622,63 +1327,104 @@ async function repararInventarioBodegaDelegacionRM(poolOrConn = poolOps, options
   try {
     if (isPool) await conn.beginTransaction();
 
-    // 1a. Rubros 2 y 3 (Evelia - Parque Vehicular, Jesús - Mobiliario)
-    const [activeLoans] = await conn.query(
-      `SELECT vpd.articulo_id, COALESCE(SUM(vpd.cantidad), 0) AS total_prestado
-       FROM vales_prestamo_detalle vpd
-       INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
-       WHERE vpd.articulo_id IS NOT NULL
-         AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
-       GROUP BY vpd.articulo_id`
-    ).catch(() => [[]]);
+    // 1a. Rubros 2 y 3 (Evelia - Parque Vehicular, Jesús - Mobiliario):
+    // Subconsulta correlacionada ESTRICTAMENTE por io.id (nunca por nombre ni código repetido), sin JOINs duplicadores
+    await conn.query(
+      `UPDATE inventario_oficina io
+       SET
+         io.cantidad_prestada_enviada = COALESCE((
+           SELECT SUM(COALESCE(vpd.cantidad, 0))
+           FROM vales_prestamo_detalle vpd
+           WHERE vpd.articulo_id = io.id
+             AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+             AND vpd.vale_id IN (
+               SELECT vp.id
+               FROM vales_prestamo vp
+               WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+             )
+         ), 0),
+         io.cantidad_disponible = GREATEST(
+           0,
+           CAST(COALESCE(io.cantidad_propia, 0) AS SIGNED) - COALESCE((
+             SELECT SUM(COALESCE(vpd.cantidad, 0))
+             FROM vales_prestamo_detalle vpd
+             WHERE vpd.articulo_id = io.id
+               AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+               AND vpd.vale_id IN (
+                 SELECT vp.id
+                 FROM vales_prestamo vp
+                 WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+               )
+           ), 0)
+         ),
+         io.estatus_uso = CASE
+           WHEN io.estatus_uso IN ('BAJA', 'SINIESTRO / EN ASEGURADORA', 'NO DISPONIBLE (SINIESTRO)', 'EN_REPARACION') THEN io.estatus_uso
+           WHEN COALESCE(io.cantidad_propia, 0) > 0
+            AND (
+              CAST(COALESCE(io.cantidad_propia, 0) AS SIGNED) - COALESCE((
+                SELECT SUM(COALESCE(vpd.cantidad, 0))
+                FROM vales_prestamo_detalle vpd
+                WHERE vpd.articulo_id = io.id
+                  AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+                  AND vpd.vale_id IN (
+                    SELECT vp.id
+                    FROM vales_prestamo vp
+                    WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+                  )
+              ), 0)
+            ) <= 0
+            AND COALESCE((
+              SELECT SUM(COALESCE(vpd.cantidad, 0))
+              FROM vales_prestamo_detalle vpd
+              WHERE vpd.articulo_id = io.id
+                AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+                AND vpd.vale_id IN (
+                  SELECT vp.id
+                  FROM vales_prestamo vp
+                  WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+                )
+            ), 0) > 0 THEN 'PRESTADO'
+           WHEN UPPER(COALESCE(io.estatus_uso, '')) = 'PRESTADO' THEN 'ACTIVO'
+           ELSE io.estatus_uso
+         END
+       WHERE io.rubro_id IN (2, 3)`
+    );
 
-    const activeLoanMap = new Map();
-    for (const r of activeLoans || []) {
-      activeLoanMap.set(Number(r.articulo_id), Math.max(0, Number(r.total_prestado || 0)));
-    }
-
-    const [invRows] = await conn.query(
-      `SELECT id, rubro_id, cantidad_propia, estatus_uso FROM inventario_oficina FOR UPDATE`
-    ).catch(() => [[]]);
-
-    for (const inv of invRows || []) {
-      const prestado = activeLoanMap.get(Number(inv.id)) || 0;
-      const propia = Math.max(0, Number(inv.cantidad_propia || 0));
-      const disp = Math.max(0, propia - prestado);
-      let estatus = inv.estatus_uso || "ACTIVO";
-      if (String(estatus).toUpperCase() === "PRESTADO" && disp > 0) {
-        estatus = "ACTIVO";
-      } else if (propia > 0 && disp === 0 && prestado > 0) {
-        estatus = "PRESTADO";
-      }
-      await conn.query(
-        `UPDATE inventario_oficina
-         SET cantidad_prestada_enviada = ?,
-             cantidad_disponible = ?,
-             estatus_uso = ?
-         WHERE id = ?`,
-        [prestado, disp, estatus, inv.id]
-      ).catch(() => {});
-    }
-
-    // 1b. Rubro 4 (Luis - Tabletas)
+    // 1b. Rubro 4 (Luis - Tabletas): Recálculo estricto por ID único (t.id)
     await conn.query(
       `UPDATE inventario_tabletas t
-       SET t.estado_asignacion = 'DISPONIBLE',
-           t.nombre_resguardante = ''
-       WHERE t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL'
-         AND NOT EXISTS (
-           SELECT 1 FROM vales_prestamo_detalle vpd
-           INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
-           WHERE (vpd.tableta_id = t.id OR vpd.articulo_id = t.id)
-             AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
-         )`
+       SET
+         t.nombre_resguardante = CASE
+           WHEN t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM vales_prestamo_detalle vpd
+              WHERE (vpd.tableta_id = t.id OR vpd.articulo_id = t.id)
+                AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+                AND vpd.vale_id IN (
+                  SELECT vp.id
+                  FROM vales_prestamo vp
+                  WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+                )
+            ) THEN ''
+           ELSE t.nombre_resguardante
+         END,
+         t.estado_asignacion = CASE
+           WHEN EXISTS (
+             SELECT 1
+             FROM vales_prestamo_detalle vpd
+             WHERE (vpd.tableta_id = t.id OR vpd.articulo_id = t.id)
+               AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+               AND vpd.vale_id IN (
+                 SELECT vp.id
+                 FROM vales_prestamo vp
+                 WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+               )
+           ) THEN 'EN_PRESTAMO_PROVISIONAL'
+           WHEN t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL' THEN 'DISPONIBLE'
+           ELSE t.estado_asignacion
+         END`
     ).catch(() => {});
-
-    // 1c. Consolidación de Bodega RM Jesús (Mobiliario)
-    await consolidarBodegaRMJesus(conn, options).catch((e) => {
-      console.warn("[WARN] consolidarBodegaRMJesus en repararInventario:", e?.message || e);
-    });
 
     // 2. Lógica 2 (Almacén General - Fiol / encargados): Modelo Físico Estricto
     const [nonDeliveredWithStockDeducted] = await conn.query(
@@ -1707,8 +1453,6 @@ async function repararInventarioBodegaDelegacionRM(poolOrConn = poolOps, options
       }
       await conn.query(`UPDATE solicitudes SET inventario_descontado = 0 WHERE id = ?`, [solRow.id]).catch(() => {});
     }
-
-    await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
 
     if (isPool) await conn.commit();
     return { ok: true };
@@ -1980,15 +1724,6 @@ async function ensureSchemaAndUsers() {
       ).catch(() => {});
     }
 
-    // 1c-cuat. Limpieza automática de vehículos (rubro_id = 2) asignados a oficinas comodín "S/A" o "Sin Asignar"
-    await poolOps.query(
-      `DELETE io FROM inventario_oficina io
-       JOIN oficinas_regionales ofi ON io.oficina_id = ofi.id
-       WHERE io.rubro_id = 2
-         AND (ofi.nombre LIKE '%S/A%' OR ofi.nombre LIKE '%Sin Asignar%')
-         AND io.id NOT IN (SELECT DISTINCT articulo_id FROM vales_prestamo_detalle WHERE articulo_id IS NOT NULL);`
-    ).catch(() => {});
-
     // 1d. Asegurar columnas origen_adquisicion, observaciones_control y stock_minimo en productos y almacén
     const [prodCols] = await poolRead.query(
       `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'productos'`,
@@ -2033,7 +1768,6 @@ async function ensureSchemaAndUsers() {
     }
     if (!invColNames.has("cantidad_disponible")) {
       await poolOps.query(`ALTER TABLE inventario_oficina ADD COLUMN cantidad_disponible INT(11) NOT NULL DEFAULT 0`).catch(() => {});
-      await poolOps.query(`UPDATE inventario_oficina SET cantidad_disponible = cantidad_propia WHERE cantidad_disponible = 0 AND cantidad_propia > 0`).catch(() => {});
     }
     if (!invColNames.has("es_bodega_delegacion")) {
       await poolOps.query(`ALTER TABLE inventario_oficina ADD COLUMN es_bodega_delegacion TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
@@ -2808,20 +2542,10 @@ async function ensureSchemaAndUsers() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
     ).catch(() => {});
 
-    // Sincronizar Almacén General (Gabriel Fiol) con Inventario Regional Delegación La Paz Rubro 1
-    await syncAlmacenCentralToInventarioRegional(poolOps);
-
     // Normalización de claves en inventario regional: forzar mayúsculas y sin espacios
     await poolOps.query(
       `UPDATE inventario_oficina SET clave_bien = UPPER(TRIM(clave_bien)) WHERE clave_bien IS NOT NULL`
     ).catch(() => {});
-
-    // Consolidar, deduplicar y asignar bodega general de Jesús (Rubro 3 - Mobiliario) a RM (Recursos Materiales)
-    // v53: Solo ejecutar si inventario_oficina para rubro 3 está completamente vacío para no sobreescribir datos ni retornos forzados del admin
-    const [[r3Count]] = await poolRead.query(`SELECT COUNT(*) AS n FROM inventario_oficina WHERE rubro_id = 3`).catch(() => [[{ n: 1 }]]);
-    if (Number(r3Count?.n || 0) === 0) {
-      await consolidarBodegaRMJesus(poolOps);
-    }
 
     // v56: Tablas y semilla del Módulo de Tabletas Digitales (Luis Eduardo Mayoral Geraldo)
     await poolOps.query(
@@ -2918,9 +2642,10 @@ async function ensureSchemaAndUsers() {
 
     await poolOps.query(
       `INSERT IGNORE INTO configuracion_sistema (clave, valor) VALUES
-         ('MODO_PRUEBA_GRUPAL', '1'),
+         ('MODO_PRUEBA_GRUPAL', '0'),
          ('MIGRACION_V61_APLICADA', '0'),
-         ('MIGRACION_V62_APLICADA', '0')`
+         ('MIGRACION_V62_APLICADA', '0'),
+         ('MIGRACION_RECALCULO_ID_ESTRICTO_V1', '0')`
     ).catch(() => {});
 
     try {
@@ -3173,6 +2898,22 @@ async function ensureSchemaAndUsers() {
       }
     } catch (errFase3) {
       console.warn("[WARN] Migración Fase 3:", errFase3?.message || errFase3);
+    }
+
+    // Recálculo idempotente estricto por ID único (sin alterar jamás cantidad_propia)
+    try {
+      const [[migIdRow]] = await poolRead.query(
+        `SELECT valor FROM configuracion_sistema WHERE clave = 'MIGRACION_RECALCULO_ID_ESTRICTO_V1' LIMIT 1`
+      ).catch(() => [[]]);
+      if (String(migIdRow?.valor || "0").trim() !== "1") {
+        await repararInventarioBodegaDelegacionRM(poolOps);
+        await poolOps.query(
+          `INSERT INTO configuracion_sistema (clave, valor) VALUES ('MIGRACION_RECALCULO_ID_ESTRICTO_V1', '1')
+           ON DUPLICATE KEY UPDATE valor = '1'`
+        ).catch(() => {});
+      }
+    } catch (errRecalc) {
+      console.warn("[WARN] Recálculo estricto por ID:", errRecalc?.message || errRecalc);
     }
 
     SCHEMA_MIGRATED = true;
@@ -4608,15 +4349,19 @@ app.delete("/api/admin/purgar-pruebas", authRequired, async (req, res) => {
 // ============================================================================
 app.get("/api/bitacora", authRequired, async (req, res) => {
   try {
-    if (!isAdmin(req)) {
-      return httpError(res, 403, "Solo el Administrador puede consultar la bitácora de movimientos.");
+    if (!isAdmin(req) && !isAuditorBlockedUser(req)) {
+      return httpError(res, 403, "Solo el Administrador o Auditores (Jorge Patrón / Rodrigo Molina) pueden consultar la bitácora de movimientos.");
     }
-    const { q = "", fecha = "", limit = 500 } = req.query;
+    const { q = "", fecha = "", modulo = "", limit = 500 } = req.query;
     const lim = Math.min(Math.max(parseInt(limit) || 500, 1), 1000);
 
     let whereSql = "WHERE 1=1";
     const params = [];
 
+    if (modulo && String(modulo).trim()) {
+      whereSql += " AND UPPER(TRIM(modulo)) = ?";
+      params.push(String(modulo).trim().toUpperCase());
+    }
     if (fecha) {
       whereSql += " AND DATE(fecha) = ?";
       params.push(fecha);
@@ -5987,12 +5732,27 @@ async function surtirSolicitudHandler(req, res) {
         return det.descripcion || stockMap.get(c)?.desc || det.clave || `renglón ${det.id}`;
       };
 
+      const isCurLockedStep3 = ["PARA_FIRMAS", "PASO_3"].includes(curStatus);
+      const isNextFinalStep4 = ["COMPLETADA", "SURTIDA", "ENTREGADA", "ENTREGADO", "SURTIDO"].includes(String(nextStatus).toUpperCase());
+
+      // Bloqueo estricto desde el Paso 3: una vez en PARA_FIRMAS, no se permite volver a editar cantidades ni observaciones
+      if (isCurLockedStep3 && !isNextFinalStep4) {
+        await conn.rollback();
+        return httpError(res, 409, "Las cantidades surtidas y observaciones están bloqueadas desde el Paso 3 (PARA FIRMAS) y no pueden modificarse.");
+      }
+
       const plan = [];
-      const itemsToProcess = rawItems.length
+      // Si la orden ya está en Paso 3 (PARA_FIRMAS) y avanza al Paso 4 (ENTREGADA/COMPLETADA/SURTIDA),
+      // ignorar cualquier payload de modificación y usar estrictamente las cantidades congeladas en BD al cierre del Paso 2.
+      const freezeFromDbOnly = isCurLockedStep3 || isNextFinalStep4;
+      const itemsToProcess = (!freezeFromDbOnly && rawItems.length)
         ? rawItems
         : detRows.map(d => ({
             detalle_id: d.id,
-            cantidad_surtida: d.cantidad_surtida !== null && d.cantidad_surtida !== undefined ? d.cantidad_surtida : (Number(d.atendida || 0) > 0 ? d.atendida : d.cantidad),
+            cantidad_surtida:
+              d.cantidad_surtida !== null && d.cantidad_surtida !== undefined
+                ? Number(d.cantidad_surtida)
+                : (d.atendida !== null && d.atendida !== undefined ? Number(d.atendida) : Number(d.cantidad || 0)),
             observaciones: d.observaciones
           }));
 
@@ -6041,15 +5801,17 @@ async function surtirSolicitudHandler(req, res) {
         return httpError(res, 400, "Todas las cantidades a surtir están en 0. Ingresa al menos 1 artículo a entregar.");
       }
 
-      // Actualizar cantidad_surtida y atendida en detalles_solicitud
-      for (const p of plan) {
-        const { item, targetDet, nextAtendida } = p;
-        const detId = Number(targetDet.id);
-        const newObs = item.observaciones !== undefined ? (item.observaciones ? String(item.observaciones).trim() : null) : targetDet.observaciones;
-        await conn.query(
-          "UPDATE detalles_solicitud SET cantidad_surtida = ?, atendida = ?, observaciones = ? WHERE id = ?",
-          [nextAtendida, nextAtendida, newObs, detId]
-        );
+      // Actualizar y congelar cantidad_surtida y observaciones en detalles_solicitud ÚNICAMENTE al cerrar el Paso 2 (hacia PARA_FIRMAS)
+      if (!isCurLockedStep3 && !isNextFinalStep4) {
+        for (const p of plan) {
+          const { item, targetDet, nextAtendida } = p;
+          const detId = Number(targetDet.id);
+          const newObs = item.observaciones !== undefined ? (item.observaciones ? String(item.observaciones).trim() : null) : targetDet.observaciones;
+          await conn.query(
+            "UPDATE detalles_solicitud SET cantidad_surtida = ?, atendida = ?, observaciones = ? WHERE id = ?",
+            [nextAtendida, nextAtendida, newObs, detId]
+          );
+        }
       }
 
       // Lógica 2 (Almacén General - Fiol / encargado): Modelo Físico Estricto
@@ -6108,7 +5870,7 @@ async function surtirSolicitudHandler(req, res) {
         req,
         "ALMACEN",
         `ORDEN_${nextStatus}`,
-        `Orden #${solicitudId} actualizada a ${nextStatus}${esSolicitudDePrueba ? " [MODO PRUEBA - SIN DESCUENTO DE STOCK]" : ""}: ${itemsBreakdown || "Sin artículos"}`,
+        `Orden #${solicitudId} actualizada a ${nextStatus}: ${itemsBreakdown || "Sin artículos"}`,
         conn
       );
 
@@ -6117,7 +5879,7 @@ async function surtirSolicitudHandler(req, res) {
         ok: true,
         status: nextStatus,
         solicitud_id: solicitudId,
-        es_prueba: esSolicitudDePrueba ? 1 : 0,
+        es_prueba: 0,
         inventario_descontado: nextInvDescontado,
       });
     } catch (err) {
@@ -6676,7 +6438,7 @@ const pk = await detectProductosPK();
 const whereSolicitud = solicitudId == null ? "" : " AND ds.solicitud_id=?";
 const params = solicitudId == null ? [detalleId] : [detalleId, solicitudId];
 const [rows] = await conn.query(
-`SELECT ds.id, ds.solicitud_id, ds.producto_id, ds.cantidad, ds.atendida, p.CLAVE AS clave
+`SELECT ds.id, ds.solicitud_id, ds.producto_id, ds.cantidad, ds.cantidad_surtida, ds.atendida, p.CLAVE AS clave
 FROM detalles_solicitud ds
 LEFT JOIN productos p ON p.${qi(pk)} = ds.producto_id
 WHERE ds.id=?${whereSolicitud}
@@ -6691,36 +6453,50 @@ throw err;
 }
 
 const row = rows[0];
-const prevAtendida = Number(row.atendida || 0);
-const nextAtendida = "atendida" in data ? Number(data.atendida) : prevAtendida;
+const [solRows] = await conn.query(
+  `SELECT id, status FROM solicitudes WHERE id = ? LIMIT 1 FOR UPDATE`,
+  [row.solicitud_id]
+);
+const parentStatus = String(solRows[0]?.status || "PENDIENTE").trim().toUpperCase();
+if (
+  [
+    "PARA_FIRMAS",
+    "PASO_3",
+    "COMPLETADA",
+    "SURTIDA",
+    "SURTIDO",
+    "ENTREGADA",
+    "ENTREGADO",
+    "APROBADA",
+    "PASO_4",
+    "CANCELADA",
+    "CANCELADO",
+    "RECHAZADA",
+    "RECHAZADO",
+  ].includes(parentStatus)
+) {
+  const err = new Error("Las cantidades surtidas y observaciones están bloqueadas desde el Paso 3 (PARA FIRMAS) y no pueden modificarse.");
+  err.statusCode = 409;
+  throw err;
+}
+
+const prevAtendida = Number(row.cantidad_surtida ?? row.atendida ?? 0);
+const rawNext = "cantidad_surtida" in data ? data.cantidad_surtida : ("atendida" in data ? data.atendida : prevAtendida);
+const nextAtendida = Number(rawNext);
 const cantidadSolicitada = Number(row.cantidad || 0);
 if (nextAtendida > cantidadSolicitada) {
-const err = new Error(`Atendida no puede ser mayor que solicitada (${cantidadSolicitada})`);
+const err = new Error(`La cantidad surtida no puede ser mayor que la solicitada (${cantidadSolicitada})`);
 err.statusCode = 400;
 throw err;
 }
-const deltaAtendida = nextAtendida - prevAtendida;
 
-if (deltaAtendida !== 0) {
-if (!row.clave) {
-const err = new Error("No se pudo resolver la CLAVE del detalle");
-err.statusCode = 400;
-throw err;
-}
-await applySolicitudStockDeltaForClave(conn, {
-clave: row.clave,
-delta: deltaAtendida,
-responsable: username,
-referencia: `SOL-${row.solicitud_id}`,
-observaciones: "observaciones" in data ? data.observaciones : null,
-});
-}
-
+// Lógica Físico Estricto (Almacén General Fiol): No se descuenta stock en Paso 1, 2 ni 3.
+// El descuento físico únicamente ocurre al avanzar al Paso 4 (ENTREGADA / COMPLETADA / SURTIDA).
 const sets = [];
 const vals = [];
-if ("atendida" in data) {
-sets.push("atendida=?");
-vals.push(nextAtendida);
+if ("atendida" in data || "cantidad_surtida" in data) {
+sets.push("cantidad_surtida=?", "atendida=?");
+vals.push(nextAtendida, nextAtendida);
 }
 if ("observaciones" in data) {
 sets.push("observaciones=?");
@@ -6734,14 +6510,6 @@ await conn.query(
 SET ${sets.join(", ")}
 WHERE id=?${solicitudId == null ? "" : " AND solicitud_id=?"}`,
 vals
-);
-
-const approvedStatus = await normalizeStatus("APROBADA").catch(() => "APROBADA");
-await conn.query(
-`UPDATE solicitudes
-SET status=?
-WHERE id=?`,
-[approvedStatus, row.solicitud_id]
 );
 
 await conn.commit();
@@ -6896,7 +6664,7 @@ if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus)) {
 }
 
 await conn.commit();
-return { status: nextStatus, restoredQty, deductedQty, esPrueba };
+return { status: nextStatus, restoredQty, deductedQty, esPrueba: false };
 } catch (e) {
 await conn.rollback();
 throw e;
@@ -9170,12 +8938,9 @@ app.post("/api/inventario-regional", authRequired, async (req, res) => {
     if (!Number.isInteger(rubroId) || rubroId <= 0) return httpError(res, 400, "Rubro requerido");
     if (!claveBienNorm) return httpError(res, 400, "Clave del bien requerida");
     if (!descripcion) return httpError(res, 400, "Descripción requerida");
-    // v42: el Administrador puede guardar cambios (observaciones, nombres, etc.) aunque las cantidades sean 0
     const isAdminEditor = isAdmin(req) || String(req.user?.rol || "").trim().toLowerCase() === "admin";
-    if (isAdminEditor) {
-      if (!Number.isInteger(cantidad) || cantidad < 0) return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 0");
-    } else if (!Number.isInteger(cantidad) || cantidad < 1) {
-      return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 1");
+    if (!Number.isInteger(cantidad) || cantidad < 0) {
+      return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 0");
     }
     if (!["BUENO", "REGULAR", "MALO", "BAJA", "SINIESTRO / EN ASEGURADORA", "NO DISPONIBLE (SINIESTRO)"].includes(estadoFisico)) return httpError(res, 400, "Estado físico inválido");
     if (!["ACTIVO", "PRESTADO", "EN_REPARACION", "BAJA", "SINIESTRO / EN ASEGURADORA", "NO DISPONIBLE (SINIESTRO)"].includes(estatusUso)) return httpError(res, 400, "Estatus de uso inválido");
@@ -9268,7 +9033,7 @@ app.post("/api/inventario-regional", authRequired, async (req, res) => {
   }
 });
 
-// Edición de un activo en el inventario regional (incluye fusión inteligente si se mueve a una oficina donde ya existe)
+// Edición directa y permanente de un activo por su ID único en inventario_oficina (sin fusiones ni agrupaciones)
 app.put("/api/inventario-regional/:id", authRequired, async (req, res) => {
   try {
     if (!canEditRegional(req)) {
@@ -9325,12 +9090,9 @@ app.put("/api/inventario-regional/:id", authRequired, async (req, res) => {
     if (!Number.isInteger(rubroId) || rubroId <= 0) return httpError(res, 400, "Rubro requerido");
     if (!claveBienNorm) return httpError(res, 400, "Clave del bien requerida");
     if (!descripcion) return httpError(res, 400, "Descripción requerida");
-    // v42: el Administrador puede guardar cambios (observaciones, nombres, etc.) aunque las cantidades sean 0
     const isAdminEditor = isAdmin(req) || String(req.user?.rol || "").trim().toLowerCase() === "admin";
-    if (isAdminEditor) {
-      if (!Number.isInteger(cantidad) || cantidad < 0) return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 0");
-    } else if (!Number.isInteger(cantidad) || cantidad < 1) {
-      return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 1");
+    if (!Number.isInteger(cantidad) || cantidad < 0) {
+      return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 0");
     }
     if (!["BUENO", "REGULAR", "MALO", "BAJA", "SINIESTRO / EN ASEGURADORA", "NO DISPONIBLE (SINIESTRO)"].includes(estadoFisico)) return httpError(res, 400, "Estado físico inválido");
     if (!["ACTIVO", "PRESTADO", "EN_REPARACION", "BAJA", "SINIESTRO / EN ASEGURADORA", "NO DISPONIBLE (SINIESTRO)"].includes(estatusUso)) return httpError(res, 400, "Estatus de uso inválido");
@@ -9369,8 +9131,20 @@ app.put("/api/inventario-regional/:id", authRequired, async (req, res) => {
       };
     }
     const detallesJson = finalDetallesObj ? JSON.stringify(finalDetallesObj) : null;
-    const prestadoAct = Math.max(0, Number(existingAsset.cantidad_prestada_enviada || 0));
-    const nuevoPrestado = Math.min(prestadoAct, cantidad);
+    // Calcular prestado activo en BD estrictamente por el ID único del artículo (sin agrupar por nombre o clave)
+    const [[prestLiveRow]] = await poolRead.query(
+      `SELECT COALESCE(SUM(COALESCE(vpd.cantidad, 0)), 0) AS prestado_activo
+       FROM vales_prestamo_detalle vpd
+       WHERE vpd.articulo_id = ?
+         AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+         AND vpd.vale_id IN (
+           SELECT vp.id
+           FROM vales_prestamo vp
+           WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+         )`,
+      [id]
+    ).catch(() => [[{ prestado_activo: existingAsset.cantidad_prestada_enviada || 0 }]]);
+    const nuevoPrestado = Math.max(0, Number(prestLiveRow?.prestado_activo || 0));
     let nuevaDisponible = Math.max(0, cantidad - nuevoPrestado);
     if (isAdminEditor && b.cantidad_disponible !== undefined && b.cantidad_disponible !== null && b.cantidad_disponible !== "") {
       const dispAdmin = Number(b.cantidad_disponible);
@@ -9423,7 +9197,20 @@ app.put("/api/inventario-regional/:id", authRequired, async (req, res) => {
       ).catch(() => {});
     }
 
-    return res.json({ ok: true, id });
+    await registrarBitacora(
+      req,
+      "REGIONAL",
+      "EDICION_ACTIVO",
+      `Edición directa del activo ID #${id} [${claveBienNorm}] "${descripcion}": cantidad_propia ${existingAsset.cantidad_propia} -> ${cantidad}, cantidad_disponible -> ${nuevaDisponible}, prestado_activo=${nuevoPrestado}.`
+    );
+
+    return res.json({
+      ok: true,
+      id,
+      cantidad_propia: cantidad,
+      cantidad_disponible: nuevaDisponible,
+      cantidad_prestada_enviada: nuevoPrestado
+    });
   } catch (e) {
     return httpError(res, 500, e.message);
   }
@@ -11378,7 +11165,6 @@ app.get("/api/vales-prestamo/catalogo", authRequired, async (req, res) => {
         `SELECT id, no_resguardo, imei, numero_serie, marca, modelo, descripcion, estatus_fisico, region, oficina_programa, observaciones
          FROM inventario_tabletas
          WHERE estado_asignacion = 'DISPONIBLE'
-           AND UPPER(TRIM(COALESCE(region, 'LA PAZ'))) = 'LA PAZ'
          ORDER BY no_resguardo ASC`
       );
       const data = tabRows.map((t) => {
@@ -11386,6 +11172,7 @@ app.get("/api/vales-prestamo/catalogo", authRequired, async (req, res) => {
         const modelo = String(t.modelo || "QTab LTE").trim();
         const imei = String(t.imei || "").trim();
         const numSerie = String(t.numero_serie || "").trim();
+        const descBase = String(t.descripcion || `Tablet ${marca}`).trim();
         return {
           id: t.id,
           tableta_id: t.id,
@@ -11395,7 +11182,7 @@ app.get("/api/vales-prestamo/catalogo", authRequired, async (req, res) => {
           numero_serie: numSerie,
           clave: `RESG-${t.no_resguardo}`,
           clave_bien: `RESG-${t.no_resguardo}`,
-          descripcion: `Tablet Compac - No. de Resguardo #${t.no_resguardo}`,
+          descripcion: `${descBase} - No. de Resguardo #${t.no_resguardo}`,
           unidad: "PIEZA",
           stock: 1,
           cantidad_disponible: 1,
@@ -11492,14 +11279,6 @@ app.get("/api/vales-prestamo/catalogo", authRequired, async (req, res) => {
           /\bRM\b/.test(combined) ||
           combined.includes("PATRON MURILLO")
         );
-      });
-    } else if (rubroId === 3) {
-      const seenMobKeys = new Set();
-      rows = rows.filter((r) => {
-        const key = normalizeMobClave(r.clave, r.descripcion);
-        if (seenMobKeys.has(key)) return false;
-        seenMobKeys.add(key);
-        return true;
       });
     }
 
@@ -11940,9 +11719,10 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
         );
       }
 
-      if (!modoPruebaActivo && rubroId === 4 && tabletasAuditList.length) {
+      if (rubroId === 4 && tabletasAuditList.length) {
         const actor = req?.user?.username || req?.user?.nombre || "SISTEMA";
         for (const tabRow of tabletasAuditList) {
+          const detMsg = `Vale Provisional ${folio} autorizado/entregado a "${solicitanteNombre}". Operativo: ${operativoNombre}.`;
           await conn.query(
             `INSERT INTO bitacora_tabletas (tableta_id, no_resguardo, imei, numero_serie, usuario, accion, detalles)
              VALUES (?, ?, ?, ?, ?, 'PRESTAMO_PROVISIONAL', ?)`,
@@ -11952,8 +11732,15 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
               tabRow.imei || null,
               tabRow.numero_serie || null,
               String(actor).slice(0, 80),
-              `Vale Provisional ${folio} autorizado/entregado a "${solicitanteNombre}". Operativo: ${operativoNombre}.`,
+              detMsg,
             ]
+          );
+          await registrarBitacora(
+            req,
+            "TABLETAS",
+            "PRESTAMO_PROVISIONAL",
+            `Tableta #${tabRow.no_resguardo} (IMEI: ${tabRow.imei || "-"}, Serie: ${tabRow.numero_serie || "-"}) — ${detMsg}`,
+            conn
           );
         }
       }
@@ -13977,7 +13764,7 @@ app.post("/api/migracion/reset-vales-y-reestructurar-jesus", authRequired, async
       await conn.query(`ALTER TABLE vales_prestamo_detalle AUTO_INCREMENT = 1`).catch(() => {});
       await conn.query(`ALTER TABLE vales_prestamo AUTO_INCREMENT = 1`).catch(() => {});
 
-      await consolidarBodegaRMJesus(poolOps, { forceResetQuantities: true }).catch(() => {});
+      await repararInventarioBodegaDelegacionRM(poolOps).catch(() => {});
 
       return res.json({
         ok: true,
@@ -14003,25 +13790,25 @@ app.post("/api/migracion/reset-vales-y-reestructurar-jesus", authRequired, async
 });
 
 // ============================================================================
-// MIGRACIÓN: CONSOLIDAR, DEDUPLICAR Y ASIGNAR BODEGA GENERAL DE JESÚS A RM
+// RECÁLCULO ESTRICTO DE INVENTARIO POR ID ÚNICO (SIN ALTERAR cantidad_propia)
 // ============================================================================
 app.post("/api/migracion/consolidar-bodega-rm-jesus", authRequired, async (req, res) => {
   try {
     const uName = normalizeUser(req.user?.username);
     if (!isAdmin(req) && !["jesus", "rodrigo", "jorge", "jorgepatron"].includes(uName)) {
-      return httpError(res, 403, "No tienes permisos para consolidar la bodega de Mobiliario RM.");
+      return httpError(res, 403, "No tienes permisos para recalcular el inventario de Mobiliario RM.");
     }
-    const result = await consolidarBodegaRMJesus(poolOps, { forceResetQuantities: true });
+    const result = await repararInventarioBodegaDelegacionRM(poolOps);
     if (!result.ok) {
-      return httpError(res, 500, result.error || "Error al consolidar bodega RM de Jesús");
+      return httpError(res, 500, result.error || "Error al recalcular inventario por ID único");
     }
     return res.json({
       ...result,
-      message: `Bodega de Jesús consolidada en RM (Recursos Materiales): ${result.duplicados_eliminados} duplicados eliminados, ${result.referencias_vales_reasignadas} referencias de vales vinculadas. Sillas grises (MOB-001): ${result.sillas_grises_rm?.cantidad_propia ?? 181} propias / ${result.sillas_grises_rm?.cantidad_disponible ?? 171} disponibles.`,
+      message: "Recálculo estricto por ID único completado sin alterar cantidades propias ni fusionar artículos.",
     });
   } catch (e) {
     console.error("Error en POST /api/migracion/consolidar-bodega-rm-jesus:", e);
-    return httpError(res, 500, e.message || "Error al consolidar bodega RM de Jesús");
+    return httpError(res, 500, e.message || "Error al recalcular inventario por ID único");
   }
 });
 
@@ -15472,8 +15259,8 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
 app.get("/api/tabletas", authRequired, async (req, res) => {
   try {
     await ensureSchemaAndUsers();
-    if (!canAccessTabletas(req)) {
-      return httpError(res, 403, "Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales y Administración.");
+    if (!canViewTabletas(req)) {
+      return httpError(res, 403, "Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales (Jorge Patrón / Rodrigo Molina) y Administración.");
     }
 
     const { estado_asignacion = "", region = "", oficina_programa = "", q = "", filtro_extra = "" } = req.query || {};
@@ -15566,12 +15353,12 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
   }
 });
 
-// 1B. GET /api/tabletas/bitacora — Log de movimientos de tabletas (Exclusivo Admin)
+// 1B. GET /api/tabletas/bitacora — Log de movimientos de tabletas (Permite canViewTabletas: Admin, Luis Eduardo, Jorge y Rodrigo)
 app.get("/api/tabletas/bitacora", authRequired, async (req, res) => {
   try {
     await ensureSchemaAndUsers();
-    if (!isAdmin(req)) {
-      return httpError(res, 403, "Acceso exclusivo para el Administrador.");
+    if (!canViewTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para consultar la bitácora de tabletas.");
     }
     const q = String(req.query?.q || "").trim();
     const accion = String(req.query?.accion || "").trim().toUpperCase();
@@ -15638,6 +15425,128 @@ async function registrarBitacoraTableta(req, { tableta_id = null, no_resguardo =
   }
 }
 
+// 1C. POST /api/tabletas — Alta de nueva tableta / activo en inventario_tabletas (Exclusivo Admin y Luis Eduardo)
+app.post("/api/tabletas", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para dar de alta nuevas tabletas.");
+    }
+
+    const b = req.body || {};
+    const imei = String(b.imei || "").trim();
+    const numeroSerie = String(b.numero_serie || b.serie || "").trim();
+    if (!imei || !numeroSerie) {
+      return httpError(res, 400, "El Número de Serie y el IMEI son obligatorios para registrar una nueva tableta.");
+    }
+
+    let noResguardo = b.no_resguardo !== undefined && b.no_resguardo !== null && String(b.no_resguardo).trim() !== ""
+      ? parseInt(b.no_resguardo, 10)
+      : NaN;
+
+    if (!Number.isInteger(noResguardo) || noResguardo <= 0) {
+      const [[maxRow]] = await poolRead.query(`SELECT COALESCE(MAX(no_resguardo), 0) + 1 AS next_resg FROM inventario_tabletas`);
+      noResguardo = Number(maxRow?.next_resg || 1);
+    }
+
+    // Validación estricta de duplicados (no_resguardo, imei, numero_serie)
+    const [dups] = await poolRead.query(
+      `SELECT id, no_resguardo, imei, numero_serie
+       FROM inventario_tabletas
+       WHERE no_resguardo = ? OR UPPER(TRIM(imei)) = UPPER(?) OR UPPER(TRIM(numero_serie)) = UPPER(?)
+       LIMIT 1`,
+      [noResguardo, imei, numeroSerie]
+    );
+    if (dups.length) {
+      const d = dups[0];
+      if (Number(d.no_resguardo) === noResguardo) {
+        return httpError(res, 409, `⚠️ El No. de Resguardo / Código #${noResguardo} ya pertenece a otra tableta.`);
+      }
+      if (String(d.imei || "").trim().toUpperCase() === imei.toUpperCase()) {
+        return httpError(res, 409, `⚠️ El IMEI "${imei}" ya está registrado en la tableta #${d.no_resguardo}.`);
+      }
+      return httpError(res, 409, `⚠️ El Número de Serie "${numeroSerie}" ya está registrado en la tableta #${d.no_resguardo}.`);
+    }
+
+    const { region, oficina_programa } = normalizeTabletaRegionInput(
+      b.region || "LA PAZ",
+      b.oficina_programa || "Delegación La Paz"
+    );
+    const noCaja = String(b.no_caja || "").trim() || null;
+    const marca = String(b.marca || "Compac").trim() || "Compac";
+    const modelo = String(b.modelo || "QTab LTE").trim() || "QTab LTE";
+    const descripcion = String(b.descripcion || `Tablet ${marca}`).trim() || "Tablet Compac";
+    const rawEstadoAsig = String(b.estado_asignacion || b.estatus || "DISPONIBLE").trim().toUpperCase();
+    const estadoAsignacion = ["DISPONIBLE", "EN_RESGUARDO", "DEVOLUCION_PENDIENTE", "EN_PRESTAMO_PROVISIONAL"].includes(rawEstadoAsig)
+      ? rawEstadoAsig
+      : "DISPONIBLE";
+    const nombreResg = estadoAsignacion === "DISPONIBLE"
+      ? ""
+      : String(b.nombre_resguardante || "").trim();
+    const cargoResg = String(b.cargo_resguardante || "Servidor de la nación").trim() || "Servidor de la nación";
+    const rawFisico = String(b.estatus_fisico || "BUENO").trim().toUpperCase();
+    const estatusFisico = ["BUENO", "INCOMPLETO", "DAÑADO"].includes(rawFisico) ? rawFisico : "BUENO";
+    const tieneCargador = b.tiene_cargador !== undefined ? (Number(b.tiene_cargador) ? 1 : 0) : 1;
+    const tieneCaja = b.tiene_caja !== undefined ? (Number(b.tiene_caja) ? 1 : 0) : 1;
+    const observaciones = String(b.observaciones || "").trim() || null;
+
+    const [ins] = await poolOps.query(
+      `INSERT INTO inventario_tabletas
+         (no_resguardo, imei, numero_serie, no_caja, marca, modelo, descripcion,
+          region, oficina_programa, nombre_resguardante, cargo_resguardante,
+          estatus_fisico, tiene_cargador, tiene_caja, observaciones,
+          sin_resguardo_previo, estado_asignacion)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      [
+        noResguardo,
+        imei,
+        numeroSerie,
+        noCaja,
+        marca,
+        modelo,
+        descripcion,
+        region,
+        oficina_programa,
+        nombreResg,
+        cargoResg,
+        estatusFisico,
+        tieneCargador,
+        tieneCaja,
+        observaciones,
+        estadoAsignacion,
+      ]
+    );
+    const newId = ins.insertId;
+
+    const bitacoraDetalle = `Alta de nueva Tableta #${noResguardo} (${marca} ${modelo}, Serie: ${numeroSerie}, IMEI: ${imei}). Región: ${region} (${oficina_programa}). Estatus inicial: ${estadoAsignacion}. Accesorios: Cargador=${tieneCargador ? "Sí" : "No"}, Caja=${tieneCaja ? "Sí" : "No"}.${observaciones ? ` Obs: ${observaciones}` : ""}`;
+
+    await registrarBitacora(
+      req,
+      "TABLETAS",
+      "ALTA_TABLETA",
+      bitacoraDetalle
+    );
+    await registrarBitacoraTableta(req, {
+      tableta_id: newId,
+      no_resguardo: noResguardo,
+      imei,
+      numero_serie: numeroSerie,
+      accion: "ALTA_TABLETA",
+      detalles: bitacoraDetalle,
+    });
+
+    const [[created]] = await poolRead.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1`, [newId]);
+    return res.status(201).json({
+      ok: true,
+      id: newId,
+      data: created,
+      message: `Tableta #${noResguardo} (${marca} ${modelo}) agregada exitosamente con estatus ${estadoAsignacion}.`,
+    });
+  } catch (e) {
+    return httpError(res, e.statusCode || 500, e.message || "Error al agregar nueva tableta");
+  }
+});
+
 // 2. PUT /api/tabletas/:id — Edición de registro con validación de unicidad (409)
 app.put("/api/tabletas/:id", authRequired, async (req, res) => {
   try {
@@ -15654,7 +15563,7 @@ app.put("/api/tabletas/:id", authRequired, async (req, res) => {
     const b = req.body || {};
     const adminUser = isAdmin(req);
 
-    // Solo el Administrador puede modificar no_resguardo, imei y numero_serie
+    // Solo el Administrador puede modificar no_resguardo, imei y numero_serie en registros existentes
     const noResguardo = (adminUser && b.no_resguardo !== undefined) ? parseInt(b.no_resguardo, 10) : existing.no_resguardo;
     if (!Number.isInteger(noResguardo) || noResguardo <= 0) {
       return httpError(res, 400, "El No. de Resguardo debe ser un número entero positivo.");
@@ -15736,6 +15645,38 @@ app.put("/api/tabletas/:id", authRequired, async (req, res) => {
     return res.json({ ok: true, data: updated, message: `Tableta #${noResguardo} actualizada correctamente.` });
   } catch (e) {
     return httpError(res, e.statusCode || 500, e.message || "Error al actualizar tableta");
+  }
+});
+
+// 2B. DELETE /api/tabletas/:id — Eliminación de tableta (Restringido a canEditTabletas / Admin)
+app.delete("/api/tabletas/:id", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para eliminar tabletas.");
+    }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return httpError(res, 400, "ID de tableta inválido.");
+
+    const [[existing]] = await poolRead.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1`, [id]);
+    if (!existing) return httpError(res, 404, "Tableta no encontrada.");
+
+    await poolOps.query(`DELETE FROM inventario_tabletas WHERE id = ?`, [id]);
+
+    const detDel = `Tableta #${existing.no_resguardo} (IMEI: ${existing.imei}, Serie: ${existing.numero_serie}) eliminada del padrón.`;
+    await registrarBitacora(req, "TABLETAS", "ELIMINAR_TABLETA", detDel);
+    await registrarBitacoraTableta(req, {
+      tableta_id: id,
+      no_resguardo: existing.no_resguardo,
+      imei: existing.imei,
+      numero_serie: existing.numero_serie,
+      accion: "ELIMINAR_TABLETA",
+      detalles: detDel,
+    });
+
+    return res.json({ ok: true, id, message: `Tableta #${existing.no_resguardo} eliminada correctamente.` });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al eliminar tableta");
   }
 });
 
@@ -16308,13 +16249,6 @@ const server = app.listen(port, '0.0.0.0', async () => {
     await ensureSchemaAndUsers();
     // DRP: Snapshot inicial de la base de datos para recuperación ante desastres
     exportDatabaseSnapshot().catch((err) => console.warn("[WARN] Snapshot inicial BD:", err?.message || err));
-    // Si inventario_oficina y almacen_dregcivil están completamente vacíos, poblar datos de prueba automáticamente
-    const [[invCount]] = await poolRead.query(`SELECT COUNT(*) AS n FROM inventario_oficina`).catch(() => [[{ n: 1 }]]);
-    const [[almCount]] = await poolRead.query(`SELECT COUNT(*) AS n FROM almacen_dregcivil`).catch(() => [[{ n: 1 }]]);
-    if (Number(invCount?.n || 0) === 0 && Number(almCount?.n || 0) === 0) {
-      const { runSeedPruebas } = require("./seed-pruebas");
-      await runSeedPruebas().catch((err) => console.warn("[WARN] Auto-seed pruebas:", err?.message || err));
-    }
   } catch (e) {
   }
   console.log(`API en puerto ${port}`);
