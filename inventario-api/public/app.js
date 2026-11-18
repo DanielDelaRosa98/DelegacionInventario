@@ -983,6 +983,7 @@
       
       await Promise.all([loadSolicitudUsers(), loadSolicitudOficialias()]); 
       applyPermassions();
+      startSolicitudesPolling();
     } catch(e) {
       console.error("Error en me():", e);
       window.location.replace('/');
@@ -990,6 +991,7 @@
   }
 
   async function logout(){
+    stopSolicitudesPolling();
     try{ await apiJSON('/api/auth/logout', { method:'POST' }); }catch{}
     CURRENT_USER = null; UI_PERMISOS = null;
     window.location.replace('/');
@@ -1088,6 +1090,15 @@
       if ($('kpi-ordenes-total'))$('kpi-ordenes-total').textContent = total;
       if ($('kpi-ordenes-pendientes'))$('kpi-ordenes-pendientes').textContent = pendientes;
       if ($('kpi-ordenes-autorizadas'))$('kpi-ordenes-autorizadas').textContent = surtidas;
+
+      updateNavSolicitudesBadge(pendientes);
+      if (!HAS_SEEN_INITIAL_SOL && rows.length) {
+        rows.forEach(r => {
+          const id = Number(r.id ?? r.ID ?? r.solicitud_id ?? r.SOLICITUD_ID);
+          if (Number.isFinite(id) && id > 0) KNOWN_SOL_IDS.add(id);
+        });
+        HAS_SEEN_INITIAL_SOL = true;
+      }
 
       const actBox = $('panel_actividad_box');
       if (actBox) {
@@ -1201,11 +1212,114 @@
   let CAPTURA_DIRTY = false;
   let SOLICITUDES_TAB = 'lista';
   let SOL_LIST_MODE = 'activas';
+  let SOLICITUDES_POLLING_TIMER = null;
+  let IS_AUTO_REFRESHING_SOL = false;
+  const KNOWN_SOL_IDS = new Set();
+  let HAS_SEEN_INITIAL_SOL = false;
 
   function setSolicitudListMode(mode){
     SOL_LIST_MODE = mode === 'canceladas' ? 'canceladas' : 'activas';
     $('btn-list-mode-activas')?.classList.toggle('active', SOL_LIST_MODE === 'activas');
     $('btn-list-mode-canceladas')?.classList.toggle('active', SOL_LIST_MODE === 'canceladas');
+  }
+
+  function updateNavSolicitudesBadge(count) {
+    let badge = $('nav-sol-badge');
+    if (!badge) {
+      const navBtn = $('nav-solicitudes');
+      if (navBtn) {
+        badge = document.createElement('span');
+        badge.id = 'nav-sol-badge';
+        badge.className = 'badge-pending';
+        badge.style.cssText = 'background:#e11d48; color:#fff; font-size:11px; font-weight:700; border-radius:10px; padding:1px 7px; margin-left:auto; line-height:16px;';
+        navBtn.appendChild(badge);
+      }
+    }
+    if (badge) {
+      const n = Number(count || 0);
+      if (n > 0) {
+        badge.textContent = n > 99 ? '99+' : String(n);
+        badge.classList.remove('hidden');
+        badge.style.display = 'inline-block';
+        badge.title = `${n} orden(es) pendiente(s)`;
+      } else {
+        badge.textContent = '0';
+        badge.classList.add('hidden');
+        badge.style.display = 'none';
+        badge.title = '';
+      }
+    }
+  }
+
+  function isSolicitudesListViewActive() {
+    // 1. Pestaña en segundo plano (document.hidden)
+    if (document.hidden) return false;
+
+    // 2. Vista principal de solicitudes activa
+    const viewSol = $('view-solicitudes');
+    if (!viewSol || viewSol.classList.contains('hidden') || viewSol.style.display === 'none') {
+      return false;
+    }
+
+    // 3. Pestaña de listado dentro de solicitudes (NO consulta/detalle de una orden)
+    if (typeof SOLICITUDES_TAB !== 'undefined' && SOLICITUDES_TAB !== 'lista') {
+      return false;
+    }
+    const paneLista = $('solicitudes-pane-lista');
+    if (!paneLista || paneLista.classList.contains('hidden') || paneLista.style.display === 'none') {
+      return false;
+    }
+    const paneConsulta = $('solicitudes-pane-consulta');
+    if (paneConsulta && (!paneConsulta.classList.contains('hidden') && paneConsulta.style.display !== 'none')) {
+      return false;
+    }
+
+    // 4. Ningún modal abierto en pantalla
+    const openModals = document.querySelectorAll('.modal-overlay, .modal');
+    for (const m of openModals) {
+      if (!m.classList.contains('hidden') && m.style.display !== 'none' && m.offsetParent !== null) {
+        return false;
+      }
+    }
+
+    // 5. Usuario no debe estar capturando/editando texto en inputs de la vista
+    const activeEl = document.activeElement;
+    if (activeEl && ['INPUT', 'TEXTAREA'].includes(activeEl.tagName) && activeEl.closest('#view-solicitudes')) {
+      return false;
+    }
+
+    return true;
+  }
+
+  async function autoRefreshSolicitudesList() {
+    if (IS_AUTO_REFRESHING_SOL) return;
+    if (!isSolicitudesListViewActive()) return;
+
+    IS_AUTO_REFRESHING_SOL = true;
+    try {
+      await listarSolicitudes({ isAutoRefresh: true });
+    } catch (err) {
+      console.debug('[AutoRefresh] Fallo en polling silencioso de solicitudes:', err?.message || err);
+    } finally {
+      IS_AUTO_REFRESHING_SOL = false;
+    }
+  }
+
+  function startSolicitudesPolling() {
+    if (SOLICITUDES_POLLING_TIMER) {
+      clearInterval(SOLICITUDES_POLLING_TIMER);
+      SOLICITUDES_POLLING_TIMER = null;
+    }
+    SOLICITUDES_POLLING_TIMER = setInterval(() => {
+      autoRefreshSolicitudesList();
+    }, 30000);
+  }
+
+  function stopSolicitudesPolling() {
+    if (SOLICITUDES_POLLING_TIMER) {
+      clearInterval(SOLICITUDES_POLLING_TIMER);
+      SOLICITUDES_POLLING_TIMER = null;
+    }
   }
 
   function isCapturaViewActive(){
@@ -2751,38 +2865,113 @@
     return `<div class="table-scroll"><table>${head}<tbody>${body}</tbody></table></div>`;
   }
 
-  async function listarSolicitudes(){
-    const q = $('list_q').value.trim();
+  async function listarSolicitudes({ isAutoRefresh = false } = {}){
+    const q = $('list_q')?.value?.trim() || '';
     let oficialia_id = $('list_oficialia')?.value?.trim() || '';
     if (!canUserSeeAllSolicitudes()) {
       const userDepto = getUserAssignedDepartment();
       oficialia_id = String(userDepto.id || oficialia_id || '');
     }
-    const msg = $('msg_list'); const box = $('listado_box');
-    msg.textContent = 'Listando...';
-    setListadoSelectedId(null);
+    const msg = $('msg_list');
+    const box = $('listado_box');
+    if (!box) return;
+
+    // Preservar scroll y selección previa para evitar saltos
+    const prevScrollY = window.scrollY || document.documentElement.scrollTop;
+    const prevTableScroll = box.querySelector('.table-scroll');
+    const prevTableTop = prevTableScroll ? prevTableScroll.scrollTop : 0;
+    const prevTableLeft = prevTableScroll ? prevTableScroll.scrollLeft : 0;
+    const prevSelectedId = LIST_SELECTED_ID;
+
+    if (!isAutoRefresh) {
+      if (msg) msg.textContent = 'Listando...';
+      setListadoSelectedId(null);
+    }
+
     try{
-      const params = new URLSearchParams({ q, page:1, limit:200 });
+      const params = new URLSearchParams({ q, page: 1, limit: 200 });
       if (oficialia_id) params.set('oficialia_id', oficialia_id);
       if (SOL_LIST_MODE === 'canceladas') params.set('status', 'CANCELADA');
       const url = `/api/solicitudes?${params}`;
       const j = await apiJSON(url);
-      if (!Array.isArray(j.data)) throw new Error('Respuesta inesperada');
+      if (!Array.isArray(j?.data)) throw new Error('Respuesta inesperada');
+
       const rows = SOL_LIST_MODE === 'canceladas'
         ? j.data.filter(r => ['CANCELADA','CANCELADO'].includes(norm(r.status ?? r.STATUS ?? '')))
         : j.data.filter(r => !['CANCELADA','CANCELADO'].includes(norm(r.status ?? r.STATUS ?? '')));
+
+      // Comprobar si hay nuevas solicitudes para avisar discretamente
+      const currentIds = rows.map(r => Number(r.id ?? r.ID ?? r.solicitud_id ?? r.SOLICITUD_ID)).filter(id => Number.isFinite(id) && id > 0);
+      if (!HAS_SEEN_INITIAL_SOL) {
+        currentIds.forEach(id => KNOWN_SOL_IDS.add(id));
+        HAS_SEEN_INITIAL_SOL = true;
+      } else if (isAutoRefresh) {
+        let newCount = 0;
+        for (const id of currentIds) {
+          if (!KNOWN_SOL_IDS.has(id)) {
+            newCount++;
+            KNOWN_SOL_IDS.add(id);
+          }
+        }
+        if (newCount > 0) {
+          const toastMsg = newCount === 1 ? '📥 Nueva solicitud recibida' : `📥 ${newCount} nuevas solicitudes recibidas`;
+          toast(toastMsg, true);
+        }
+      } else {
+        currentIds.forEach(id => KNOWN_SOL_IDS.add(id));
+      }
+
+      // Actualizar contador badge de pendientes en el menú lateral
+      if (SOL_LIST_MODE !== 'canceladas') {
+        const pendingCount = rows.filter(r => {
+          const st = String(r.status ?? r.STATUS ?? 'PENDIENTE').trim().toUpperCase();
+          return ['PENDIENTE', 'NUEVA', 'EN_REVISION', 'EN_PROCESO', 'PARA_FIRMAS'].includes(st);
+        }).length;
+        updateNavSolicitudesBadge(pendingCount);
+      }
+
       if (!rows.length) {
         box.innerHTML = `<div class="muted">Sin ${SOL_LIST_MODE === 'canceladas' ? 'cancelados' : 'resultados'}.</div>`;
-        msg.textContent='Listo';
+        if (msg) msg.textContent = 'Listo';
         return;
       }
+
       box.innerHTML = renderSolicitudesListado(rows);
+
+      // Restaurar scroll de pantalla y scroll interno de la tabla sin saltos
+      if (isAutoRefresh) {
+        if (prevScrollY !== undefined) {
+          window.scrollTo({ top: prevScrollY, behavior: 'instant' });
+        }
+        const newTableScroll = box.querySelector('.table-scroll');
+        if (newTableScroll) {
+          newTableScroll.scrollTop = prevTableTop;
+          newTableScroll.scrollLeft = prevTableLeft;
+        }
+        if (prevSelectedId && rows.some(r => String(r.id ?? r.ID ?? r.solicitud_id ?? r.SOLICITUD_ID) === String(prevSelectedId))) {
+          setListadoSelectedId(prevSelectedId);
+        }
+      }
+
       const filterText = SOL_LIST_MODE === 'canceladas' ? 'cancelada(s)' : 'solicitud(es) activa(s)';
-      msg.textContent = `Mostrando ${rows.length} ${filterText}.`;
-      toast('Listado cargado', true);
+      if (msg) msg.textContent = `Mostrando ${rows.length} ${filterText}.`;
+
+      if (!isAutoRefresh) {
+        toast('Listado cargado', true);
+      }
     }catch(e){
-      box.innerHTML = '<div class="muted">Error al cargar.</div>';
-      msg.textContent = e.message || 'Error'; if (!handleAuthError(e)) toast(e.message || 'Error');
+      if (!isAutoRefresh) {
+        box.innerHTML = '<div class="muted">Error al cargar.</div>';
+        if (msg) msg.textContent = e.message || 'Error';
+        if (!handleAuthError(e)) toast(e.message || 'Error');
+      } else {
+        // En auto-refresh silencioso, no generar errores visuales ni romper la vista
+        if (handleAuthError(e)) {
+          stopSolicitudesPolling();
+          return;
+        }
+        console.debug('[AutoRefresh] Fallo temporal al consultar solicitudes:', e?.message || e);
+      }
     }
   }
 
@@ -8483,5 +8672,7 @@
       }
     });
   }
+
+  window.addEventListener('beforeunload', stopSolicitudesPolling);
 
 })(); // <-- FIN DEL ARCHIVO APP.JS 
