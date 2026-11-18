@@ -434,6 +434,20 @@
     };
   }
 
+  // ============================================================================
+  // FASE 3: DETECCIÓN DE REGIONES FORÁNEAS (FIRMA OBLIGATORIA SOLO PARA FORÁNEOS)
+  // ============================================================================
+  function isRegionForaneaObligatoriaFirma(regionStr) {
+    if (!regionStr) return false;
+    const normStr = String(regionStr)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim()
+      .toLowerCase()
+      .replace(/_/g, " ");
+    return normStr.includes("los cabos") || normStr.includes("mulege") || normStr.includes("comondu");
+  }
+
   function syncSolicitudFirmaVisibility() {
     const p = uiPerms();
     const scope = UI_PERMISOS?.scope || {};
@@ -1580,9 +1594,12 @@
       $('sol_nombre_firma')?.focus();
       return;
     }
-    const firmaData = SOL_SIG_PAD?.getDataUrl() || null;
-    if (!firmaData || (SOL_SIG_PAD && !SOL_SIG_PAD.hasSignature())) {
-      toast('✍️ La firma digital del solicitante es obligatoria antes de continuar al Paso 2.', false);
+    const esForaneo = isRegionForaneaObligatoriaFirma(regionSol);
+    const hasSig = Boolean(SOL_SIG_PAD && SOL_SIG_PAD.hasSignature());
+    const firmaData = hasSig ? (SOL_SIG_PAD.getDataUrl() || null) : null;
+    if (esForaneo && (!firmaData || !hasSig)) {
+      alert('La firma digital del solicitante es obligatoria para las regiones foráneas (Los Cabos, Mulegé o Comondú). Por favor dibuja o adjunta tu firma antes de continuar.');
+      toast('✍️ La firma digital del solicitante es obligatoria para tu región.', false);
       if (msg) msg.textContent = '✍️ Dibuja o sube tu firma digital en el recuadro antes de continuar.';
       return;
     }
@@ -2447,8 +2464,15 @@
     const obs  = $('obs_sol')?.value?.trim() || SOL_DRAFT?.observaciones || null;
     const regEl = $('sol_region') || $('sol_region_solicitante');
     const regionSol = safestr(regEl?.value) || SOL_DRAFT?.region_solicitante || 'La Paz';
+    const esForaneo = isRegionForaneaObligatoriaFirma(regionSol);
     const nombreFirma = safestr($('sol_nombre_firma')?.value) || SOL_DRAFT?.nombre_solicitante_firma || getLoggedUserFullName() || null;
-    const firmaData = SOL_SIG_PAD?.getDataUrl() || SOL_DRAFT?.firma_solicitante_data || SOL_DRAFT?.firma_solicitante || null;
+
+    let firmaData = null;
+    if (SOL_SIG_PAD && SOL_SIG_PAD.hasSignature()) {
+      firmaData = SOL_SIG_PAD.getDataUrl();
+    } else if (SOL_DRAFT?.firma_solicitante_data || SOL_DRAFT?.firma_solicitante) {
+      firmaData = SOL_DRAFT.firma_solicitante_data || SOL_DRAFT.firma_solicitante;
+    }
 
     if (!nombreFirma) {
       toast('Ingresa el nombre completo de quien solicita y firma en el Paso 1', false);
@@ -2456,7 +2480,8 @@
       $('sol_nombre_firma')?.focus();
       return;
     }
-    if (!firmaData) {
+    if (esForaneo && !firmaData) {
+      alert('La firma digital del solicitante es obligatoria para las regiones foráneas (Los Cabos, Mulegé o Comondú). Por favor firma antes de guardar la solicitud.');
       toast('✍️ La firma digital del solicitante es obligatoria antes de guardar la solicitud.', false);
       setSolicitudTab('crear');
       return;
@@ -3336,12 +3361,11 @@
     }
     toast('Generando reporte PDF institucional...', true);
     try {
-      const token = typeof AUTH_TOKEN !== 'undefined' ? AUTH_TOKEN : (localStorage.getItem('token') || '');
       const resp = await fetch('/api/almacen/reporte-pdf', {
         method: 'POST',
+        credentials: 'include',
         headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({ ids })
       });
@@ -5389,9 +5413,8 @@
   async function downloadDatabaseBackup() {
     try {
       toast('Generando respaldo completo de base de datos...', true);
-      const token = localStorage.getItem('token');
       const res = await fetch('/api/backup-db', {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        credentials: 'include'
       });
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
@@ -5490,10 +5513,7 @@
   // ============================================================================
   async function checkSystemHeartbeat() {
     try {
-      const token = localStorage.getItem('token');
-      if (token) {
-        await apiJSON('/api/ping', { method: 'POST' }).catch(() => {});
-      }
+      await apiJSON('/api/ping', { method: 'POST' }).catch(() => {});
       const res = await apiJSON('/api/system-status').catch(() => null);
       if (res && res.version && Number(res.version) > APP_VERSION) {
         toast(`⚠️ Nueva versión del sistema disponible (v${res.version}). Actualizando...`, true);
@@ -7647,9 +7667,9 @@
     try {
       const res = await fetch('/api/migracion/reset-vales-y-reestructurar-jesus', {
         method: 'POST',
+        credentials: 'include',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + (localStorage.getItem('token') || '')
+          'Content-Type': 'application/json'
         }
       });
       const json = await res.json();
@@ -7717,9 +7737,9 @@
     try {
       const res = await fetch('/api/migracion/vehiculos-foraneos-evelia', {
         method: 'POST',
+        credentials: 'include',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + (localStorage.getItem('token') || '')
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify(vehiculosForaneos)
       });
@@ -7760,9 +7780,9 @@
     try {
       const res = await fetch('/api/migracion/consolidar-bodega-rm-jesus', {
         method: 'POST',
+        credentials: 'include',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + (localStorage.getItem('token') || '')
+          'Content-Type': 'application/json'
         }
       });
       const json = await res.json();

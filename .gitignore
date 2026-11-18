@@ -8,6 +8,9 @@ node_modules/
 respaldos_sistema/
 inventario-api/respaldos_sistema/
 *.sql
+*.xlsx
+*.xls
+
 
 # Archivos de base de datos local y volúmenes Docker
 db_data/
@@ -18,3 +21,4 @@ mysql_data/
 # Archivos del sistema operativo
 .DS_Store
 Thumbs.db
+scratch/

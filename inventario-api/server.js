@@ -1608,6 +1608,119 @@ async function consolidarBodegaRMJesus(poolOrConn = poolOps, options = {}) {
   }
 }
 
+// ============================================================================
+// FASE 3: LÓGICA DUAL DE INVENTARIO Y RECÁLCULO
+// Lógica 1 (Préstamos - Jesús, Luis, Evelia): Modelo de Reserva.
+// Se descuentan del stock todos los renglones cuyo estado sea NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO').
+// Lógica 2 (Almacén General - Fiol/gabrielfiol/encargado): Modelo Físico Estricto.
+// SOLO se descuentan del stock los renglones cuyo estado sea explícitamente 'ENTREGADO', 'SURTIDO', 'COMPLETADA', etc.
+// ============================================================================
+async function repararInventarioBodegaDelegacionRM(poolOrConn = poolOps, options = {}) {
+  if (!poolOrConn) return { ok: false, error: "Sin conexión a BD" };
+  const isPool = typeof poolOrConn.getConnection === "function";
+  const conn = isPool ? await poolOrConn.getConnection() : poolOrConn;
+  try {
+    if (isPool) await conn.beginTransaction();
+
+    // 1a. Rubros 2 y 3 (Evelia - Parque Vehicular, Jesús - Mobiliario)
+    const [activeLoans] = await conn.query(
+      `SELECT vpd.articulo_id, COALESCE(SUM(vpd.cantidad), 0) AS total_prestado
+       FROM vales_prestamo_detalle vpd
+       INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+       WHERE vpd.articulo_id IS NOT NULL
+         AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+       GROUP BY vpd.articulo_id`
+    ).catch(() => [[]]);
+
+    const activeLoanMap = new Map();
+    for (const r of activeLoans || []) {
+      activeLoanMap.set(Number(r.articulo_id), Math.max(0, Number(r.total_prestado || 0)));
+    }
+
+    const [invRows] = await conn.query(
+      `SELECT id, rubro_id, cantidad_propia, estatus_uso FROM inventario_oficina FOR UPDATE`
+    ).catch(() => [[]]);
+
+    for (const inv of invRows || []) {
+      const prestado = activeLoanMap.get(Number(inv.id)) || 0;
+      const propia = Math.max(0, Number(inv.cantidad_propia || 0));
+      const disp = Math.max(0, propia - prestado);
+      let estatus = inv.estatus_uso || "ACTIVO";
+      if (String(estatus).toUpperCase() === "PRESTADO" && disp > 0) {
+        estatus = "ACTIVO";
+      } else if (propia > 0 && disp === 0 && prestado > 0) {
+        estatus = "PRESTADO";
+      }
+      await conn.query(
+        `UPDATE inventario_oficina
+         SET cantidad_prestada_enviada = ?,
+             cantidad_disponible = ?,
+             estatus_uso = ?
+         WHERE id = ?`,
+        [prestado, disp, estatus, inv.id]
+      ).catch(() => {});
+    }
+
+    // 1b. Rubro 4 (Luis - Tabletas)
+    await conn.query(
+      `UPDATE inventario_tabletas t
+       SET t.estado_asignacion = 'DISPONIBLE',
+           t.nombre_resguardante = ''
+       WHERE t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL'
+         AND NOT EXISTS (
+           SELECT 1 FROM vales_prestamo_detalle vpd
+           INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+           WHERE (vpd.tableta_id = t.id OR vpd.articulo_id = t.id)
+             AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+         )`
+    ).catch(() => {});
+
+    // 1c. Consolidación de Bodega RM Jesús (Mobiliario)
+    await consolidarBodegaRMJesus(conn, options).catch((e) => {
+      console.warn("[WARN] consolidarBodegaRMJesus en repararInventario:", e?.message || e);
+    });
+
+    // 2. Lógica 2 (Almacén General - Fiol / encargados): Modelo Físico Estricto
+    const [nonDeliveredWithStockDeducted] = await conn.query(
+      `SELECT s.id, s.status
+       FROM solicitudes s
+       WHERE s.inventario_descontado = 1
+         AND UPPER(s.status) NOT IN ('COMPLETADA', 'SURTIDA', 'ENTREGADA', 'ENTREGADO', 'SURTIDO')
+       FOR UPDATE`
+    ).catch(() => [[]]);
+
+    for (const solRow of nonDeliveredWithStockDeducted || []) {
+      const [detRows] = await conn.query(
+        `SELECT ds.cantidad_surtida, ds.atendida, ds.cantidad, p.CLAVE AS clave
+         FROM detalles_solicitud ds
+         LEFT JOIN productos p ON p.ID = ds.producto_id
+         WHERE ds.solicitud_id = ?`,
+        [solRow.id]
+      ).catch(() => [[]]);
+
+      for (const d of detRows || []) {
+        const qty = Number(d.cantidad_surtida || d.atendida || d.cantidad || 0);
+        if (qty > 0 && d.clave) {
+          await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK + ? WHERE CLAVE = ?`, [qty, d.clave]).catch(() => {});
+          await conn.query(`UPDATE productos SET STOCK = STOCK + ? WHERE CLAVE = ?`, [qty, d.clave]).catch(() => {});
+        }
+      }
+      await conn.query(`UPDATE solicitudes SET inventario_descontado = 0 WHERE id = ?`, [solRow.id]).catch(() => {});
+    }
+
+    await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
+
+    if (isPool) await conn.commit();
+    return { ok: true };
+  } catch (err) {
+    if (isPool) await conn.rollback().catch(() => {});
+    console.warn("[WARN] repararInventarioBodegaDelegacionRM:", err?.message || err);
+    return { ok: false, error: err?.message || String(err) };
+  } finally {
+    if (isPool && conn) conn.release();
+  }
+}
+
 let SCHEMA_MIGRATED = false;
 async function ensureSchemaAndUsers() {
   if (SCHEMA_MIGRATED) return true;
@@ -2043,6 +2156,7 @@ async function ensureSchemaAndUsers() {
       { name: "archivo_respaldo", ddl: "VARCHAR(255) DEFAULT NULL" },
       { name: "es_prueba", ddl: "TINYINT(1) NOT NULL DEFAULT 0" },
       { name: "inventario_descontado", ddl: "TINYINT(1) NOT NULL DEFAULT 0" },
+      { name: "estado", ddl: "VARCHAR(40) DEFAULT NULL" },
     ];
     for (const col of requiredSolCols) {
       if (!sColNames.has(col.name)) {
@@ -2051,6 +2165,9 @@ async function ensureSchemaAndUsers() {
     }
     await poolOps.query(
       `ALTER TABLE solicitudes MODIFY COLUMN status VARCHAR(40) NOT NULL DEFAULT 'PENDIENTE'`
+    ).catch(() => {});
+    await poolOps.query(
+      `UPDATE solicitudes SET estado = status WHERE estado IS NULL OR estado = ''`
     ).catch(() => {});
     STATUS_ENUM_CACHE = null;
 
@@ -2998,6 +3115,66 @@ async function ensureSchemaAndUsers() {
       console.warn("[WARN] Parche v62:", errV62?.message || errV62);
     }
 
+    // ============================================================================
+    // FASE 3: Migración a Producción, Lógica Dual y Cancelación de Prueba #13
+    // ============================================================================
+    try {
+      const [[migFase3Row]] = await poolRead.query(
+        `SELECT valor FROM configuracion_sistema WHERE clave = 'MIGRACION_FASE3_PRODUCCION' LIMIT 1`
+      ).catch(() => [[]]);
+      const migFase3Aplicada = String(migFase3Row?.valor || "0").trim() === "1";
+
+      if (!migFase3Aplicada) {
+        console.log("[FASE 3] Aplicando migración a producción y lógica dual...");
+
+        // Desactivar MODO_PRUEBA_GRUPAL en producción
+        await poolOps.query(
+          `INSERT INTO configuracion_sistema (clave, valor) VALUES ('MODO_PRUEBA_GRUPAL', '0')
+           ON DUPLICATE KEY UPDATE valor = '0'`
+        ).catch(() => {});
+
+        // Reintegrar stock si la solicitud #13 había sido descontada
+        const [sol13Rows] = await poolRead.query(
+          `SELECT id, status, inventario_descontado FROM solicitudes WHERE id = 13 LIMIT 1`
+        ).catch(() => [[]]);
+        if (sol13Rows && sol13Rows.length > 0) {
+          const sol13 = sol13Rows[0];
+          if (Number(sol13.inventario_descontado || 0) === 1) {
+            const [det13] = await poolRead.query(
+              `SELECT ds.cantidad_surtida, ds.atendida, ds.cantidad, p.CLAVE AS clave
+               FROM detalles_solicitud ds
+               LEFT JOIN productos p ON p.ID = ds.producto_id
+               WHERE ds.solicitud_id = 13`
+            ).catch(() => [[]]);
+            for (const d of det13 || []) {
+              const qty = Number(d.cantidad_surtida || d.atendida || d.cantidad || 0);
+              if (qty > 0 && d.clave) {
+                await poolOps.query(`UPDATE almacen_dregcivil SET STOCK = STOCK + ? WHERE CLAVE = ?`, [qty, d.clave]).catch(() => {});
+                await poolOps.query(`UPDATE productos SET STOCK = STOCK + ? WHERE CLAVE = ?`, [qty, d.clave]).catch(() => {});
+              }
+            }
+          }
+        }
+
+        // Consulta de única vez requerida exactamente para cancelar vales/solicitud de prueba #13
+        await poolOps.query(`UPDATE solicitudes SET estado = 'CANCELADO' WHERE id = 13 AND estado != 'CANCELADO'`).catch(() => {});
+        await poolOps.query(`UPDATE solicitudes SET status = 'CANCELADA', inventario_descontado = 0 WHERE id = 13 AND status != 'CANCELADA'`).catch(() => {});
+        await poolOps.query(`UPDATE vales_prestamo SET estado = 'CANCELADO' WHERE id = 13 AND estado != 'CANCELADO'`).catch(() => {});
+
+        // Ejecutar recálculo de inventario bajo la LÓGICA DUAL
+        await repararInventarioBodegaDelegacionRM(poolOps);
+
+        await poolOps.query(
+          `INSERT INTO configuracion_sistema (clave, valor) VALUES ('MIGRACION_FASE3_PRODUCCION', '1')
+           ON DUPLICATE KEY UPDATE valor = '1'`
+        ).catch(() => {});
+
+        console.log("[FASE 3] Migración a producción y recálculo dual de inventario completados exitosamente.");
+      }
+    } catch (errFase3) {
+      console.warn("[WARN] Migración Fase 3:", errFase3?.message || errFase3);
+    }
+
     SCHEMA_MIGRATED = true;
     return true;
   } catch (err) {
@@ -3071,7 +3248,7 @@ function getSearchTokenRoots(queryStr) {
 
 function authRequired(req, res, next) {
 const token =
-req.cookies?.token || (req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : null) || req.query?.token;
+req.cookies?.token || (req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : null);
 if (!token) return httpError(res, 401, "No autenticado");
 try {
 req.user = jwt.verify(token, process.env.JWT_SECRET);
@@ -3126,10 +3303,57 @@ function issueAuthSession(res, u) {
   return { token, payload };
 }
 
+// ============================================================================
+// FASE 3: PROTECCIÓN CONTRA FUERZA BRUTA EN LOGIN (EN MEMORIA)
+// Máximo 5 intentos fallidos en una ventana de 15 minutos por IP
+// ============================================================================
+const loginAttempts = new Map();
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+  if (!record) return { allowed: true };
+  if (now > record.resetAt) {
+    loginAttempts.delete(ip);
+    return { allowed: true };
+  }
+  if (record.count >= LOGIN_MAX_ATTEMPTS) {
+    const remainingMs = record.resetAt - now;
+    const remainingMins = Math.max(1, Math.ceil(remainingMs / 60000));
+    return { allowed: false, remainingMins };
+  }
+  return { allowed: true };
+}
+
+function recordLoginFailed(ip) {
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+  if (!record || now > record.resetAt) {
+    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
+  } else {
+    record.count += 1;
+  }
+}
+
+function clearLoginAttempts(ip) {
+  loginAttempts.delete(ip);
+}
+
 async function handleLogin(req, res) {
   const { username, password } = req.body || {};
   // Obtener la IP del cliente (funciona en local, red LAN y tras proxy)
-  const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || req.ip || '127.0.0.1';
+  const clientIp = req.ip || req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || '127.0.0.1';
+
+  // Verificar límite de intentos fallidos por IP (máximo 5 en 15 minutos)
+  const rateLimit = checkLoginRateLimit(clientIp);
+  if (!rateLimit.allowed) {
+    return res.status(429).json({
+      ok: false,
+      error: `Demasiados intentos fallidos. Intenta de nuevo en ${rateLimit.remainingMins} minuto(s).`
+    });
+  }
 
   if (!username || !password) {
     return httpError(res, 400, "username y password requeridos");
@@ -3161,6 +3385,7 @@ async function handleLogin(req, res) {
     }
 
     if (!rows.length) {
+      recordLoginFailed(clientIp);
       if (poolOps) {
         await poolOps.query(
           "INSERT INTO log_accesos (username, ip_address, exito) VALUES (?, ?, FALSE)",
@@ -3173,6 +3398,7 @@ async function handleLogin(req, res) {
     const u = rows[0];
 
     if (u.ACTIVO === 0 || u.ACTIVO === false) {
+      recordLoginFailed(clientIp);
       return httpError(res, 403, "Usuario inactivo");
     }
 
@@ -3194,6 +3420,7 @@ async function handleLogin(req, res) {
     }
 
     if (!ok) {
+      recordLoginFailed(clientIp);
       if (poolOps) {
         await poolOps.query(
           "INSERT INTO log_accesos (usuario_id, username, ip_address, exito) VALUES (?, ?, ?, FALSE)",
@@ -3202,6 +3429,9 @@ async function handleLogin(req, res) {
       }
       return httpError(res, 401, "Usuario o contraseña inválidos");
     }
+
+    // Login exitoso: limpiar contador de intentos fallidos
+    clearLoginAttempts(clientIp);
 
     // Forzar cambio si la contraseña en texto plano coincide con la clave por defecto 'secreta123'
     if (String(password) === "secreta123") {
@@ -3301,6 +3531,7 @@ app.post("/api/login/force-change", async (req, res) => {
       ).catch(() => {});
     }
 
+    clearLoginAttempts(clientIp);
     const { token, payload } = issueAuthSession(res, u);
     return res.json({ ok: true, token, user: payload });
   } catch (e) {
@@ -4209,7 +4440,13 @@ app.post("/api/ping", authRequired, (req, res) => {
   });
 });
 
-app.get("/api/system-status", (req, res) => {
+app.get("/api/system-status", authRequired, (req, res) => {
+  const uRol = String(req.user?.rol || "").trim().toUpperCase();
+  const uName = String(req.user?.username || "").trim().toLowerCase();
+  if (uRol !== "ADMIN" && uName !== "admin") {
+    return httpError(res, 403, "Acceso restringido a administradores");
+  }
+
   const now = Date.now();
   const THREE_MINUTES = 3 * 60 * 1000;
   const activeList = [];
@@ -4227,24 +4464,11 @@ app.get("/api/system-status", (req, res) => {
     }
   }
 
-  // Comprobar si el solicitante es admin
-  let requesterIsAdmin = false;
-  try {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      const token = authHeader.split(" ")[1];
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || "secreta123");
-      if (decoded && (String(decoded.rol).toUpperCase() === "ADMIN" || decoded.username === "admin")) {
-        requesterIsAdmin = true;
-      }
-    }
-  } catch (_) {}
-
   return res.json({
     ok: true,
     version: 62,
     onlineCount: activeList.length,
-    activeUsers: requesterIsAdmin ? activeList : undefined
+    activeUsers: activeList
   });
 });
 
@@ -5215,6 +5439,20 @@ function buildFolioFirmaDigital(seedStr = "") {
   return `FIRMA-BCS-${datePart}-${hashPart}`;
 }
 
+// ============================================================================
+// FASE 3: DETECCIÓN DE REGIONES FORÁNEAS (FIRMA DIGITAL OBLIGATORIA)
+// ============================================================================
+function isRegionForaneaObligatoriaFirma(regionStr) {
+  if (!regionStr) return false;
+  const normStr = String(regionStr)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, " ");
+  return normStr.includes("los cabos") || normStr.includes("mulege") || normStr.includes("comondu");
+}
+
 app.post("/api/solicitudes", authRequired, async (req, res) => {
 try {
 await ensureSchemaAndUsers();
@@ -5349,20 +5587,31 @@ const cleanNombreFirma = nombre_solicitante_firma && String(nombre_solicitante_f
   ? String(nombre_solicitante_firma).trim().slice(0, 150)
   : defaultUserFullName;
 const rawFirmaInput = firma_solicitante || firma_solicitante_data || null;
-const cleanFirmaData = rawFirmaInput && String(rawFirmaInput).trim().startsWith("data:image/")
-  ? String(rawFirmaInput).trim()
-  : null;
-if (!cleanFirmaData) {
-  return httpError(res, 400, "La firma digital del solicitante es obligatoria para crear la orden de material.");
+const esForaneo = isRegionForaneaObligatoriaFirma(cleanRegion);
+
+let cleanFirmaData = null;
+if (rawFirmaInput && String(rawFirmaInput).trim()) {
+  const trimmed = String(rawFirmaInput).trim();
+  if (/^data:image\/(png|jpeg);base64,/i.test(trimmed)) {
+    cleanFirmaData = trimmed;
+  } else {
+    return httpError(res, 400, "Formato de firma inválido. Solo se admiten imágenes en formato PNG o JPEG.");
+  }
 }
-const fechaFirma = new Date();
-const folioFirma = buildFolioFirmaDigital(`${uid}|${ofi}|${cleanNombreFirma || ""}|${cleanFirmaData.slice(-64)}`);
+
+if (esForaneo && !cleanFirmaData) {
+  return httpError(res, 400, `La firma digital del solicitante es obligatoria para la región ${cleanRegion}`);
+}
+
+const fechaFirma = cleanFirmaData ? new Date() : null;
+const folioFirma = cleanFirmaData
+  ? buildFolioFirmaDigital(`${uid}|${ofi}|${cleanNombreFirma || ""}|${cleanFirmaData.slice(-64)}`)
+  : null;
 
 const conn = await poolOps.getConnection();
 try {
   await conn.beginTransaction();
-  const modoPruebaActivo = await isModoPruebaGrupalActivo(conn);
-  const esPruebaVal = modoPruebaActivo ? 1 : 0;
+  const esPruebaVal = 0;
 
   const [rs] = await conn.query(
     `INSERT INTO solicitudes(
@@ -5475,24 +5724,34 @@ app.post("/api/solicitudes/:id/firma", authRequired, async (req, res) => {
     }
 
     const { region_solicitante = null, nombre_solicitante_firma = null, firma_solicitante_data = null, firma_solicitante = null } = req.body || {};
-    const rawFirma = firma_solicitante || firma_solicitante_data || null;
-    const cleanFirmaData = rawFirma && String(rawFirma).trim().startsWith("data:image/")
-      ? String(rawFirma).trim()
-      : null;
-
-    if (!cleanFirmaData) {
-      return httpError(res, 400, "Se requiere dibujar o adjuntar la firma digital en formato PNG.");
-    }
-
     const cleanRegion = region_solicitante != null && String(region_solicitante).trim() !== ""
       ? String(region_solicitante).trim().slice(0, 50)
-      : sol.region_solicitante;
+      : (sol.region_solicitante || req.user?.region || "");
+    const esForaneo = isRegionForaneaObligatoriaFirma(cleanRegion);
+
+    const rawFirma = firma_solicitante || firma_solicitante_data || null;
+    let cleanFirmaData = null;
+    if (rawFirma && String(rawFirma).trim()) {
+      const trimmed = String(rawFirma).trim();
+      if (/^data:image\/(png|jpeg);base64,/i.test(trimmed)) {
+        cleanFirmaData = trimmed;
+      } else {
+        return httpError(res, 400, "Formato de firma inválido. Solo se admiten imágenes en formato PNG o JPEG.");
+      }
+    }
+
+    if (esForaneo && !cleanFirmaData) {
+      return httpError(res, 400, `La firma digital del solicitante es obligatoria para la región ${cleanRegion}`);
+    }
+
     const cleanNombre = nombre_solicitante_firma != null && String(nombre_solicitante_firma).trim() !== ""
       ? String(nombre_solicitante_firma).trim().slice(0, 150)
       : sol.nombre_solicitante_firma;
 
-    const fechaFirma = new Date();
-    const folioFirma = buildFolioFirmaDigital(`${id}|${cleanNombre || ""}|${cleanFirmaData.slice(-64)}`);
+    const fechaFirma = cleanFirmaData ? new Date() : null;
+    const folioFirma = cleanFirmaData
+      ? buildFolioFirmaDigital(`${id}|${cleanNombre || ""}|${cleanFirmaData.slice(-64)}`)
+      : null;
 
     await poolOps.query(
       `UPDATE solicitudes
@@ -5793,12 +6052,10 @@ async function surtirSolicitudHandler(req, res) {
         );
       }
 
-      const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
-      const esSolicitudDePrueba = Number(sol.es_prueba || 0) === 1 || modoPruebaGlobal;
-      const shouldDeductNow =
-        ["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus) &&
-        !esSolicitudDePrueba &&
-        Number(sol.inventario_descontado || 0) === 0;
+      // Lógica 2 (Almacén General - Fiol / encargado): Modelo Físico Estricto
+      // En producción solo se descuenta stock cuando pasa a estatus final de entrega
+      const isFinalDeliveredStatus = ["COMPLETADA", "SURTIDA", "ENTREGADA", "ENTREGADO", "SURTIDO"].includes(String(nextStatus).toUpperCase());
+      const shouldDeductNow = isFinalDeliveredStatus && Number(sol.inventario_descontado || 0) === 0;
 
       if (shouldDeductNow) {
         for (const p of plan) {
@@ -6049,8 +6306,8 @@ async function deleteOrDiscardSolicitud(req, res, { isDraftDiscard = false } = {
       return httpError(res, 409, "No se puede descartar una solicitud ya surtida");
     }
 
-    const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
-    const shouldRestoreStock = Number(sol.es_prueba || 0) === 0 && Number(sol.inventario_descontado || 0) === 1 && !modoPruebaGlobal;
+    // En producción se restaura stock si el inventario fue previamente descontado
+    const shouldRestoreStock = Number(sol.inventario_descontado || 0) === 1;
 
     if (shouldRestoreStock) {
       for (const row of detRows) {
@@ -6541,16 +6798,15 @@ err.statusCode = 409;
 throw err;
 }
 
-const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
-const esPrueba = Number(sol.es_prueba || 0) === 1 || modoPruebaGlobal;
 let restoredQty = 0;
 let deductedQty = 0;
 let nextInvDescontado = Number(sol.inventario_descontado || 0);
 
 const pk = await detectProductosPK();
+const isFinalDelivered = ["COMPLETADA", "SURTIDA", "ENTREGADA", "ENTREGADO", "SURTIDO"].includes(String(nextStatus).toUpperCase());
 
-// Si pasa a COMPLETADA / SURTIDA / ENTREGADA y NO es de prueba y aún no se ha descontado inventario
-if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus) && !esPrueba && nextInvDescontado === 0) {
+// Si pasa a COMPLETADA / SURTIDA / ENTREGADA y aún no se ha descontado inventario (Modelo Físico Estricto)
+if (isFinalDelivered && nextInvDescontado === 0) {
   const [detRows] = await conn.query(
     `SELECT ds.id, ds.cantidad, ds.cantidad_surtida, ds.atendida, p.CLAVE AS clave, p.DESCRIPCION AS descripcion
      FROM detalles_solicitud ds
@@ -6586,19 +6842,10 @@ if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus) && !esPrueba && 
     );
   }
   nextInvDescontado = 1;
-} else if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus) && esPrueba) {
-  // En modo prueba: asegurar que cantidad_surtida/atendida tengan valor para PDF sin descontar stock
-  await conn.query(
-    `UPDATE detalles_solicitud
-     SET cantidad_surtida = COALESCE(cantidad_surtida, CASE WHEN COALESCE(atendida, 0) > 0 THEN atendida ELSE cantidad END),
-         atendida = COALESCE(cantidad_surtida, CASE WHEN COALESCE(atendida, 0) > 0 THEN atendida ELSE cantidad END)
-     WHERE solicitud_id = ?`,
-    [solicitudId]
-  );
 }
 
 if (nextStatus === cancelStatus && prevStatus !== cancelStatus) {
-  if (!esPrueba && nextInvDescontado === 1) {
+  if (nextInvDescontado === 1) {
     const [detRows] = await conn.query(
       `SELECT ds.id, ds.cantidad_surtida, ds.atendida, p.CLAVE AS clave
        FROM detalles_solicitud ds
@@ -11542,10 +11789,9 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
     const conn = await poolOps.getConnection();
     try {
       await conn.beginTransaction();
-      const modoPruebaActivo = await isModoPruebaGrupalActivo(conn);
-      const esPruebaVal = modoPruebaActivo ? 1 : 0;
+      const esPruebaVal = 0;
 
-      // Control de Stock: Validar y descontar unidades prestadas SOLO si NO está en Modo Prueba Grupal
+      // Control de Stock (Modelo de Reserva para Préstamos): Validar y reservar unidades prestadas
       const tabletasAuditList = [];
       if (rubroId === 4) {
         const seenTabIds = new Set();
@@ -11585,15 +11831,13 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
             );
           }
 
-          if (!modoPruebaActivo) {
-            await conn.query(
-              `UPDATE inventario_tabletas
-               SET estado_asignacion = 'EN_PRESTAMO_PROVISIONAL',
-                   nombre_resguardante = ?
-               WHERE id = ?`,
-              [tempHolder, tabRow.id]
-            );
-          }
+          await conn.query(
+            `UPDATE inventario_tabletas
+             SET estado_asignacion = 'EN_PRESTAMO_PROVISIONAL',
+                 nombre_resguardante = ?
+             WHERE id = ?`,
+            [tempHolder, tabRow.id]
+          );
 
           it.tableta_id = tabRow.id;
           it.articulo_id = null;
@@ -11623,18 +11867,16 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
             await conn.rollback();
             return httpError(res, 400, `La cantidad solicitada (${cant}) para "${inv.descripcion}" supera la disponibilidad actual (${dispActual}).`);
           }
-          if (!modoPruebaActivo) {
-            const nuevaDisp = Math.max(0, dispActual - cant);
-            const nuevoEstatus = nuevaDisp === 0 ? "PRESTADO" : inv.estatus_uso;
-            await conn.query(
-              `UPDATE inventario_oficina
-               SET cantidad_disponible = ?,
-                   cantidad_prestada_enviada = cantidad_prestada_enviada + ?,
-                   estatus_uso = ?
-               WHERE id = ?`,
-              [nuevaDisp, cant, nuevoEstatus, inv.id]
-            );
-          }
+          const nuevaDisp = Math.max(0, dispActual - cant);
+          const nuevoEstatus = nuevaDisp === 0 ? "PRESTADO" : inv.estatus_uso;
+          await conn.query(
+            `UPDATE inventario_oficina
+             SET cantidad_disponible = ?,
+                 cantidad_prestada_enviada = cantidad_prestada_enviada + ?,
+                 estatus_uso = ?
+             WHERE id = ?`,
+            [nuevaDisp, cant, nuevoEstatus, inv.id]
+          );
           it.articulo_id = inv.id;
           it.clave = inv.clave_bien || it.clave;
         }
@@ -11778,12 +12020,8 @@ async function handleAutorizarValePrestamo(req, res) {
         [id]
       );
 
-      const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
-      const esValePrueba = Number(vale.es_prueba || 0) === 1 || modoPruebaGlobal;
-
-      // Descontar inventario según el rubro correspondiente SOLO si NO es vale de prueba
-      if (!esValePrueba) {
-        if (vale.rubro_id === 1) {
+      // Descontar inventario según el rubro correspondiente (en producción)
+      if (vale.rubro_id === 1) {
           for (const item of detalles) {
             const almRow = await resolveAlmacenRowStrict(conn, { articulo_id: item.articulo_id, clave: item.clave });
             if (!almRow) {
@@ -11881,7 +12119,6 @@ async function handleAutorizarValePrestamo(req, res) {
             );
           }
         }
-      }
 
       const [[rubroInfo]] = await conn.query(`SELECT encargado_nombre FROM rubros_inventario WHERE id = ?`, [vale.rubro_id]);
       const encargadoEntrega = Number(vale.rubro_id) === 4
@@ -11957,10 +12194,7 @@ async function handleDevolverValePrestamo(req, res) {
         [id]
       );
 
-      const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
-      const esValePrueba = Number(vale.es_prueba || 0) === 1 || modoPruebaGlobal;
-
-      // Reincorporar stock según rubro (si es vale de prueba, solo actualizar estado_devolucion en vales_prestamo_detalle sin tocar inventarios)
+      // Reincorporar stock según rubro en devolución (en producción)
       if (vale.rubro_id === 1) {
         for (const item of detalles) {
           const ret = itemMap.get(Number(item.id)) || {};
@@ -11972,7 +12206,7 @@ async function handleDevolverValePrestamo(req, res) {
             [estDev, obsDev, item.id]
           );
 
-          if (!esValePrueba && estDev !== "NO DEVUELTO" && estDev !== "FALTANTE") {
+          if (estDev !== "NO DEVUELTO" && estDev !== "FALTANTE") {
             const almRowDev = await resolveAlmacenRowStrict(conn, { articulo_id: item.articulo_id, clave: item.clave });
             if (almRowDev) {
               await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK + ? WHERE ID = ?`, [item.cantidad, almRowDev.ID]);
@@ -11988,9 +12222,7 @@ async function handleDevolverValePrestamo(req, res) {
             });
           }
         }
-        if (!esValePrueba) {
-          await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
-        }
+        await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
       } else if (Number(vale.rubro_id) === 4) {
         const actor = req?.user?.username || req?.user?.nombre || "SISTEMA";
         const obsGeneral = String(b.observaciones_devolucion || "").trim() || null;
@@ -12008,7 +12240,7 @@ async function handleDevolverValePrestamo(req, res) {
           );
 
           const tabId = Number(item.tableta_id || item.articulo_id || 0);
-          if (!esValePrueba && tabId && devFlag) {
+          if (tabId && devFlag) {
             const [[tabRow]] = await conn.query(
               `SELECT id, no_resguardo, imei, numero_serie, estatus_fisico, observaciones FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
               [tabId]
@@ -12058,7 +12290,7 @@ async function handleDevolverValePrestamo(req, res) {
             [estDev, obsDev, item.id]
           );
 
-          if (!esValePrueba && item.articulo_id && estDev !== "NO DEVUELTO" && estDev !== "FALTANTE") {
+          if (item.articulo_id && estDev !== "NO DEVUELTO" && estDev !== "FALTANTE") {
             const [invCur] = await conn.query(
               `SELECT cantidad_propia, cantidad_disponible, cantidad_prestada_enviada FROM inventario_oficina WHERE id = ? FOR UPDATE`,
               [item.articulo_id]
@@ -12240,10 +12472,8 @@ async function handleCancelarValePrestamo(req, res) {
         return httpError(res, 403, "No tienes permisos para cancelar este vale");
       }
 
-      // Reintegrar stock al inventario si estaba en préstamo activo y NO es vale de prueba
-      const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
-      const esValePrueba = Number(vale.es_prueba || 0) === 1 || modoPruebaGlobal;
-      if (vale.estado === "AUTORIZADO_EN_PRESTAMO" && !esValePrueba) {
+      // Reintegrar stock al inventario si estaba en préstamo activo (en producción)
+      if (vale.estado === "AUTORIZADO_EN_PRESTAMO") {
         const [detalles] = await conn.query(`SELECT * FROM vales_prestamo_detalle WHERE vale_id = ?`, [id]);
         if (vale.rubro_id === 1) {
           for (const item of detalles) {
