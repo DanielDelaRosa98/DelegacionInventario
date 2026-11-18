@@ -7808,6 +7808,7 @@
       { v: '', label: 'Todas las oficinas/programas' },
       { v: 'Delegación La Paz', label: 'Delegación La Paz', reg: 'LA PAZ' },
       { v: 'Región La Paz', label: 'Región La Paz', reg: 'LA PAZ' },
+      { v: 'Jefatura', label: 'Jefatura', reg: 'LA PAZ' },
       { v: 'PCD - Programa de Discapacidad', label: 'PCD - Programa de Discapacidad', reg: 'LA PAZ' },
       { v: 'PAM - Programa Adulto Mayor', label: 'PAM - Programa Adulto Mayor', reg: 'LA PAZ' },
       { v: 'Región Los Cabos', label: 'Región Los Cabos', reg: 'LOS CABOS' },

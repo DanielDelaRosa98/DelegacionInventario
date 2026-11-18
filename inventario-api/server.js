@@ -1404,7 +1404,7 @@ async function repararInventarioBodegaDelegacionRM(poolOrConn = poolOps, options
                 AND vpd.vale_id IN (
                   SELECT vp.id
                   FROM vales_prestamo vp
-                  WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+                  WHERE vp.rubro_id = 4 AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
                 )
             ) THEN ''
            ELSE t.nombre_resguardante
@@ -1418,7 +1418,7 @@ async function repararInventarioBodegaDelegacionRM(poolOrConn = poolOps, options
                AND vpd.vale_id IN (
                  SELECT vp.id
                  FROM vales_prestamo vp
-                 WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+                 WHERE vp.rubro_id = 4 AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
                )
            ) THEN 'EN_PRESTAMO_PROVISIONAL'
            WHEN t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL' THEN 'DISPONIBLE'
@@ -1724,6 +1724,18 @@ async function ensureSchemaAndUsers() {
       ).catch(() => {});
     }
 
+    const [jefOfi] = await poolRead.query(
+      `SELECT id FROM oficinas_regionales WHERE (region_id = ? OR region_id = 1) AND UPPER(TRIM(nombre)) = 'JEFATURA' LIMIT 1`,
+      [regLaPazId || 1]
+    ).catch(() => [[]]);
+    if (!jefOfi.length) {
+      await poolOps.query(
+        `INSERT INTO oficinas_regionales (region_id, municipio, nombre, responsable_oficina, activo)
+         VALUES (?, 'La Paz', 'Jefatura', 'Jefatura de Delegación', 1)`,
+        [regLaPazId || 1]
+      ).catch(() => {});
+    }
+
     // 1d. Asegurar columnas origen_adquisicion, observaciones_control y stock_minimo en productos y almacén
     const [prodCols] = await poolRead.query(
       `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'productos'`,
@@ -1858,6 +1870,7 @@ async function ensureSchemaAndUsers() {
       { id: 30030013, nombre: "Jóvenes Construyendo el Futuro", responsable: "Juan Daniel Carrera Villaseca" },
       { id: 30030014, nombre: "Programa de Discapacidad", responsable: "Olga Camarillo Martínez" },
       { id: 30030015, nombre: "Dirección Regional La Paz", responsable: "Sandra Guadalupe Salvatierra Amador" },
+      { id: 30030016, nombre: "Jefatura", responsable: "Jefatura de Delegación" },
     ];
     for (const ofi of oficialiasToEnsure) {
       const [ofiExists] = await poolRead.query(
@@ -2645,7 +2658,8 @@ async function ensureSchemaAndUsers() {
          ('MODO_PRUEBA_GRUPAL', '0'),
          ('MIGRACION_V61_APLICADA', '0'),
          ('MIGRACION_V62_APLICADA', '0'),
-         ('MIGRACION_RECALCULO_ID_ESTRICTO_V1', '0')`
+         ('MIGRACION_RECALCULO_ID_ESTRICTO_V1', '0'),
+         ('MIGRACION_FIX_TABLETAS_Y_MOB024_V1', '0')`
     ).catch(() => {});
 
     try {
@@ -2914,6 +2928,166 @@ async function ensureSchemaAndUsers() {
       }
     } catch (errRecalc) {
       console.warn("[WARN] Recálculo estricto por ID:", errRecalc?.message || errRecalc);
+    }
+
+    // ========================================================================
+    // MIGRACION_FIX_TABLETAS_Y_MOB024_V1:
+    // 1. Corregir clasificación de 9 tabletas a EN_RESGUARDO (8 Mulegé y 1 La Paz)
+    // 2. Reasignar préstamo de silla MOB-029 a MOB-024 (Mobiliario RM - Jesús)
+    // 3. Alta de oficina / departamento "Jefatura"
+    // ========================================================================
+    try {
+      const [[migFixRow]] = await poolRead.query(
+        `SELECT valor FROM configuracion_sistema WHERE clave = 'MIGRACION_FIX_TABLETAS_Y_MOB024_V1' LIMIT 1`
+      ).catch(() => [[]]);
+
+      if (String(migFixRow?.valor || "0").trim() !== "1") {
+        console.log("[MIGRACION] Iniciando MIGRACION_FIX_TABLETAS_Y_MOB024_V1...");
+
+        // 1. TABLETAS: Corregir clasificación de tabletas en EN_PRESTAMO_PROVISIONAL a EN_RESGUARDO
+        // si NO están vinculadas a un vale activo en vales_prestamo (rubro 4)
+        await poolOps.query(
+          `UPDATE inventario_tabletas t
+           SET t.estado_asignacion = 'EN_RESGUARDO'
+           WHERE t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM vales_prestamo_detalle vpd
+               INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+               WHERE (vpd.tableta_id = t.id OR vpd.articulo_id = t.id)
+                 AND vp.rubro_id = 4
+                 AND vp.estado IN ('PENDIENTE', 'AUTORIZADO_EN_PRESTAMO', 'EN_PRESTAMO')
+                 AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+             )`
+        ).catch((err) => console.warn("[WARN] Fix tabletas provisional:", err?.message || err));
+
+        // Si alguna tableta en EN_RESGUARDO quedó con nombre_resguardante vacío tras alguna prueba,
+        // restauramos el nombre original desde el archivo Excel fuente si existe
+        try {
+          const candidatePaths = [
+            path.join(__dirname, "Registro_Tabletas_Bienestar (2).xlsx"),
+            path.join(__dirname, "Tabletas_inventario.xlsx"),
+            "C:/Users/danie/.gemini/antigravity/brain/e63b32a5-942f-4d30-9d7d-1182c0ddbc46/.user_uploaded/media_1794538721890_50f732e9.xlsx",
+          ];
+          const excelPath = candidatePaths.find((p) => fs.existsSync(p));
+          if (excelPath) {
+            const wb = new ExcelJS.Workbook();
+            await wb.xlsx.readFile(excelPath);
+            const ws = wb.getWorksheet("BCS") || wb.worksheets[0];
+            if (ws) {
+              const excelMap = new Map();
+              ws.eachRow((row, rowNumber) => {
+                if (rowNumber < 4) return;
+                const noResg = parseInt(extractExcelCellText(row.getCell(3).value), 10);
+                const rawNombre = extractExcelCellText(row.getCell(4).value);
+                const rawReg = extractExcelCellText(row.getCell(2).value);
+                if (Number.isInteger(noResg) && noResg > 0 && rawNombre && !RED_RESGUARDOS_TABLETAS.has(noResg)) {
+                  const mapped = mapExcelRegionProgramaTableta(rawReg);
+                  excelMap.set(noResg, { nombre: rawNombre, region: mapped.region, oficina: mapped.oficina_programa });
+                }
+              });
+
+              const [blankNameTabs] = await poolRead.query(
+                `SELECT id, no_resguardo FROM inventario_tabletas WHERE estado_asignacion = 'EN_RESGUARDO' AND (TRIM(COALESCE(nombre_resguardante, '')) = '' OR nombre_resguardante IS NULL)`
+              ).catch(() => [[]]);
+
+              for (const bTab of blankNameTabs || []) {
+                const exInfo = excelMap.get(Number(bTab.no_resguardo));
+                if (exInfo && exInfo.nombre) {
+                  await poolOps.query(
+                    `UPDATE inventario_tabletas
+                     SET nombre_resguardante = ?,
+                         region = COALESCE(NULLIF(region, ''), ?),
+                         oficina_programa = COALESCE(NULLIF(oficina_programa, ''), ?)
+                     WHERE id = ?`,
+                    [exInfo.nombre, exInfo.region, exInfo.oficina, bTab.id]
+                  ).catch(() => {});
+                }
+              }
+            }
+          }
+        } catch (errEx) {
+          console.warn("[WARN] Recuperar nombres Excel tabletas:", errEx?.message || errEx);
+        }
+
+        // 2. SILLAS: Reasignar préstamo de MOB-029 a MOB-024 (Mobiliario RM, rubro 3)
+        try {
+          const [sillasRows] = await poolRead.query(
+            `SELECT id, clave_bien FROM inventario_oficina WHERE rubro_id = 3 AND (clave_bien IN ('MOB-024', 'MOB-029') OR descripcion LIKE '%MOB-024%' OR descripcion LIKE '%MOB-029%')`
+          ).catch(() => [[]]);
+
+          const rowMob24 = (sillasRows || []).find(s => String(s.clave_bien || "").toUpperCase() === "MOB-024");
+          const rowMob29 = (sillasRows || []).find(s => String(s.clave_bien || "").toUpperCase() === "MOB-029");
+
+          if (rowMob24) {
+            const idMob24 = rowMob24.id;
+            const idMob29 = rowMob29 ? rowMob29.id : null;
+
+            let whereClause = `(vpd.clave = 'MOB-029' OR vpd.descripcion LIKE '%MOB-029%'`;
+            const queryParams = [idMob24];
+            if (idMob29) {
+              whereClause += ` OR vpd.articulo_id = ?`;
+              queryParams.push(idMob29);
+            }
+            whereClause += `)`;
+
+            await poolOps.query(
+              `UPDATE vales_prestamo_detalle vpd
+               INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+               SET vpd.articulo_id = ?,
+                   vpd.clave = 'MOB-024',
+                   vpd.descripcion = REPLACE(REPLACE(vpd.descripcion, 'MOB-029', 'MOB-024'), 'mob-029', 'MOB-024')
+               WHERE vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+                 AND ${whereClause}`,
+              queryParams
+            ).catch((e) => console.warn("[WARN] Reasignar vale MOB-029 a MOB-024:", e?.message || e));
+          }
+        } catch (errSillas) {
+          console.warn("[WARN] Error procesando cambio de silla MOB-024/029:", errSillas?.message || errSillas);
+        }
+
+        // 3. ALTA DE OFICINA / DEPARTAMENTO "JEFATURA"
+        try {
+          // 3a. Asegurar en oficialias (id: 30030016)
+          const [jefOfi] = await poolRead.query(
+            `SELECT id FROM oficialias WHERE id = 30030016 OR UPPER(TRIM(nombre)) = 'JEFATURA' LIMIT 1`
+          ).catch(() => [[]]);
+          if (!jefOfi.length) {
+            await poolOps.query(
+              `INSERT INTO oficialias (id, id_tipo_oficialia, id_municipio, id_localidad, nombre, activo, oficial_reponsable, id_oficialia)
+               VALUES (30030016, 0, 0, 0, 'Jefatura', b'1', 'Jefatura de Delegación', 30030016)`
+            ).catch((e) => console.warn("[WARN] Insert oficialia Jefatura:", e?.message || e));
+          }
+
+          // 3b. Asegurar en oficinas_regionales para La Paz
+          const [jefReg] = await poolRead.query(
+            `SELECT id FROM oficinas_regionales WHERE (region_id = 1 OR region_id = ?) AND UPPER(TRIM(nombre)) = 'JEFATURA' LIMIT 1`,
+            [regLaPazId || 1]
+          ).catch(() => [[]]);
+          if (!jefReg.length) {
+            await poolOps.query(
+              `INSERT INTO oficinas_regionales (region_id, municipio, nombre, responsable_oficina, activo)
+               VALUES (?, 'La Paz', 'Jefatura', 'Jefatura de Delegación', 1)`,
+              [regLaPazId || 1]
+            ).catch((e) => console.warn("[WARN] Insert oficina regional Jefatura:", e?.message || e));
+          }
+        } catch (errJef) {
+          console.warn("[WARN] Alta de Jefatura:", errJef?.message || errJef);
+        }
+
+        // Recalcular inventario con la lógica dual
+        await repararInventarioBodegaDelegacionRM(poolOps);
+
+        // Registrar migración completada
+        await poolOps.query(
+          `INSERT INTO configuracion_sistema (clave, valor) VALUES ('MIGRACION_FIX_TABLETAS_Y_MOB024_V1', '1')
+           ON DUPLICATE KEY UPDATE valor = '1'`
+        ).catch(() => {});
+
+        console.log("[MIGRACION] MIGRACION_FIX_TABLETAS_Y_MOB024_V1 completada exitosamente.");
+      }
+    } catch (errMigFix) {
+      console.warn("[WARN] MIGRACION_FIX_TABLETAS_Y_MOB024_V1:", errMigFix?.message || errMigFix);
     }
 
     SCHEMA_MIGRATED = true;
@@ -14473,11 +14647,19 @@ app.get("/api/inventario-estatal/consolidado", authRequired, async (req, res) =>
     const [[kpiTabletas]] = await poolRead.query(`
       SELECT
         COUNT(*) AS total,
-        COALESCE(SUM(CASE WHEN estado_asignacion IN ('EN_RESGUARDO', 'ASIGNADA') THEN 1 ELSE 0 END), 0) AS en_resguardo,
-        COALESCE(SUM(CASE WHEN estado_asignacion = 'DEVOLUCION_PENDIENTE' THEN 1 ELSE 0 END), 0) AS devolucion_pendiente,
-        COALESCE(SUM(CASE WHEN estado_asignacion = 'DISPONIBLE' THEN 1 ELSE 0 END), 0) AS disponibles,
-        COALESCE(SUM(CASE WHEN estado_asignacion = 'EN_PRESTAMO_PROVISIONAL' THEN 1 ELSE 0 END), 0) AS en_prestamo_provisional
-      FROM inventario_tabletas
+        COALESCE(SUM(CASE WHEN t.estado_asignacion IN ('EN_RESGUARDO', 'ASIGNADA') THEN 1 ELSE 0 END), 0) AS en_resguardo,
+        COALESCE(SUM(CASE WHEN t.estado_asignacion = 'DEVOLUCION_PENDIENTE' THEN 1 ELSE 0 END), 0) AS devolucion_pendiente,
+        COALESCE(SUM(CASE WHEN t.estado_asignacion = 'DISPONIBLE' THEN 1 ELSE 0 END), 0) AS disponibles,
+        COALESCE(SUM(CASE WHEN t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL' AND EXISTS (
+          SELECT 1
+          FROM vales_prestamo_detalle vpd
+          INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+          WHERE (vpd.tableta_id = t.id OR vpd.articulo_id = t.id)
+            AND vp.rubro_id = 4
+            AND vp.estado IN ('PENDIENTE', 'AUTORIZADO_EN_PRESTAMO', 'EN_PRESTAMO')
+            AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+        ) THEN 1 ELSE 0 END), 0) AS en_prestamo_provisional
+      FROM inventario_tabletas t
     `).catch(() => [[{ total: 0, en_resguardo: 0, devolucion_pendiente: 0, disponibles: 0, en_prestamo_provisional: 0 }]]);
 
     const [regionesDistribucion] = await poolRead.query(`
@@ -14691,6 +14873,7 @@ function mapExcelRegionProgramaTableta(rawRegionProg) {
     .toUpperCase();
   if (key === "DELEGACION") return { region: "LA PAZ", oficina_programa: "Delegación La Paz" };
   if (key === "LA PAZ") return { region: "LA PAZ", oficina_programa: "Región La Paz" };
+  if (key === "JEFATURA") return { region: "LA PAZ", oficina_programa: "Jefatura" };
   if (key === "PCD") return { region: "LA PAZ", oficina_programa: "PCD - Programa de Discapacidad" };
   if (key === "PAM") return { region: "LA PAZ", oficina_programa: "PAM - Programa Adulto Mayor" };
   if (key === "LOS CABOS") return { region: "LOS CABOS", oficina_programa: "Región Los Cabos" };
@@ -14710,7 +14893,7 @@ function normalizeTabletaRegionInput(rawRegion, rawOficina) {
   if (r.includes("CABOS")) region = "LOS CABOS";
   else if (r.includes("COMONDU") || r.includes("LORETO")) region = "COMONDU";
   else if (r.includes("MULEGE")) region = "MULEGE";
-  else if (r.includes("PAZ") || r === "DELEGACION" || r === "PCD" || r === "PAM") region = "LA PAZ";
+  else if (r.includes("PAZ") || r === "DELEGACION" || r === "PCD" || r === "PAM" || r.includes("JEFATURA")) region = "LA PAZ";
 
   let oficina_programa = ofi;
   if (!oficina_programa) {
@@ -15268,12 +15451,20 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
     const [kpiRows] = await poolRead.query(`
       SELECT
         COUNT(*) AS total,
-        SUM(CASE WHEN estado_asignacion = 'EN_RESGUARDO' THEN 1 ELSE 0 END) AS en_resguardo,
-        SUM(CASE WHEN estado_asignacion = 'DEVOLUCION_PENDIENTE' THEN 1 ELSE 0 END) AS devolucion_pendiente,
-        SUM(CASE WHEN estado_asignacion = 'DISPONIBLE' THEN 1 ELSE 0 END) AS disponibles,
-        SUM(CASE WHEN estado_asignacion = 'EN_PRESTAMO_PROVISIONAL' THEN 1 ELSE 0 END) AS en_prestamo_provisional,
-        SUM(CASE WHEN estado_asignacion = 'EN_RESGUARDO' AND (TRIM(COALESCE(nombre_resguardante, '')) = '' OR UPPER(TRIM(nombre_resguardante)) = 'RESGUARDO FISICO') THEN 1 ELSE 0 END) AS sin_nombre
-      FROM inventario_tabletas
+        SUM(CASE WHEN t.estado_asignacion = 'EN_RESGUARDO' THEN 1 ELSE 0 END) AS en_resguardo,
+        SUM(CASE WHEN t.estado_asignacion = 'DEVOLUCION_PENDIENTE' THEN 1 ELSE 0 END) AS devolucion_pendiente,
+        SUM(CASE WHEN t.estado_asignacion = 'DISPONIBLE' THEN 1 ELSE 0 END) AS disponibles,
+        SUM(CASE WHEN t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL' AND EXISTS (
+          SELECT 1
+          FROM vales_prestamo_detalle vpd
+          INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+          WHERE (vpd.tableta_id = t.id OR vpd.articulo_id = t.id)
+            AND vp.rubro_id = 4
+            AND vp.estado IN ('PENDIENTE', 'AUTORIZADO_EN_PRESTAMO', 'EN_PRESTAMO')
+            AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+        ) THEN 1 ELSE 0 END) AS en_prestamo_provisional,
+        SUM(CASE WHEN t.estado_asignacion = 'EN_RESGUARDO' AND (TRIM(COALESCE(t.nombre_resguardante, '')) = '' OR UPPER(TRIM(t.nombre_resguardante)) = 'RESGUARDO FISICO') THEN 1 ELSE 0 END) AS sin_nombre
+      FROM inventario_tabletas t
     `);
     const kpis = {
       total: Number(kpiRows[0]?.total || 0),
@@ -15288,8 +15479,22 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
     const params = [];
 
     if (estado_asignacion && String(estado_asignacion).trim() !== "") {
-      where += " AND t.estado_asignacion = ?";
-      params.push(String(estado_asignacion).trim().toUpperCase());
+      const st = String(estado_asignacion).trim().toUpperCase();
+      if (st === "EN_PRESTAMO_PROVISIONAL") {
+        where += ` AND t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM vales_prestamo_detalle vpd
+                     INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+                     WHERE (vpd.tableta_id = t.id OR vpd.articulo_id = t.id)
+                       AND vp.rubro_id = 4
+                       AND vp.estado IN ('PENDIENTE', 'AUTORIZADO_EN_PRESTAMO', 'EN_PRESTAMO')
+                       AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
+                   )`;
+      } else {
+        where += " AND t.estado_asignacion = ?";
+        params.push(st);
+      }
     }
     if (region && String(region).trim() !== "") {
       where += " AND t.region = ?";
