@@ -9,6 +9,7 @@ const cookieParser = require("cookie-parser");
 const path = require("path");
 const crypto = require("crypto");
 const PDFDocument = require("pdfkit");
+const ExcelJS = require("exceljs");
 const fs = require("fs");
 require("dotenv").config();
 
@@ -244,6 +245,9 @@ async function exportDatabaseSnapshot() {
     "vales_prestamo",
     "vales_prestamo_detalle",
     "formatos_inventario_regional",
+    "inventario_tabletas",
+    "movimientos_tabletas",
+    "bitacora_tabletas",
   ];
 
   let tableSet = new Set();
@@ -339,6 +343,119 @@ async function exportDatabaseSnapshot() {
   };
 }
 
+// ============================================================================
+// v53: RESPALDO AUTOMÁTICO DE BD EN './respaldos_sistema' AL CAMBIAR DE VERSIÓN
+// ============================================================================
+async function crearRespaldoAutomaticoBD(versionAnterior, nuevaVersion) {
+  try {
+    const backupDir = path.join(__dirname, "respaldos_sistema");
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+
+    const pad = (n) => String(n).padStart(2, "0");
+    const now = new Date();
+    const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+    const vAntClean = String(versionAnterior || "0").replace(/[^\w.-]+/g, "_");
+    const vNueClean = String(nuevaVersion || "53").replace(/[^\w.-]+/g, "_");
+    const filename = `backup_v${vAntClean}_to_v${vNueClean}_${timestamp}.json`;
+    const filePath = path.join(backupDir, filename);
+
+    const targetTables = [
+      "inventario_oficina",
+      "almacen_dregcivil",
+      "vales_prestamo",
+      "vales_prestamo_detalle",
+      "pedidos_almacen",
+      "solicitudes",
+      "detalles_solicitud",
+      "solicitudes_detalle",
+      "bitacora_movimientos",
+      "oficinas",
+      "oficinas_regionales",
+      "oficialias",
+      "usuario",
+      "usuarios",
+      "regiones",
+      "rubros_inventario",
+      "productos",
+      "sistema_metadata",
+      "configuracion_sistema",
+      "inventario_tabletas",
+      "movimientos_tabletas",
+      "bitacora_tabletas"
+    ];
+
+    let existingTables = new Set();
+    try {
+      const [tRows] = await poolRead.query(
+        `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?`,
+        [DB_NAME]
+      );
+      existingTables = new Set(tRows.map((t) => String(t.TABLE_NAME || "").toLowerCase()));
+    } catch (err) {
+      console.warn("[WARN] crearRespaldoAutomaticoBD leyendo tablas:", err?.message || err);
+    }
+
+    const backupData = {
+      metadata: {
+        sistema: "Delegación BCS - Control de Inventario",
+        tipo: "Respaldo Automático por Cambio de Versión",
+        version_anterior: String(versionAnterior || "0"),
+        version_nueva: String(nuevaVersion),
+        fecha_iso: now.toISOString(),
+        timestamp,
+        database: DB_NAME,
+        tablas_respaldadas: [],
+        total_registros: 0
+      },
+      tables: {}
+    };
+
+    for (const tbl of targetTables) {
+      if (existingTables.size > 0 && !existingTables.has(tbl.toLowerCase())) {
+        continue;
+      }
+      try {
+        const [rows] = await poolRead.query(`SELECT * FROM ${qi(tbl)}`);
+        backupData.tables[tbl] = rows;
+        backupData.metadata.tablas_respaldadas.push(tbl);
+        backupData.metadata.total_registros += rows.length;
+      } catch (_) {
+        // Omitir si la tabla no existe o no tiene permiso
+      }
+    }
+
+    fs.writeFileSync(filePath, JSON.stringify(backupData, null, 2), "utf8");
+    console.log(`[DRP-v53] Respaldo automático por cambio de versión generado: ${filename} (${backupData.metadata.total_registros} registros)`);
+    return { ok: true, filename, filePath, metadata: backupData.metadata };
+  } catch (err) {
+    console.error("[ERROR] crearRespaldoAutomaticoBD:", err?.message || err);
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
+async function isModoPruebaGrupalActivo(dbHandle = poolRead) {
+  try {
+    const [rows] = await dbHandle.query(
+      `SELECT valor FROM configuracion_sistema WHERE clave = 'MODO_PRUEBA_GRUPAL' LIMIT 1`
+    );
+    if (!rows || !rows.length) return true;
+    const v = String(rows[0].valor ?? "1").trim().toUpperCase();
+    return v === "1" || v === "TRUE" || v === "SI";
+  } catch (_) {
+    return true;
+  }
+}
+
+function canDownloadSolicitudPdf(req) {
+  if (!req?.user) return false;
+  if (isAdmin(req)) return true;
+  const uname = normalizeUser(req.user.username);
+  if (["gabrielfiol", "fiol", "encargado", "jorge", "jorgepatron"].includes(uname)) return true;
+  return false;
+}
+
 // Mapa de los 4 encargados del Inventario Regional y su rubro exclusivo
 const REGIONAL_ENCARGADOS_MAP = {
   gabrielfiol: {
@@ -349,7 +466,8 @@ const REGIONAL_ENCARGADOS_MAP = {
     segundo_ap: "Collins",
     id_oficialia: 30030008,
     rol: "ENCARGADO",
-    departamento: "ENCARGADO",
+    departamento: "Encargado de Archivos y Materiales",
+    cargo: "Encargado de Archivos y Materiales",
     rubro_id: 1, // ARCHIVO_MATERIALES
     canAlmacen: true,
   },
@@ -386,6 +504,7 @@ const REGIONAL_ENCARGADOS_MAP = {
     id_oficialia: 30030001,
     rol: "ENCARGADO",
     departamento: "ENCARGADO_REGIONAL",
+    cargo: "Encargado de Almacén",
     rubro_id: 4, // TABLETS_STARLINKS
     canAlmacen: false,
   },
@@ -397,7 +516,8 @@ const REGIONAL_ENCARGADOS_MAP = {
     segundo_ap: "Collins",
     id_oficialia: 30030008,
     rol: "ENCARGADO",
-    departamento: "Encargado de Inventario",
+    departamento: "Encargado de Archivos y Materiales",
+    cargo: "Encargado de Archivos y Materiales",
     rubro_id: 1, // ARCHIVO_MATERIALES
     canAlmacen: true,
   },
@@ -408,6 +528,7 @@ function getUserRubroId(userOrReq) {
   if (!u) return null;
   const uname = normalizeUser(u.username);
   if (uname === "admin" || String(u.rol || "").toUpperCase() === "ADMIN") return null;
+  if (["luismayoral", "luiseduardo", "luis"].includes(uname)) return 4;
   const dbRubro = Number(u.rubro_id || 0);
   if (Number.isInteger(dbRubro) && dbRubro > 0) return dbRubro;
   const mapped = REGIONAL_ENCARGADOS_MAP[uname];
@@ -419,10 +540,10 @@ function normalizeRol(r, username = '') {
   const u = normalizeUser(username);
   if (u === 'admin') return 'ADMIN';
   if (u === 'gabrielfiol' || u === 'encargado' || u === 'rodrigo' || u === 'jorge' || u === 'jorgepatron') return 'ENCARGADO';
-  if (u === 'evelia' || u === 'jesus' || u === 'luiseduardo') return 'ENCARGADO';
+  if (u === 'evelia' || u === 'jesus' || u === 'luiseduardo' || u === 'luismayoral' || u === 'luis') return 'ENCARGADO';
   const up = String(r || '').trim().toUpperCase();
   if (up === 'ADMIN' || up === 'ADMINISTRADOR' || up === 'ADMINISTRACION') return 'ADMIN';
-  if (up === 'ENCARGADO' || up === 'ENCARGADO DE INVENTARIO' || up === 'ENCARGADO_REGIONAL') return 'ENCARGADO';
+  if (up === 'ENCARGADO' || up === 'ENCARGADO DE INVENTARIO' || up === 'ENCARGADO DE ARCHIVOS Y MATERIALES' || up === 'ENCARGADO_REGIONAL') return 'ENCARGADO';
   if (up === 'USUARIO' || up === 'USER' || up === 'REGIONAL' || up === 'DEPARTAMENTO') return 'USUARIO';
   return 'USUARIO';
 }
@@ -436,21 +557,33 @@ function isRegionalEncargado(req) {
   return Number.isInteger(rubId) && rubId > 0;
 }
 
+function isLuisMayoralUser(userOrReq) {
+  const u = userOrReq?.user ? userOrReq.user : userOrReq;
+  if (!u) return false;
+  if (isAdmin({ user: u })) return false;
+  const uname = normalizeUser(u.username);
+  if (['luismayoral', 'luiseduardo', 'luis'].includes(uname)) return true;
+  const rubId = Number(u.rubro_id || 0);
+  return rubId === 4;
+}
+
 function isRegionalFullAccess(userOrReq) {
   const u = userOrReq?.user ? userOrReq.user : userOrReq;
   if (!u) return false;
   const uname = normalizeUser(u.username);
   if (uname === 'gabrielfiol' || uname === 'encargado') return false;
+  if (isLuisMayoralUser(u)) return false;
   if (isAdmin({ user: u }) || ['admin', 'rodrigo', 'jorge', 'jorgepatron'].includes(uname)) return true;
-  if (['evelia', 'jesus', 'luiseduardo', 'luis'].includes(uname)) return true;
+  if (['evelia', 'jesus'].includes(uname)) return true;
   const rubId = Number(u.rubro_id || 0);
-  if ([2, 3, 4].includes(rubId)) return true;
+  if ([2, 3].includes(rubId)) return true;
   return false;
 }
 
 function isRegionalEnlace(userOrReq) {
   const u = userOrReq?.user ? userOrReq.user : userOrReq;
   if (!u) return false;
+  if (isLuisMayoralUser(u)) return false;
   const uname = normalizeUser(u.username);
   if (uname === 'gabrielfiol' || uname === 'encargado') return false;
   const role = String(u.rol || u.role || '').toUpperCase();
@@ -466,6 +599,7 @@ function canAccessRegional(req) {
   if (!req?.user) return false;
   const uname = normalizeUser(req.user?.username);
   if (uname === 'gabrielfiol' || uname === 'encargado') return false;
+  if (isLuisMayoralUser(req)) return false;
   return isRegionalFullAccess(req) || isRegionalEnlace(req);
 }
 
@@ -477,16 +611,19 @@ function canGeneratePdfRegional(req) {
   return isRegionalFullAccess(req);
 }
 
+function isAuditorBlockedUser(req) {
+  const u = normalizeUser(req?.user?.username || req?.username || '');
+  return ['rodrigo', 'jorge', 'jorgepatron'].includes(u);
+}
+
 function canUseCuatroFirmas(userOrReq) {
   const u = userOrReq?.user ? userOrReq.user : userOrReq;
   if (!u) return false;
   const uname = normalizeUser(u.username);
   const role = String(u.rol || u.role || '').toUpperCase();
   if (role === 'ADMIN' || ['admin', 'rodrigo', 'jorge', 'jorgepatron'].includes(uname)) return true;
-  if (role === 'REGIONAL' || isRegionalEnlace(u)) return true;
-  if (['jesus', 'luiseduardo', 'luis', 'gabrielfiol', 'fiol', 'encargado', 'evelia'].includes(uname)) return true;
-  const rubId = Number(u.rubro_id || 0);
-  if ([1, 2, 3, 4].includes(rubId)) return true;
+  if (role === 'ENCARGADO') return true;
+  if (['jesus', 'luismayoral', 'luiseduardo', 'luis', 'gabrielfiol', 'fiol', 'encargado', 'evelia'].includes(uname)) return true;
   return false;
 }
 
@@ -529,13 +666,36 @@ function canManageAlmacen(req) {
 }
 
 function canManageSolicitudes(req) {
+  if (isAuditorBlockedUser(req)) return false;
   // Admin y Gabriel Fiol (Encargado de Almacén) pueden gestionar/surtir vales de todos
   return isAdmin(req) || isEncargado(req);
 }
 
 function canViewReportes(req) {
-  // Admin y Gabriel Fiol (Encargado de Almacén) tienen acceso a reportes de consumo
-  return isAdmin(req) || isEncargado(req);
+  // Gabriel Fiol no debe tener acceso a herramientas de análisis global (reportes y gráficas)
+  const u = normalizeUser(req?.user?.username || req?.username);
+  if (u === "gabrielfiol" || u === "fiol") return false;
+  return isAdmin(req);
+}
+
+function canAccessTabletas(req) {
+  if (!req?.user) return false;
+  if (isAdmin(req)) return true;
+  const u = normalizeUser(req.user.username);
+  const rubro = Number(getUserRubroId(req) || 0);
+  if (normalizeRol(req.user.rol, req.user.username) === 'ENCARGADO') return true;
+  if (["luismayoral", "luiseduardo", "luis", "jorge", "jorgepatron", "rodrigo"].includes(u)) return true;
+  if (rubro === 4) return true;
+  return false;
+}
+
+function canEditTabletas(req) {
+  if (!req?.user) return false;
+  if (isAdmin(req)) return true;
+  const u = normalizeUser(req.user.username);
+  const rubro = Number(getUserRubroId(req) || 0);
+  if (["luismayoral", "luiseduardo", "luis"].includes(u) || rubro === 4) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -546,9 +706,9 @@ const REGIONES_FORANEAS = new Set(["LOS_CABOS", "MULEGE", "COMONDU_LORETO"]);
 
 // Usuarios regionales de ejemplo (contraseña inicial: secreta123)
 const REGIONAL_ENLACES_EJEMPLO = [
-  { username: "loscabos", nombre: "Enlace Regional Los Cabos", region_clave: "LOS_CABOS", id_oficialia: 30030009, oficialia_nombre: "Enlace Regional Los Cabos" },
-  { username: "mulege", nombre: "Diana Ramirez Hernandez", region_clave: "MULEGE", id_oficialia: 30030010, oficialia_nombre: "Enlace Regional Mulegé" },
-  { username: "comondu", nombre: "Enlace Regional Comondú / Loreto", region_clave: "COMONDU_LORETO", id_oficialia: 30030011, oficialia_nombre: "Enlace Regional Comondú / Loreto" },
+  { username: "loscabos", nombre: "Samir Savin Ruiz", region_clave: "LOS_CABOS", id_oficialia: 30030009, oficialia_nombre: "Enlace Regional Los Cabos" },
+  { username: "mulege", nombre: "Diana Ramírez Hernández", region_clave: "MULEGE", id_oficialia: 30030010, oficialia_nombre: "Enlace Regional Mulegé" },
+  { username: "comondu", nombre: "Humberto Arce Cordero", region_clave: "COMONDU_LORETO", id_oficialia: 30030011, oficialia_nombre: "Enlace Regional Comondú / Loreto" },
 ];
 
 // Inventario Regional: canEditRegional definido arriba según matriz estricta (admin y encargados rubro regional)
@@ -558,9 +718,11 @@ function canSeeAllSolicitudes(req) {
   return isAdmin(req) || isEncargado(req);
 }
 
-// Selección de departamento en Nueva Solicitud y Listado: solo admin y Gabriel Fiol
+// Selección de departamento en Nueva Solicitud y Listado: solo admin (Gabriel Fiol solo solicita bajo su propia área)
 function canSelectAnyDepartment(req) {
-  return isAdmin(req) || isEncargado(req);
+  const uname = normalizeUser(req?.user?.username || req?.username || "");
+  if (uname === "gabrielfiol" || uname === "fiol" || uname === "encargado") return false;
+  return isAdmin(req);
 }
 
 // Alcance (región / oficina / departamento) leído directamente de BD con caché corta,
@@ -740,36 +902,67 @@ return r[0]?.id || null;
 
 let STATUS_ENUM_CACHE = null;
 async function getStatusEnum() {
-if (STATUS_ENUM_CACHE) return STATUS_ENUM_CACHE;
-const [rows] = await poolRead.query(
-`SELECT COLUMN_TYPE
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = ?
-AND TABLE_NAME = 'solicitudes'
-AND COLUMN_NAME = 'status'
-LIMIT 1`,
-[DB_NAME]
-);
-if (!rows.length) {
-STATUS_ENUM_CACHE = ["PENDIENTE", "APROBADA", "SURTIDA", "RECHAZADA", "CANCELADA"];
-return STATUS_ENUM_CACHE;
-}
-const m = rows[0].COLUMN_TYPE.match(/enum\((.*)\)/i);
-let vals = [];
-if (m && m[1]) vals = m[1].split(",").map((s) => s.trim().replace(/^'/, "").replace(/'$/, ""));
-STATUS_ENUM_CACHE = vals.length ? vals : ["PENDIENTE", "APROBADA", "SURTIDA", "RECHAZADA", "CANCELADA"];
-return STATUS_ENUM_CACHE;
+  const baseStatuses = [
+    "PENDIENTE",
+    "EN_PROCESO",
+    "PARA_FIRMAS",
+    "COMPLETADA",
+    "APROBADA",
+    "SURTIDA",
+    "ENTREGADA",
+    "RECHAZADA",
+    "CANCELADA",
+    "CANCELADO"
+  ];
+  if (STATUS_ENUM_CACHE) return STATUS_ENUM_CACHE;
+  try {
+    const [rows] = await poolRead.query(
+      `SELECT COLUMN_TYPE
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = ?
+         AND TABLE_NAME = 'solicitudes'
+         AND COLUMN_NAME = 'status'
+       LIMIT 1`,
+      [DB_NAME]
+    );
+    if (rows.length) {
+      const m = rows[0].COLUMN_TYPE.match(/enum\((.*)\)/i);
+      if (m && m[1]) {
+        const vals = m[1].split(",").map((s) => s.trim().replace(/^'/, "").replace(/'$/, ""));
+        for (const v of vals) {
+          if (v && !baseStatuses.includes(v)) baseStatuses.push(v);
+        }
+      }
+    }
+  } catch (_) {}
+  STATUS_ENUM_CACHE = baseStatuses;
+  return STATUS_ENUM_CACHE;
 }
 async function normalizeStatus(input) {
-if (input == null) return null;
-const enums = await getStatusEnum();
-const raw = String(input).trim();
-if (enums.includes(raw)) return raw;
-const c = canon(raw);
-for (const e of enums) {
-if (canon(e) === c) return e;
-}
-throw new Error(`status invalido. Usa: ${enums.join(", ")}`);
+  if (input == null) return null;
+  const enums = await getStatusEnum();
+  const raw = String(input).trim().toUpperCase().replace(/\s+/g, "_");
+  const aliasMap = {
+    ACEPTADA: "EN_PROCESO",
+    EN_PROCESO: "EN_PROCESO",
+    PROCESO: "EN_PROCESO",
+    PARA_FIRMAS: "PARA_FIRMAS",
+    LISTO_FIRMAS: "PARA_FIRMAS",
+    FIRMAS: "PARA_FIRMAS",
+    COMPLETADA: "COMPLETADA",
+    COMPLETADO: "COMPLETADA",
+    ENTREGADA: "COMPLETADA",
+    ENTREGADO: "COMPLETADA",
+    SURTIDO: "SURTIDA",
+    CANCELADO: "CANCELADA"
+  };
+  const mapped = aliasMap[raw] || raw;
+  if (enums.includes(mapped)) return mapped;
+  const c = canon(mapped);
+  for (const e of enums) {
+    if (canon(e) === c) return e;
+  }
+  throw new Error(`status invalido. Usa: ${enums.join(", ")}`);
 }
 
 let ALM_HAS_ESTADO = null;
@@ -915,6 +1108,52 @@ return ins.insertId;
 }
 }
 
+async function getCategoriasNameMap() {
+  const map = new Map();
+  try {
+    const meta = await detectCategorias();
+    if (!meta.table || !meta.id || !meta.name) return map;
+    const [rows] = await poolRead.query(
+      `SELECT ${qi(meta.id)} AS id, ${qi(meta.name)} AS nombre FROM ${qi(meta.table)}`
+    );
+    for (const r of rows) {
+      const idNum = Number(r.id);
+      const nom = String(r.nombre || "").trim();
+      if (Number.isFinite(idNum) && nom) map.set(idNum, nom);
+    }
+  } catch (_) {}
+  return map;
+}
+
+function resolveCategoriaTexto(rawVal, catName, catMap) {
+  const nom = String(catName || "").trim();
+  if (nom && !/^\d+$/.test(nom)) return nom;
+  const raw = String(rawVal ?? "").trim();
+  if (!raw) return "GENERAL";
+  if (/^\d+$/.test(raw)) {
+    const mapped = catMap instanceof Map ? catMap.get(Number(raw)) : "";
+    return mapped ? String(mapped).trim() : "GENERAL";
+  }
+  return raw;
+}
+
+function isAssetInSiniestro(row) {
+  if (!row || typeof row !== "object") return false;
+  const normTxt = (v) =>
+    String(v || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toUpperCase();
+  const detTxt =
+    row.detalles_vehiculo && typeof row.detalles_vehiculo === "object"
+      ? JSON.stringify(row.detalles_vehiculo)
+      : String(row.detalles_vehiculo || "");
+  const combined = normTxt(
+    [row.estatus_uso, row.estado_fisico, row.estado_salida, row.observaciones, row.observaciones_control, detTxt].join(" ")
+  );
+  return combined.includes("SINIESTRO") || combined.includes("ASEGURADORA") || combined.includes("NO DISPONIBLE");
+}
+
 // Sincronización estricta del inventario de Gabriel Fiol:
 // El inventario de materiales y suministros es UNO SOLO (almacen_dregcivil).
 // En inventario_oficina (oficina_id = 1, rubro_id = 1 / Archivo y Materiales) se refleja
@@ -975,11 +1214,436 @@ async function syncAlmacenCentralToInventarioRegional(dbHandle = poolOps) {
   }
 }
 
+const CATALOGO_LAPAZ_JESUS = [
+  { clave: "MOB-001", descripcion: "Sillas grises", aliases: ["sillas grises", "sillas"], total_lapaz: 262, sandra_def: 81, rm_def: 181 },
+  { clave: "MOB-002", descripcion: "Mesas grandes", aliases: ["mesas grandes"], total_lapaz: 70, sandra_def: 10, rm_def: 60 },
+  { clave: "MOB-003", descripcion: "Sillas negras", aliases: ["sillas negras"], total_lapaz: 21, sandra_def: 0, rm_def: 21 },
+  { clave: "MOB-004", descripcion: "Mesas chicas", aliases: ["mesas chicas"], total_lapaz: 8, sandra_def: 3, rm_def: 5 },
+  { clave: "MOB-005", descripcion: "Abanicos grandes", aliases: ["abanicos grandes", "abanico grande", "abanico"], total_lapaz: 5, sandra_def: 4, rm_def: 1 },
+  { clave: "MOB-006", descripcion: "Abanicos chicos", aliases: ["abanicos chicos", "abanico chico"], total_lapaz: 6, sandra_def: 0, rm_def: 6 },
+  { clave: "MOB-007", descripcion: "Coolers", aliases: ["coolers", "cooler"], total_lapaz: 6, sandra_def: 0, rm_def: 6 },
+  { clave: "MOB-008", descripcion: "Carpas 3x3", aliases: ["carpas 3x3", "carpa 3x3", "toldo"], total_lapaz: 3, sandra_def: 1, rm_def: 2 },
+  { clave: "MOB-009", descripcion: "Carpas 6x4", aliases: ["carpas 6x4", "carpa 6x4"], total_lapaz: 3, sandra_def: 0, rm_def: 3 },
+  { clave: "MOB-010", descripcion: "Hieleras", aliases: ["hieleras", "hielera"], total_lapaz: 12, sandra_def: 0, rm_def: 12 },
+  { clave: "MOB-011", descripcion: "Sillas periqueras", aliases: ["sillas periqueras", "silla periquera"], total_lapaz: 6, sandra_def: 0, rm_def: 6 },
+  { clave: "MOB-012", descripcion: "Mesas periqueras", aliases: ["mesas periqueras", "mesa periquera"], total_lapaz: 2, sandra_def: 0, rm_def: 2 },
+  { clave: "MOB-013", descripcion: "Salas lounge", aliases: ["salas lounge", "sala lounge"], total_lapaz: 2, sandra_def: 0, rm_def: 2 },
+  { clave: "MOB-014", descripcion: "Mesas de centro", aliases: ["mesas de centro", "mesa de centro"], total_lapaz: 2, sandra_def: 0, rm_def: 2 },
+  { clave: "MOB-015", descripcion: "Atril", aliases: ["atril"], total_lapaz: 1, sandra_def: 0, rm_def: 1 },
+  { clave: "MOB-016", descripcion: "Planta de luz", aliases: ["planta de luz", "generador"], total_lapaz: 1, sandra_def: 0, rm_def: 1 },
+  { clave: "MOB-017", descripcion: "Extensiones eléctricas", aliases: ["extensiones electricas", "extension electrica", "extensiones"], total_lapaz: 8, sandra_def: 0, rm_def: 8 },
+  { clave: "MOB-018", descripcion: "Bocinas con tripié", aliases: ["bocinas con tripie", "bocinas", "bocina con tripie"], total_lapaz: 2, sandra_def: 0, rm_def: 2 },
+  { clave: "MOB-019", descripcion: "Micrófonos inalámbricos", aliases: ["microfonos inalambricos", "microfono inalambrico", "microfonos"], total_lapaz: 2, sandra_def: 0, rm_def: 2 },
+  { clave: "MOB-020", descripcion: "Cafeteras grandes", aliases: ["cafeteras grandes", "cafetera grande", "cafeteras"], total_lapaz: 3, sandra_def: 0, rm_def: 3 },
+  { clave: "MOB-021", descripcion: "Archivero", aliases: ["archivero", "archiveros"], total_lapaz: 2, sandra_def: 1, rm_def: 1 },
+  { clave: "MOB-022", descripcion: "Diablito", aliases: ["diablito", "diablo"], total_lapaz: 4, sandra_def: 1, rm_def: 3 },
+];
+
+function normalizeMobText(str) {
+  return String(str || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeMobClave(claveRaw, descRaw) {
+  const c = String(claveRaw || "").trim().toUpperCase();
+  if (c) return c;
+  const dNorm = normalizeMobText(descRaw);
+  if (dNorm) {
+    for (const item of CATALOGO_LAPAZ_JESUS) {
+      if (normalizeMobText(item.descripcion) === dNorm || item.aliases.some((a) => normalizeMobText(a) === dNorm)) {
+        return item.clave;
+      }
+    }
+  }
+  return String(descRaw || "").trim().toUpperCase();
+}
+
+async function consolidarBodegaRMJesus(poolOrConn = poolOps, options = {}) {
+  const forceResetQuantities = Boolean(options.forceResetQuantities);
+  if (!poolOrConn) return { ok: false, error: "Sin conexión a BD" };
+  const isPool = typeof poolOrConn.getConnection === "function";
+  const conn = isPool ? await poolOrConn.getConnection() : poolOrConn;
+  try {
+    if (isPool) await conn.beginTransaction();
+
+    // 1. Obtener o crear ID de "RM (Recursos Materiales)" en La Paz (region_id = 1)
+    const [regRows] = await conn.query(`SELECT id FROM regiones WHERE clave = 'LA_PAZ' OR id = 1 ORDER BY id ASC LIMIT 1`);
+    const regLaPazId = regRows[0]?.id || 1;
+
+    const [rmRows] = await conn.query(
+      `SELECT id FROM oficinas_regionales
+       WHERE region_id = ? AND (nombre = 'RM (Recursos Materiales)' OR nombre = 'RM' OR nombre LIKE '%Recursos Materiales%')
+       ORDER BY (nombre = 'RM (Recursos Materiales)') DESC, id ASC LIMIT 1`,
+      [regLaPazId]
+    );
+    let rmOfiId = rmRows[0]?.id || null;
+    if (!rmOfiId) {
+      const [insRm] = await conn.query(
+        `INSERT INTO oficinas_regionales (region_id, municipio, nombre, responsable_oficina, activo)
+         VALUES (?, 'La Paz', 'RM (Recursos Materiales)', 'Jorge Luis Patrón Murillo', 1)`,
+        [regLaPazId]
+      );
+      rmOfiId = insRm.insertId;
+    } else {
+      await conn.query(
+        `UPDATE oficinas_regionales
+         SET nombre = 'RM (Recursos Materiales)', municipio = 'La Paz', responsable_oficina = 'Jorge Luis Patrón Murillo', activo = 1
+         WHERE id = ?`,
+        [rmOfiId]
+      );
+    }
+
+    // 2. Obtener o crear ID de "Coordinación Regional La Paz" (region_id = 1)
+    const [coordRows] = await conn.query(
+      `SELECT id FROM oficinas_regionales
+       WHERE region_id = ? AND (nombre = 'Coordinación Regional La Paz' OR nombre = 'Coordinacion Regional La Paz' OR nombre LIKE '%Coordinación Regional La Paz%' OR nombre LIKE '%Coordinacion Regional La Paz%')
+       ORDER BY id ASC LIMIT 1`,
+      [regLaPazId]
+    );
+    let coordLaPazId = coordRows[0]?.id || null;
+    if (!coordLaPazId) {
+      const [insCoord] = await conn.query(
+        `INSERT INTO oficinas_regionales (region_id, municipio, nombre, responsable_oficina, activo)
+         VALUES (?, 'La Paz', 'Coordinación Regional La Paz', 'SANDRA GPE. SALVATIERRA AMADOR', 1)`,
+        [regLaPazId]
+      );
+      coordLaPazId = insCoord.insertId;
+    } else {
+      await conn.query(
+        `UPDATE oficinas_regionales
+         SET nombre = 'Coordinación Regional La Paz', municipio = 'La Paz', responsable_oficina = 'SANDRA GPE. SALVATIERRA AMADOR', activo = 1
+         WHERE id = ?`,
+        [coordLaPazId]
+      );
+    }
+
+    // 3. Consultar todos los registros de Mobiliario (rubro_id = 3) en La Paz (excluyendo S/A Sin Asignar para no absorber pendientes)
+    const [allLpRows] = await conn.query(
+      `SELECT io.*, o.region_id, o.nombre AS oficina_nombre
+       FROM inventario_oficina io
+       LEFT JOIN oficinas_regionales o ON o.id = io.oficina_id
+       WHERE io.rubro_id = 3
+         AND (o.region_id = ? OR io.es_bodega_delegacion = 1 OR io.oficina_id IN (1, ?, ?))
+         AND COALESCE(o.region_id, ?) NOT IN (2, 3, 4)
+         AND (o.nombre IS NULL OR (o.nombre NOT LIKE '%S/A%' AND o.nombre NOT LIKE '%Sin Asignar%'))
+       ORDER BY io.id ASC FOR UPDATE`,
+      [regLaPazId, rmOfiId, coordLaPazId, regLaPazId]
+    );
+
+    const bodegaGroups = new Map();
+    const coordGroups = new Map();
+
+    for (const r of allLpRows) {
+      const baseKey = String(r.clave_bien || "").trim().toUpperCase() || normalizeMobClave(r.clave_bien, r.descripcion);
+      const isCoordRow = Number(r.oficina_id) === Number(coordLaPazId) && Number(r.es_bodega_delegacion || 0) === 0;
+      if (isCoordRow) {
+        if (!coordGroups.has(baseKey)) coordGroups.set(baseKey, []);
+        coordGroups.get(baseKey).push(r);
+      } else {
+        if (!bodegaGroups.has(baseKey)) bodegaGroups.set(baseKey, []);
+        bodegaGroups.get(baseKey).push(r);
+      }
+    }
+
+    let duplicadosEliminados = 0;
+    let referenciasReasignadas = 0;
+    const masterByKey = new Map();
+
+    // 3a. Deduplicar bodega general y consolidar en RM (Recursos Materiales)
+    for (const [baseKey, group] of bodegaGroups.entries()) {
+      // Preferir el registro que ya esté en rmOfiId, o el de menor ID
+      group.sort((a, b) => {
+        const aInRm = Number(a.oficina_id) === Number(rmOfiId) ? 0 : 1;
+        const bInRm = Number(b.oficina_id) === Number(rmOfiId) ? 0 : 1;
+        if (aInRm !== bInRm) return aInRm - bInRm;
+        return Number(a.id) - Number(b.id);
+      });
+      const master = group[0];
+      masterByKey.set(baseKey, master);
+
+      for (let i = 1; i < group.length; i++) {
+        const dup = group[i];
+        const [updArt] = await conn.query(
+          `UPDATE vales_prestamo_detalle SET articulo_id = ? WHERE articulo_id = ?`,
+          [master.id, dup.id]
+        );
+        referenciasReasignadas += Number(updArt?.affectedRows || 0);
+        await conn.query(
+          `UPDATE vales_prestamo_detalle SET inventario_id = ? WHERE inventario_id = ?`,
+          [master.id, dup.id]
+        ).catch(() => {});
+
+        await conn.query(`DELETE FROM inventario_oficina WHERE id = ?`, [dup.id]);
+        duplicadosEliminados++;
+      }
+
+      const cleanClave = /^MOB-\d{3}$/.test(baseKey) ? baseKey : String(master.clave_bien || baseKey).trim();
+      await conn.query(
+        `UPDATE inventario_oficina
+         SET oficina_id = ?,
+             es_bodega_delegacion = 1,
+             clave_bien = ?
+         WHERE id = ?`,
+        [rmOfiId, cleanClave, master.id]
+      );
+      master.oficina_id = rmOfiId;
+      master.es_bodega_delegacion = 1;
+      master.clave_bien = cleanClave;
+    }
+
+    // Asegurar que los 22 artículos del catálogo oficial de Jesús existan en RM (Recursos Materiales)
+    for (const catItem of CATALOGO_LAPAZ_JESUS) {
+      if (!masterByKey.has(catItem.clave)) {
+        const [insMaster] = await conn.query(
+          `INSERT INTO inventario_oficina
+             (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas,
+              unidad, cantidad_propia, cantidad_disponible, cantidad_prestada_recibida, cantidad_prestada_enviada,
+              estado_fisico, estatus_uso, es_bodega_delegacion, origen_adquisicion)
+           VALUES (?, 3, ?, ?, 'S/M', 'S/N', 'PIEZA', ?, ?, 0, 0, 'BUENO', 'ACTIVO', 1, 'COMPRA_DELEGACION')`,
+          [rmOfiId, catItem.clave, catItem.descripcion, catItem.rm_def, catItem.rm_def]
+        );
+        masterByKey.set(catItem.clave, {
+          id: insMaster.insertId,
+          oficina_id: rmOfiId,
+          rubro_id: 3,
+          clave_bien: catItem.clave,
+          descripcion: catItem.descripcion,
+          cantidad_propia: catItem.rm_def,
+          cantidad_disponible: catItem.rm_def,
+          es_bodega_delegacion: 1,
+        });
+      }
+    }
+
+    // 3b. Deduplicar Coordinación Regional La Paz (es_bodega_delegacion = 0)
+    const coordMasterByKey = new Map();
+    for (const [baseKey, group] of coordGroups.entries()) {
+      group.sort((a, b) => Number(a.id) - Number(b.id));
+      const coordMaster = group[0];
+      coordMasterByKey.set(baseKey, coordMaster);
+      const rmMaster = masterByKey.get(baseKey);
+
+      // Si algún vale de préstamo apuntaba por error a un registro regional de Sandra, reasignarlo al maestro de RM
+      for (const r of group) {
+        if (rmMaster) {
+          const [updCoordRef] = await conn.query(
+            `UPDATE vales_prestamo_detalle SET articulo_id = ? WHERE articulo_id = ?`,
+            [rmMaster.id, r.id]
+          );
+          referenciasReasignadas += Number(updCoordRef?.affectedRows || 0);
+          await conn.query(
+            `UPDATE vales_prestamo_detalle SET inventario_id = ? WHERE inventario_id = ?`,
+            [rmMaster.id, r.id]
+          ).catch(() => {});
+        }
+      }
+
+      for (let i = 1; i < group.length; i++) {
+        const dup = group[i];
+        await conn.query(`DELETE FROM inventario_oficina WHERE id = ?`, [dup.id]);
+        duplicadosEliminados++;
+      }
+
+      const cleanClave = /^MOB-\d{3}$/.test(baseKey) ? baseKey : String(coordMaster.clave_bien || baseKey).trim();
+      await conn.query(
+        `UPDATE inventario_oficina
+         SET oficina_id = ?,
+             es_bodega_delegacion = 0,
+             clave_bien = ?,
+             cantidad_disponible = cantidad_propia
+         WHERE id = ?`,
+        [coordLaPazId, cleanClave, coordMaster.id]
+      );
+      coordMaster.oficina_id = coordLaPazId;
+      coordMaster.es_bodega_delegacion = 0;
+      coordMaster.clave_bien = cleanClave;
+    }
+
+    // 4. Asegurar existencias exactas de Sandra (ej. MOB-001 = 81) y de RM (ej. MOB-001 = 181 propias)
+    for (const catItem of CATALOGO_LAPAZ_JESUS) {
+      const rmMaster = masterByKey.get(catItem.clave);
+      let coordMaster = coordMasterByKey.get(catItem.clave);
+
+      if (catItem.sandra_def > 0 && !coordMaster) {
+        const [insCoordItem] = await conn.query(
+          `INSERT INTO inventario_oficina
+             (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas,
+              unidad, cantidad_propia, cantidad_disponible, cantidad_prestada_recibida, cantidad_prestada_enviada,
+              estado_fisico, estatus_uso, es_bodega_delegacion, origen_adquisicion, observaciones_control)
+           VALUES (?, 3, ?, ?, 'S/M', 'S/N', 'PIEZA', ?, ?, 0, 0, 'BUENO', 'ACTIVO', 0, 'COMPRA_DELEGACION', 'TRASPASO_DESDE_BODEGA_JESUS')`,
+          [coordLaPazId, catItem.clave, catItem.descripcion, catItem.sandra_def, catItem.sandra_def]
+        );
+        coordMaster = {
+          id: insCoordItem.insertId,
+          oficina_id: coordLaPazId,
+          clave_bien: catItem.clave,
+          descripcion: catItem.descripcion,
+          cantidad_propia: catItem.sandra_def,
+          cantidad_disponible: catItem.sandra_def,
+          es_bodega_delegacion: 0,
+        };
+        coordMasterByKey.set(catItem.clave, coordMaster);
+      }
+
+      const currentRmPropia = Number(rmMaster?.cantidad_propia || 0);
+      const currentCoordPropia = Number(coordMaster?.cantidad_propia || 0);
+      const sumLaPaz = currentRmPropia + currentCoordPropia;
+
+      // Si la suma de La Paz está desfasada respecto al total oficial (ej. por préstamos descontados de cantidad_propia o duplicados)
+      // o si se invocó explícitamente el endpoint de consolidación, ajustar a la distribución oficial (ej. 81 Regional + 181 RM = 262)
+      if (forceResetQuantities || sumLaPaz !== catItem.total_lapaz || (catItem.clave === "MOB-001" && currentCoordPropia === 81 && currentRmPropia !== 181)) {
+        const targetCoord = coordMaster
+          ? (forceResetQuantities ? catItem.sandra_def : (currentCoordPropia > 0 && currentCoordPropia <= catItem.total_lapaz ? currentCoordPropia : catItem.sandra_def))
+          : 0;
+        const targetRm = Math.max(0, catItem.total_lapaz - targetCoord);
+
+        if (coordMaster) {
+          await conn.query(
+            `UPDATE inventario_oficina
+             SET cantidad_propia = ?,
+                 cantidad_disponible = ?,
+                 es_bodega_delegacion = 0,
+                 oficina_id = ?
+             WHERE id = ?`,
+            [targetCoord, targetCoord, coordLaPazId, coordMaster.id]
+          );
+          coordMaster.cantidad_propia = targetCoord;
+          coordMaster.cantidad_disponible = targetCoord;
+        }
+        if (rmMaster) {
+          await conn.query(
+            `UPDATE inventario_oficina
+             SET cantidad_propia = ?,
+                 es_bodega_delegacion = 1,
+                 oficina_id = ?
+             WHERE id = ?`,
+            [targetRm, rmOfiId, rmMaster.id]
+          );
+          rmMaster.cantidad_propia = targetRm;
+        }
+      }
+    }
+
+    // 5. Vincular detalles de vales de rubro 3 a su registro maestro en RM y recalcular cantidad_disponible = GREATEST(0, cantidad_propia - prestado)
+    const [rmFinalRows] = await conn.query(
+      `SELECT id, clave_bien, descripcion, cantidad_propia
+       FROM inventario_oficina
+       WHERE rubro_id = 3 AND (oficina_id = ? OR es_bodega_delegacion = 1)
+       FOR UPDATE`,
+      [rmOfiId]
+    );
+
+    const resumenBodega = [];
+    for (const rmItem of rmFinalRows) {
+      // Asegurar que cualquier detalle de vale de rubro 3 que coincida en clave o descripción apunte a este ID maestro
+      const [updByClave] = await conn.query(
+        `UPDATE vales_prestamo_detalle vpd
+         INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+         SET vpd.articulo_id = ?
+         WHERE vp.rubro_id = 3
+           AND (
+             UPPER(TRIM(vpd.clave)) = UPPER(TRIM(?))
+             OR UPPER(TRIM(vpd.descripcion)) = UPPER(TRIM(?))
+           )
+           AND (vpd.articulo_id IS NULL OR vpd.articulo_id <> ?)`,
+        [rmItem.id, rmItem.clave_bien || "", rmItem.descripcion || "", rmItem.id]
+      );
+      referenciasReasignadas += Number(updByClave?.affectedRows || 0);
+
+      const [[prestRow]] = await conn.query(
+        `SELECT COALESCE(SUM(vpd.cantidad), 0) AS prestado
+         FROM vales_prestamo_detalle vpd
+         INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+         WHERE vpd.articulo_id = ?
+           AND COALESCE(vp.es_prueba, 0) = 0
+           AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')`,
+        [rmItem.id]
+      );
+      const prestado = Math.max(0, Number(prestRow?.prestado || 0));
+      const cantPropia = Math.max(0, Number(rmItem.cantidad_propia || 0));
+      const cantDisponible = Math.max(0, cantPropia - prestado);
+      const estatusUso = cantDisponible === 0 && cantPropia > 0 ? "PRESTADO" : "ACTIVO";
+
+      await conn.query(
+        `UPDATE inventario_oficina
+         SET oficina_id = ?,
+             es_bodega_delegacion = 1,
+             cantidad_disponible = ?,
+             cantidad_prestada_enviada = ?,
+             estatus_uso = ?
+         WHERE id = ?`,
+        [rmOfiId, cantDisponible, prestado, estatusUso, rmItem.id]
+      );
+
+      resumenBodega.push({
+        id: rmItem.id,
+        clave_bien: rmItem.clave_bien,
+        descripcion: rmItem.descripcion,
+        cantidad_propia: cantPropia,
+        prestado_activo: prestado,
+        cantidad_disponible: cantDisponible,
+      });
+    }
+
+    if (isPool) await conn.commit();
+    return {
+      ok: true,
+      rm_oficina_id: rmOfiId,
+      coord_lapaz_oficina_id: coordLaPazId,
+      duplicados_eliminados: duplicadosEliminados,
+      referencias_vales_reasignadas: referenciasReasignadas,
+      total_articulos_rm: resumenBodega.length,
+      sillas_grises_rm: resumenBodega.find((x) => x.clave_bien === "MOB-001") || null,
+      resumen_bodega: resumenBodega,
+    };
+  } catch (err) {
+    if (isPool) await conn.rollback().catch(() => {});
+    console.warn("[WARN] consolidarBodegaRMJesus:", err?.message || err);
+    return { ok: false, error: err?.message || String(err) };
+  } finally {
+    if (isPool && conn) conn.release();
+  }
+}
+
 let SCHEMA_MIGRATED = false;
 async function ensureSchemaAndUsers() {
   if (SCHEMA_MIGRATED) return true;
   if (!poolOps) return false;
   try {
+    // 0. Metadata del sistema y respaldo automático al cambiar de versión
+    await poolOps.query(`
+      CREATE TABLE IF NOT EXISTS sistema_metadata (
+        clave VARCHAR(50) PRIMARY KEY,
+        valor VARCHAR(255),
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `).catch(() => {});
+
+    let versionEnBd = null;
+    try {
+      const [[metaRow]] = await poolRead.query(
+        `SELECT valor FROM sistema_metadata WHERE clave = 'app_version' LIMIT 1`
+      );
+      versionEnBd = metaRow?.valor ? String(metaRow.valor).trim() : null;
+    } catch (_) {}
+
+    const NUEVA_VERSION_STR = "62";
+    if (!versionEnBd || versionEnBd !== NUEVA_VERSION_STR) {
+      try {
+        await crearRespaldoAutomaticoBD(versionEnBd || "pre62", NUEVA_VERSION_STR);
+      } catch (bErr) {
+        console.warn("[WARN] Error al crear respaldo automático por cambio de versión:", bErr?.message || bErr);
+      }
+      await poolOps.query(
+        `INSERT INTO sistema_metadata (clave, valor) VALUES ('app_version', ?)
+         ON DUPLICATE KEY UPDATE valor = ?`,
+        [NUEVA_VERSION_STR, NUEVA_VERSION_STR]
+      ).catch(() => {});
+    }
+
     // 1. Asegurar columnas rubro_id, region_id, oficina_id en tabla usuario
     const [uCols] = await poolRead.query(
       `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -999,17 +1663,107 @@ async function ensureSchemaAndUsers() {
     if (!uColNames.has("cargo")) {
       await poolOps.query(`ALTER TABLE usuario ADD COLUMN cargo VARCHAR(150) DEFAULT NULL`).catch(() => {});
     }
+    if (!uColNames.has("departamento_id")) {
+      await poolOps.query(`ALTER TABLE usuario ADD COLUMN departamento_id INT(11) DEFAULT NULL`).catch(() => {});
+    }
+    if (!uColNames.has("licencia")) {
+      await poolOps.query(`ALTER TABLE usuario ADD COLUMN licencia VARCHAR(100) DEFAULT NULL`).catch(() => {});
+    }
+    if (!uColNames.has("vigencia_licencia")) {
+      await poolOps.query(`ALTER TABLE usuario ADD COLUMN vigencia_licencia VARCHAR(50) DEFAULT NULL`).catch(() => {});
+    }
+    await poolOps.query(`ALTER TABLE usuarios ADD COLUMN cargo VARCHAR(150) DEFAULT NULL`).catch(() => {});
+    await poolOps.query(`ALTER TABLE usuarios ADD COLUMN licencia VARCHAR(100) DEFAULT NULL`).catch(() => {});
+    await poolOps.query(`ALTER TABLE usuarios ADD COLUMN vigencia_licencia VARCHAR(50) DEFAULT NULL`).catch(() => {});
     await poolOps.query(`ALTER TABLE usuario MODIFY COLUMN rol VARCHAR(50) NOT NULL DEFAULT 'USUARIO'`).catch(() => {});
     await poolOps.query(`ALTER TABLE oficialias MODIFY COLUMN oficial_reponsable VARCHAR(150) DEFAULT NULL`).catch(() => {});
 
-    // 1b. Actualizar Rubro 4 a TABLETS_STARLINKS (Tablets y Starlinks - Luis Eduardo)
+    // 1a-v60. Auto-reparación de usuarios con id <= 0 o id IS NULL (ej. Jefatura y RH) sin tocar psw, nombres ni roles
+    try {
+      const [zeroUsers] = await poolRead.query(
+        `SELECT username, ID_OFICIALIA FROM usuario WHERE id <= 0 OR id IS NULL ORDER BY username ASC`
+      ).catch(() => [[]]);
+
+      if (Array.isArray(zeroUsers) && zeroUsers.length > 0) {
+        const connFix = await poolOps.getConnection();
+        try {
+          await connFix.query(`SET FOREIGN_KEY_CHECKS = 0`).catch(() => {});
+          for (const zu of zeroUsers) {
+            const uname = String(zu.username || "").trim();
+            if (!uname) continue;
+            const [[maxRow]] = await connFix.query(
+              `SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM usuario WHERE id > 0`
+            );
+            const nextId = Number(maxRow?.nextId || 1);
+            await connFix.query(
+              `UPDATE usuario SET id = ? WHERE (id <= 0 OR id IS NULL) AND username = ? LIMIT 1`,
+              [nextId, uname]
+            );
+            await connFix.query(
+              `UPDATE usuarios SET id = ? WHERE (id <= 0 OR id IS NULL) AND username = ? LIMIT 1`,
+              [nextId, uname]
+            ).catch(() => {});
+          }
+        } finally {
+          await connFix.query(`SET FOREIGN_KEY_CHECKS = 1`).catch(() => {});
+          connFix.release();
+        }
+      }
+
+      // Reparar también en tabla espejo 'usuarios' si existiera algún registro rezagado con id <= 0
+      const [zeroMirror] = await poolRead.query(
+        `SELECT u2.username, u1.id AS main_id
+         FROM usuarios u2
+         LEFT JOIN usuario u1 ON LOWER(TRIM(u1.username)) = LOWER(TRIM(u2.username)) AND u1.id > 0
+         WHERE u2.id <= 0 OR u2.id IS NULL
+         ORDER BY u2.username ASC`
+      ).catch(() => [[]]);
+      if (Array.isArray(zeroMirror) && zeroMirror.length > 0) {
+        const connMir = await poolOps.getConnection();
+        try {
+          await connMir.query(`SET FOREIGN_KEY_CHECKS = 0`).catch(() => {});
+          for (const zm of zeroMirror) {
+            const uname = String(zm.username || "").trim();
+            if (!uname) continue;
+            let targetId = Number(zm.main_id || 0);
+            if (targetId <= 0) {
+              const [[mRow]] = await connMir.query(`SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM usuarios WHERE id > 0`);
+              targetId = Number(mRow?.nextId || 1);
+            }
+            await connMir.query(
+              `UPDATE usuarios SET id = ? WHERE (id <= 0 OR id IS NULL) AND username = ? LIMIT 1`,
+              [targetId, uname]
+            ).catch(() => {});
+          }
+        } finally {
+          await connMir.query(`SET FOREIGN_KEY_CHECKS = 1`).catch(() => {});
+          connMir.release();
+        }
+      }
+
+      // Intentar activar AUTO_INCREMENT en usuario.id de forma silenciosa y segura
+      await poolOps.query(`ALTER TABLE usuario MODIFY COLUMN id INT(11) NOT NULL AUTO_INCREMENT`).catch(() => {});
+    } catch (errFixId) {
+      console.warn("[v60] Aviso al auto-reparar IDs de usuarios:", errFixId?.message || errFixId);
+    }
+
+    // 1b. Asegurar Rubros base (Rubro 1: Archivos y Materiales, Rubro 4: Tablets y Starlinks) solo si no existen o faltan valores
     await poolOps.query(
       `UPDATE rubros_inventario
-       SET codigo = 'TABLETS_STARLINKS',
-           nombre_rubro = 'Tablets y Starlinks',
+       SET codigo = COALESCE(NULLIF(codigo, ''), 'ARCHIVO_MATERIALES'),
+           nombre_rubro = COALESCE(NULLIF(nombre_rubro, ''), 'Archivos y Materiales'),
+           encargado_nombre = COALESCE(NULLIF(encargado_nombre, ''), 'Gabriel Adán Fiol Collins'),
+           encargado_cargo = COALESCE(NULLIF(encargado_cargo, ''), 'Encargado de Archivos y Materiales')
+       WHERE id = 1 AND (encargado_nombre IS NULL OR TRIM(encargado_nombre) = '')`
+    ).catch(() => {});
+
+    await poolOps.query(
+      `UPDATE rubros_inventario
+       SET codigo = COALESCE(NULLIF(codigo, ''), 'TABLETS_STARLINKS'),
+           nombre_rubro = COALESCE(NULLIF(nombre_rubro, ''), 'Tablets y Starlinks'),
            encargado_nombre = 'Luis Eduardo Mayoral Geraldo',
-           encargado_cargo = 'Encargado de Tablets y Starlinks'
-       WHERE id = 4`
+           encargado_cargo = 'Encargado de Almacén'
+       WHERE id = 4 OR codigo IN ('TABLETS', 'TABLETS_STARLINKS')`
     ).catch(() => {});
 
     // 1c. Asegurar regiones base e IDs por clave
@@ -1037,12 +1791,12 @@ async function ensureSchemaAndUsers() {
       ).catch(() => {});
     }
 
-    // 1c-2. En la región de Los Cabos (LOS_CABOS), reemplazar cuarta oficina pendiente/genérica o insertar formalmente "SADER"
+    // 1c-2. En la región de Los Cabos (LOS_CABOS), reemplazar oficina pendiente/genérica o insertar formalmente "SADER"
     //       para que las 4 oficinas de Los Cabos sean Guaymitas, Cangrejos, PEC Caribe y SADER (además de su comodín S/A).
     await poolOps.query(
       `UPDATE oficinas_regionales
        SET nombre = 'SADER', municipio = 'San José del Cabo', activo = 1
-       WHERE region_id = ? AND (nombre LIKE '%Por definir%' OR nombre LIKE '%Oficina 2%' OR id = 3)`,
+       WHERE region_id = ? AND (nombre LIKE '%Por definir%' OR nombre LIKE '%Oficina 2%')`,
       [regLosCabosId]
     ).catch(() => {});
 
@@ -1067,7 +1821,7 @@ async function ensureSchemaAndUsers() {
     }
 
     // 1c-bis. Asegurar oficina comodín "S/A (Sin Asignar)" en La Paz y en cada una de las regiones foráneas
-    //         (LOS_CABOS, MULEGE y COMONDU_LORETO) para conservar la sumatoria regional.
+    //         (LOS_CABOS, MULEGE y COMONDU_LORETO) para conservar la sumatoria regional si no existen.
     const regionesSaConfig = [
       { region_id: regLaPazId, municipio: "La Paz" },
       { region_id: regLosCabosId, municipio: "Los Cabos" },
@@ -1085,15 +1839,10 @@ async function ensureSchemaAndUsers() {
            VALUES (?, ?, 'S/A (Sin Asignar)', 'Por asignar', 1)`,
           [saCfg.region_id, saCfg.municipio]
         ).catch(() => {});
-      } else {
-        await poolOps.query(
-          `UPDATE oficinas_regionales SET municipio = ?, activo = 1 WHERE id = ?`,
-          [saCfg.municipio, saRegRows[0].id]
-        ).catch(() => {});
       }
     }
 
-    // 1c-ter. Asegurar oficina "Coordinación Regional La Paz" y "RM (Recursos Materiales)" en La Paz
+    // 1c-ter. Asegurar oficina "Coordinación Regional La Paz" y "RM (Recursos Materiales)" en La Paz si no existen
     const [cRegLp] = await poolRead.query(
       `SELECT id FROM oficinas_regionales WHERE region_id = ? AND (nombre = 'Coordinación Regional La Paz' OR nombre = 'Coordinacion Regional La Paz' OR nombre LIKE '%Coordinación Regional%') LIMIT 1`,
       [regLaPazId]
@@ -1103,11 +1852,6 @@ async function ensureSchemaAndUsers() {
         `INSERT INTO oficinas_regionales (region_id, municipio, nombre, responsable_oficina, activo)
          VALUES (?, 'La Paz', 'Coordinación Regional La Paz', 'Sandra Gpe. Salvatierra Amador', 1)`,
         [regLaPazId]
-      ).catch(() => {});
-    } else {
-      await poolOps.query(
-        `UPDATE oficinas_regionales SET nombre = 'Coordinación Regional La Paz', responsable_oficina = 'Sandra Gpe. Salvatierra Amador', municipio = 'La Paz', activo = 1 WHERE id = ?`,
-        [cRegLp[0].id]
       ).catch(() => {});
     }
 
@@ -1120,11 +1864,6 @@ async function ensureSchemaAndUsers() {
         `INSERT INTO oficinas_regionales (region_id, municipio, nombre, responsable_oficina, activo)
          VALUES (?, 'La Paz', 'RM (Recursos Materiales)', 'Jorge Luis Patrón Murillo', 1)`,
         [regLaPazId]
-      ).catch(() => {});
-    } else {
-      await poolOps.query(
-        `UPDATE oficinas_regionales SET nombre = 'RM (Recursos Materiales)', responsable_oficina = 'Jorge Luis Patrón Murillo', municipio = 'La Paz', activo = 1 WHERE id = ?`,
-        [rmOfi[0].id]
       ).catch(() => {});
     }
 
@@ -1211,6 +1950,50 @@ async function ensureSchemaAndUsers() {
       await poolOps.query(`ALTER TABLE inventario_oficina ADD COLUMN municipio VARCHAR(100) DEFAULT NULL`).catch(() => {});
     }
 
+    // v59: Garantizar que estado_fisico y estatus_uso en inventario_oficina soporten estatus largos (SINIESTRO / EN ASEGURADORA)
+    try {
+      const [statusColMeta] = await poolRead.query(
+        `SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+         FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'inventario_oficina'
+           AND LOWER(COLUMN_NAME) IN ('estatus_uso', 'estado_fisico')`,
+        [DB_NAME]
+      );
+      for (const sc of statusColMeta || []) {
+        const dt = String(sc.DATA_TYPE || "").toLowerCase();
+        const maxLen = Number(sc.CHARACTER_MAXIMUM_LENGTH || 0);
+        if (dt === "enum" || maxLen < 60) {
+          const defVal = String(sc.COLUMN_NAME).toLowerCase() === "estado_fisico" ? "BUENO" : "ACTIVO";
+          await poolOps.query(
+            `ALTER TABLE inventario_oficina MODIFY COLUMN ${qi(sc.COLUMN_NAME)} VARCHAR(80) NOT NULL DEFAULT ?`,
+            [defVal]
+          ).catch(() => {});
+        }
+      }
+    } catch (_) {}
+
+    // v47: Eliminar cualquier índice UNIQUE global únicamente sobre clave_bien en inventario_oficina
+    // para permitir que distintas oficinas compartan la misma clave de catálogo (ej. MOB-001 en La Paz y MOB-001 en S/A o Comondú)
+    try {
+      const [idxRows] = await poolOps.query(
+        `SELECT INDEX_NAME, GROUP_CONCAT( LOWER(COLUMN_NAME) ORDER BY SEQ_IN_INDEX SEPARATOR ',' ) AS cols
+         FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'inventario_oficina' AND NON_UNIQUE = 0 AND INDEX_NAME <> 'PRIMARY'
+         GROUP BY INDEX_NAME`,
+        [DB_NAME]
+      );
+      for (const idx of idxRows || []) {
+        const idxName = String(idx.INDEX_NAME || "").trim();
+        const cols = String(idx.cols || "").trim();
+        if (idxName && (cols === "clave_bien" || (!cols.includes("oficina_id") && cols.includes("clave_bien")))) {
+          await poolOps.query(`ALTER TABLE inventario_oficina DROP INDEX \`${idxName.replace(/`/g, "")}\``).catch(() => {});
+          console.log(`[v47] Índice único global '${idxName}' eliminado de inventario_oficina.`);
+        }
+      }
+    } catch (errIdx) {
+      console.warn("[v47] Aviso al verificar índices de inventario_oficina:", errIdx.message);
+    }
+
     // 1e. Asegurar oficialías para todos los departamentos y enlaces regionales si no existen
     const oficialiasToEnsure = [
       { id: 30030001, nombre: "Recursos Materiales", responsable: "Jorge Luis Patrón Murillo" },
@@ -1220,26 +2003,27 @@ async function ensureSchemaAndUsers() {
       { id: 30030005, nombre: "Salud Casa por Casa", responsable: "Juan Carlos Cuadros Espinoza" },
       { id: 30030006, nombre: "Comunicación Social", responsable: "Ericka Peralta Preciado" },
       { id: 30030007, nombre: "Programa de Adulto Mayor", responsable: "Elizabeth González Wendy" },
-      { id: 30030008, nombre: "Encargado de Inventario", responsable: "Gabriel Adan Fiol Collins" },
-      { id: 30030009, nombre: "Enlace Regional Los Cabos", responsable: "Enlace Regional Los Cabos" },
-      { id: 30030010, nombre: "Enlace Regional Mulegé", responsable: "Diana Ramirez Hernandez" },
-      { id: 30030011, nombre: "Enlace Regional Comondú / Loreto", responsable: "Enlace Regional Comondú / Loreto" },
+      { id: 30030008, nombre: "Encargado de Archivos y Materiales", responsable: "Gabriel Adán Fiol Collins" },
+      { id: 30030009, nombre: "Enlace Regional Los Cabos", responsable: "Samir Savin Ruiz" },
+      { id: 30030010, nombre: "Enlace Regional Mulegé", responsable: "Diana Ramírez Hernández" },
+      { id: 30030011, nombre: "Enlace Regional Comondú / Loreto", responsable: "Humberto Arce Cordero" },
       { id: 30030012, nombre: "Asuntos Jurídicos", responsable: "Mayra Cruz Salazar Escobosa" },
       { id: 30030013, nombre: "Jóvenes Construyendo el Futuro", responsable: "Juan Daniel Carrera Villaseca" },
       { id: 30030014, nombre: "Programa de Discapacidad", responsable: "Olga Camarillo Martínez" },
       { id: 30030015, nombre: "Dirección Regional La Paz", responsable: "Sandra Guadalupe Salvatierra Amador" },
     ];
     for (const ofi of oficialiasToEnsure) {
-      await poolOps.query(
-        `INSERT INTO oficialias (id, id_tipo_oficialia, id_municipio, id_localidad, nombre, activo, oficial_reponsable, id_oficialia)
-         VALUES (?, 0, 0, 0, ?, b'1', ?, ?)
-         ON DUPLICATE KEY UPDATE
-           nombre = VALUES(nombre),
-           activo = b'1',
-           oficial_reponsable = VALUES(oficial_reponsable),
-           id_oficialia = VALUES(id_oficialia)`,
-        [ofi.id, ofi.nombre, ofi.responsable, ofi.id]
-      ).catch(() => {});
+      const [ofiExists] = await poolRead.query(
+        `SELECT id FROM oficialias WHERE id = ? LIMIT 1`,
+        [ofi.id]
+      ).catch(() => [[]]);
+      if (!ofiExists.length) {
+        await poolOps.query(
+          `INSERT INTO oficialias (id, id_tipo_oficialia, id_municipio, id_localidad, nombre, activo, oficial_reponsable, id_oficialia)
+           VALUES (?, 0, 0, 0, ?, b'1', ?, ?)`,
+          [ofi.id, ofi.nombre, ofi.responsable, ofi.id]
+        ).catch(() => {});
+      }
     }
 
     // 2. Asegurar columnas de firma digital regional en tabla solicitudes
@@ -1253,17 +2037,37 @@ async function ensureSchemaAndUsers() {
       { name: "region_solicitante", ddl: "VARCHAR(50) DEFAULT NULL" },
       { name: "nombre_solicitante_firma", ddl: "VARCHAR(150) DEFAULT NULL" },
       { name: "firma_solicitante_data", ddl: "LONGTEXT DEFAULT NULL" },
+      { name: "firma_solicitante", ddl: "LONGTEXT DEFAULT NULL" },
       { name: "fecha_firma_digital", ddl: "DATETIME DEFAULT NULL" },
       { name: "folio_firma_digital", ddl: "VARCHAR(80) DEFAULT NULL" },
       { name: "archivo_respaldo", ddl: "VARCHAR(255) DEFAULT NULL" },
+      { name: "es_prueba", ddl: "TINYINT(1) NOT NULL DEFAULT 0" },
+      { name: "inventario_descontado", ddl: "TINYINT(1) NOT NULL DEFAULT 0" },
     ];
     for (const col of requiredSolCols) {
       if (!sColNames.has(col.name)) {
         await poolOps.query(`ALTER TABLE solicitudes ADD COLUMN ${qi(col.name)} ${col.ddl}`).catch(() => {});
       }
     }
+    await poolOps.query(
+      `ALTER TABLE solicitudes MODIFY COLUMN status VARCHAR(40) NOT NULL DEFAULT 'PENDIENTE'`
+    ).catch(() => {});
+    STATUS_ENUM_CACHE = null;
 
-    // 3. Crear o vincular los 4 usuarios encargados de Inventario Regional (contraseña inicial: secreta123)
+    // v61: Asegurar columna cantidad_surtida en detalles_solicitud
+    const [dsCols] = await poolRead.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'detalles_solicitud'`,
+      [DB_NAME]
+    ).catch(() => [[]]);
+    const dsColNames = new Set(dsCols.map((c) => String(c.COLUMN_NAME || "").toLowerCase()));
+    if (!dsColNames.has("cantidad_surtida")) {
+      await poolOps.query(
+        `ALTER TABLE detalles_solicitud ADD COLUMN cantidad_surtida INT NULL DEFAULT NULL`
+      ).catch(() => {});
+    }
+
+    // 3. Crear los 4 usuarios encargados de Inventario Regional SOLO si no existen (Single Source of Truth)
     const defaultHash = await bcrypt.hash("secreta123", 10);
     const encargadosToEnsure = [
       REGIONAL_ENCARGADOS_MAP.gabrielfiol,
@@ -1277,46 +2081,18 @@ async function ensureSchemaAndUsers() {
         `SELECT id, username, psw, rubro_id FROM usuario WHERE username = ? LIMIT 1`,
         [enc.username]
       );
-      if (existing.length) {
-        const row = existing[0];
-        const hasValidPass = row.psw && String(row.psw).trim().length > 0;
-        await poolOps.query(
-          `UPDATE usuario
-           SET nombre = COALESCE(NULLIF(nombre, ''), ?),
-               PRIMER_APELLIDO = COALESCE(NULLIF(PRIMER_APELLIDO, ''), ?),
-               SEGUNDO_APELLIDO = COALESCE(NULLIF(SEGUNDO_APELLIDO, ''), ?),
-               ID_OFICIALIA = COALESCE(ID_OFICIALIA, ?),
-               OFICIALIA_ID = COALESCE(OFICIALIA_ID, ?),
-               ACTIVO = b'1',
-               rol = 'ENCARGADO',
-               departamento = COALESCE(NULLIF(departamento, ''), ?),
-               rubro_id = ?,
-               psw = ?
-           WHERE id = ?`,
-          [
-            enc.nombre,
-            enc.primer_ap,
-            enc.segundo_ap,
-            enc.id_oficialia,
-            enc.id_oficialia,
-            enc.departamento,
-            enc.rubro_id,
-            hasValidPass ? row.psw : defaultHash,
-            row.id,
-          ]
-        ).catch(() => {});
-      } else {
+      if (!existing.length) {
         // Calcular un ID libre si enc.id estuviera ocupado por otro usuario
         const [idCheck] = await poolRead.query(`SELECT id FROM usuario WHERE id = ? LIMIT 1`, [enc.id]);
-        let targetId = enc.id;
-        if (idCheck.length) {
-          const [[maxRow]] = await poolRead.query(`SELECT COALESCE(MAX(id), 10) + 1 AS next_id FROM usuario`);
-          targetId = Number(maxRow?.next_id || 10);
+        let targetId = Number(enc.id) > 0 ? Number(enc.id) : 0;
+        if (idCheck.length || targetId <= 0) {
+          const [[maxRow]] = await poolRead.query(`SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM usuario WHERE id > 0`);
+          targetId = Number(maxRow?.nextId || 10);
         }
         await poolOps.query(
-          `INSERT INTO usuario
-             (id, username, psw, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, ACTIVO, rol, FECHA_ALTA, departamento, rubro_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, b'1', 'ENCARGADO', NOW(), ?, ?)`,
+          `INSERT IGNORE INTO usuario
+             (id, username, psw, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, ACTIVO, rol, FECHA_ALTA, departamento, cargo, rubro_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, b'1', 'ENCARGADO', NOW(), ?, ?, ?)`,
           [
             targetId,
             enc.username,
@@ -1327,14 +2103,50 @@ async function ensureSchemaAndUsers() {
             enc.id_oficialia,
             enc.id_oficialia,
             enc.departamento,
+            enc.cargo || enc.departamento,
             enc.rubro_id,
           ]
         ).catch(() => {});
       }
     }
 
-    // Vincular también usuario 'encargado' si existe con rubro_id = 1
-    await poolOps.query(`UPDATE usuario SET rubro_id = 1 WHERE username = 'encargado' AND rubro_id IS NULL`).catch(() => {});
+    // Asegurar departamento y oficialía de Encargado de Archivos y Materiales si no existe
+    const [ofiFiolRows] = await poolRead.query(`SELECT id FROM oficialias WHERE id = 30030008 LIMIT 1`).catch(() => [[]]);
+    if (!ofiFiolRows.length) {
+      await poolOps.query(
+        `INSERT INTO oficialias (id, id_tipo_oficialia, id_municipio, id_localidad, nombre, activo, oficial_reponsable, id_oficialia)
+         VALUES (30030008, 0, 0, 0, 'Encargado de Archivos y Materiales', b'1', 'Gabriel Adán Fiol Collins', 30030008)`
+      ).catch(() => {});
+    }
+
+    await poolOps.query(
+      `CREATE TABLE IF NOT EXISTS departamentos (
+        id INT(11) NOT NULL PRIMARY KEY,
+        nombre VARCHAR(150) NOT NULL,
+        responsable VARCHAR(150) DEFAULT NULL,
+        activo TINYINT(1) DEFAULT 1
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    ).catch(() => {});
+
+    const [deptoFiolRows] = await poolRead.query(`SELECT id FROM departamentos WHERE id = 30030008 LIMIT 1`).catch(() => [[]]);
+    if (!deptoFiolRows.length) {
+      await poolOps.query(
+        `INSERT INTO departamentos (id, nombre, responsable)
+         VALUES (30030008, 'Encargado de Archivos y Materiales', 'Gabriel Adán Fiol Collins')`
+      ).catch(() => {});
+    }
+
+    // Vincular oficialía inicial de Gabriel Fiol SOLO si no tiene ninguna asignada
+    await poolOps.query(
+      `UPDATE usuario
+       SET ID_OFICIALIA = 30030008,
+           OFICIALIA_ID = 30030008,
+           departamento_id = COALESCE(departamento_id, 30030008),
+           departamento = COALESCE(NULLIF(departamento, ''), 'Encargado de Archivos y Materiales'),
+           cargo = COALESCE(NULLIF(cargo, ''), 'Encargado de Archivos y Materiales'),
+           rubro_id = COALESCE(rubro_id, 1)
+       WHERE username IN ('gabrielfiol', 'fiol', 'encargado') AND (ID_OFICIALIA IS NULL OR ID_OFICIALIA = 0)`
+    ).catch(() => {});
 
     // 4. Asegurar usuarios regionales de prueba: 'loscabos' y 'mulege' (contraseña inicial: secreta123)
     const [[regLosCabos]] = await poolRead.query(`SELECT id FROM regiones WHERE clave = 'LOS_CABOS' LIMIT 1`).catch(() => [[{ id: 2 }]]);
@@ -1346,22 +2158,24 @@ async function ensureSchemaAndUsers() {
       {
         id: 8,
         username: "loscabos",
-        nombre: "Enlace Regional",
-        primer_ap: "Los Cabos",
-        segundo_ap: "",
+        nombre: "Samir",
+        primer_ap: "Savin",
+        segundo_ap: "Ruiz",
         id_oficialia: 30030009,
         departamento: "Enlace Regional Los Cabos",
+        cargo: "Director Regional",
         region_id: regLosCabos?.id || 2,
         oficina_id: ofiLosCabos?.id || 2,
       },
       {
         id: 9,
         username: "mulege",
-        nombre: "Diana Ramirez Hernandez",
-        primer_ap: "Ramirez",
-        segundo_ap: "Hernandez",
+        nombre: "Diana",
+        primer_ap: "Ramírez",
+        segundo_ap: "Hernández",
         id_oficialia: 30030010,
         departamento: "Enlace Regional Mulegé",
+        cargo: "Director Regional",
         region_id: regMulege?.id || 4,
         oficina_id: ofiMulege?.id || 9,
       },
@@ -1369,47 +2183,17 @@ async function ensureSchemaAndUsers() {
 
     for (const enl of enlacesToEnsure) {
       const [existingEnl] = await poolRead.query(`SELECT id, username, psw, region_id FROM usuario WHERE username = ? LIMIT 1`, [enl.username]);
-      if (existingEnl.length) {
-        const row = existingEnl[0];
-        const hasValidPass = row.psw && String(row.psw).trim().length > 0;
-        await poolOps.query(
-          `UPDATE usuario
-           SET nombre = ?,
-               PRIMER_APELLIDO = ?,
-               SEGUNDO_APELLIDO = ?,
-               ID_OFICIALIA = ?,
-               OFICIALIA_ID = ?,
-               ACTIVO = b'1',
-               rol = 'USUARIO',
-               departamento = ?,
-               region_id = ?,
-               oficina_id = ?,
-               psw = ?
-           WHERE id = ?`,
-          [
-            enl.nombre,
-            enl.primer_ap,
-            enl.segundo_ap,
-            enl.id_oficialia,
-            enl.id_oficialia,
-            enl.departamento,
-            enl.region_id,
-            enl.oficina_id,
-            hasValidPass ? row.psw : defaultHash,
-            row.id,
-          ]
-        ).catch(() => {});
-      } else {
+      if (!existingEnl.length) {
         const [idCheck] = await poolRead.query(`SELECT id FROM usuario WHERE id = ? LIMIT 1`, [enl.id]);
-        let targetId = enl.id;
-        if (idCheck.length) {
-          const [[maxRow]] = await poolRead.query(`SELECT COALESCE(MAX(id), 12) + 1 AS next_id FROM usuario`);
-          targetId = Number(maxRow?.next_id || 12);
+        let targetId = Number(enl.id) > 0 ? Number(enl.id) : 0;
+        if (idCheck.length || targetId <= 0) {
+          const [[maxRow]] = await poolRead.query(`SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM usuario WHERE id > 0`);
+          targetId = Number(maxRow?.nextId || 12);
         }
         await poolOps.query(
-          `INSERT INTO usuario
-             (id, username, psw, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, ACTIVO, rol, FECHA_ALTA, departamento, rubro_id, region_id, oficina_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, b'1', 'USUARIO', NOW(), ?, NULL, ?, ?)`,
+          `INSERT IGNORE INTO usuario
+             (id, username, psw, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, ACTIVO, rol, FECHA_ALTA, departamento, cargo, rubro_id, region_id, oficina_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, b'1', 'USUARIO', NOW(), ?, ?, NULL, ?, ?)`,
           [
             targetId,
             enl.username,
@@ -1420,6 +2204,7 @@ async function ensureSchemaAndUsers() {
             enl.id_oficialia,
             enl.id_oficialia,
             enl.departamento,
+            enl.cargo || "Director Regional",
             enl.region_id,
             enl.oficina_id,
           ]
@@ -1427,58 +2212,85 @@ async function ensureSchemaAndUsers() {
       }
     }
 
-    // 5. Garantizar que todos los usuarios tengan su departamento/oficialía asignado en la BD
+    // 5. Garantizar que todos los usuarios tengan su departamento/oficialía asignado SOLO si no tienen ninguno
     await poolOps.query(
       `UPDATE usuario
-       SET ID_OFICIALIA = 30030009, OFICIALIA_ID = 30030009, departamento = 'Enlace Regional Los Cabos'
+       SET ID_OFICIALIA = 30030009, OFICIALIA_ID = 30030009,
+           departamento = COALESCE(NULLIF(departamento, ''), 'Enlace Regional Los Cabos')
        WHERE (username = 'loscabos' OR region_id = 2) AND (ID_OFICIALIA IS NULL OR ID_OFICIALIA = 0)`
     ).catch(() => {});
 
     await poolOps.query(
       `UPDATE usuario
-       SET ID_OFICIALIA = 30030010, OFICIALIA_ID = 30030010, departamento = 'Enlace Regional Mulegé'
+       SET ID_OFICIALIA = 30030010, OFICIALIA_ID = 30030010,
+           departamento = COALESCE(NULLIF(departamento, ''), 'Enlace Regional Mulegé')
        WHERE (username = 'mulege' OR region_id = 4) AND (ID_OFICIALIA IS NULL OR ID_OFICIALIA = 0)`
     ).catch(() => {});
 
-    // Asegurar formalización de Diana Ramirez Hernandez como enlace regional de Mulegé en usuario, oficialias y regiones
     await poolOps.query(
       `UPDATE usuario
-       SET nombre = 'Diana Ramirez Hernandez', PRIMER_APELLIDO = 'Ramirez', SEGUNDO_APELLIDO = 'Hernandez'
-       WHERE username = 'mulege'`
-    ).catch(() => {});
-
-    await poolOps.query(
-      `UPDATE oficialias
-       SET oficial_reponsable = 'Diana Ramirez Hernandez'
-       WHERE id = 30030010`
-    ).catch(() => {});
-
-    await poolOps.query(
-      `UPDATE regiones
-       SET responsable_regional = 'Diana Ramirez Hernandez'
-       WHERE clave = 'MULEGE' OR id = 4`
-    ).catch(() => {});
-
-    await poolOps.query(
-      `UPDATE usuario
-       SET ID_OFICIALIA = 30030011, OFICIALIA_ID = 30030011, departamento = 'Enlace Regional Comondú / Loreto'
+       SET ID_OFICIALIA = 30030011, OFICIALIA_ID = 30030011,
+           departamento = COALESCE(NULLIF(departamento, ''), 'Enlace Regional Comondú / Loreto')
        WHERE region_id = 3 AND (ID_OFICIALIA IS NULL OR ID_OFICIALIA = 0)`
     ).catch(() => {});
 
     await poolOps.query(
       `UPDATE usuario
-       SET ID_OFICIALIA = 30030001, OFICIALIA_ID = 30030001, departamento = 'Recursos Materiales'
+       SET ID_OFICIALIA = 30030001, OFICIALIA_ID = 30030001,
+           departamento = COALESCE(NULLIF(departamento, ''), 'Recursos Materiales')
        WHERE username IN ('evelia', 'jesus', 'luiseduardo') AND (ID_OFICIALIA IS NULL OR ID_OFICIALIA = 0)`
+    ).catch(() => {});
+
+    // v59: Actualizar únicamente nombres oficiales en BD (SIN modificar psw/contraseñas ni ACTIVO)
+    await poolOps.query(
+      `UPDATE usuario
+       SET nombre = 'Gabriel Adán', PRIMER_APELLIDO = 'Fiol', SEGUNDO_APELLIDO = 'Collins'
+       WHERE username IN ('gabrielfiol', 'fiol')`
     ).catch(() => {});
 
     await poolOps.query(
       `UPDATE usuario
-       SET ID_OFICIALIA = 30030001, OFICIALIA_ID = 30030001, departamento = 'Recursos Materiales'
-       WHERE (ID_OFICIALIA IS NULL OR ID_OFICIALIA = 0) AND username NOT IN ('rodrigo')`
+       SET nombre = 'Samir', PRIMER_APELLIDO = 'Savin', SEGUNDO_APELLIDO = 'Ruiz'
+       WHERE username = 'loscabos'`
     ).catch(() => {});
 
+    await poolOps.query(
+      `UPDATE usuario
+       SET nombre = 'Humberto', PRIMER_APELLIDO = 'Arce', SEGUNDO_APELLIDO = 'Cordero'
+       WHERE username = 'comondu'`
+    ).catch(() => {});
+
+    await poolOps.query(
+      `UPDATE usuario
+       SET nombre = 'Diana', PRIMER_APELLIDO = 'Ramírez', SEGUNDO_APELLIDO = 'Hernández'
+       WHERE username IN ('mulege', 'guerreronegro')`
+    ).catch(() => {});
+
+    await poolOps.query(`UPDATE oficialias SET oficial_reponsable = 'Gabriel Adán Fiol Collins' WHERE id = 30030008`).catch(() => {});
+    await poolOps.query(`UPDATE departamentos SET responsable = 'Gabriel Adán Fiol Collins' WHERE id = 30030008`).catch(() => {});
+
+    const titularesRegV59 = [
+      { clave: "LOS_CABOS", regId: regLosCabosId, ofiId: 30030009, nombre: "Samir Savin Ruiz" },
+      { clave: "COMONDU_LORETO", regId: regComonduId, ofiId: 30030011, nombre: "Humberto Arce Cordero" },
+      { clave: "MULEGE", regId: regMulegeId, ofiId: 30030010, nombre: "Diana Ramírez Hernández" },
+    ];
+    for (const tr of titularesRegV59) {
+      await poolOps.query(
+        `UPDATE regiones SET responsable_regional = ? WHERE clave = ? OR id = ?`,
+        [tr.nombre, tr.clave, tr.regId]
+      ).catch(() => {});
+      await poolOps.query(
+        `UPDATE oficialias SET oficial_reponsable = ? WHERE id = ?`,
+        [tr.nombre, tr.ofiId]
+      ).catch(() => {});
+      await poolOps.query(
+        `UPDATE departamentos SET responsable = ? WHERE id = ?`,
+        [tr.nombre, tr.ofiId]
+      ).catch(() => {});
+    }
+
     // 5b. Asegurar usuarios Rodrigo Molina Cosio ('rodrigo') y Jorge Luis Patrón Murillo ('jorge')
-    //     con contraseña inicial homologada ('secreta123' encriptada con bcrypt, igual que los demás encargados)
+    //     SOLO si no existen en la BD
     const directivosEstatalToEnsure = [
       {
         username: "rodrigo",
@@ -1495,8 +2307,8 @@ async function ensureSchemaAndUsers() {
         primer_ap: "Patrón",
         segundo_ap: "Murillo",
         id_oficialia: 30030001,
-        departamento: "Encargado de Recursos Materiales",
-        cargo: "Encargado de Recursos Materiales",
+        departamento: "Coordinador Operativo de Recursos Materiales",
+        cargo: "Coordinador Operativo de Recursos Materiales",
       },
     ];
 
@@ -1506,61 +2318,11 @@ async function ensureSchemaAndUsers() {
         [dir.username]
       ).catch(() => [[]]);
 
-      if (existingDir && existingDir.length) {
+      if (!existingDir || !existingDir.length) {
+        const [[maxRow]] = await poolRead.query(`SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM usuario WHERE id > 0`).catch(() => [[{ nextId: 11 }]]);
+        const nextId = Number(maxRow?.nextId || 11);
         await poolOps.query(
-          `UPDATE usuario
-           SET nombre = ?,
-               PRIMER_APELLIDO = ?,
-               SEGUNDO_APELLIDO = ?,
-               ID_OFICIALIA = COALESCE(ID_OFICIALIA, ?),
-               OFICIALIA_ID = COALESCE(OFICIALIA_ID, ?),
-               ACTIVO = b'1',
-               rol = 'ENCARGADO',
-               departamento = ?,
-               cargo = ?,
-               psw = ?
-           WHERE username = ?`,
-          [
-            dir.nombre,
-            dir.primer_ap,
-            dir.segundo_ap,
-            dir.id_oficialia,
-            dir.id_oficialia,
-            dir.departamento,
-            dir.cargo,
-            defaultHash,
-            dir.username,
-          ]
-        ).catch(async () => {
-          await poolOps.query(
-            `UPDATE usuario
-             SET nombre = ?,
-                 PRIMER_APELLIDO = ?,
-                 SEGUNDO_APELLIDO = ?,
-                 ID_OFICIALIA = COALESCE(ID_OFICIALIA, ?),
-                 OFICIALIA_ID = COALESCE(OFICIALIA_ID, ?),
-                 ACTIVO = b'1',
-                 rol = 'ENCARGADO',
-                 departamento = ?,
-                 psw = ?
-             WHERE username = ?`,
-            [
-              dir.nombre,
-              dir.primer_ap,
-              dir.segundo_ap,
-              dir.id_oficialia,
-              dir.id_oficialia,
-              dir.departamento,
-              defaultHash,
-              dir.username,
-            ]
-          ).catch(() => {});
-        });
-      } else {
-        const [[maxRow]] = await poolRead.query(`SELECT COALESCE(MAX(id), 10) + 1 AS next_id FROM usuario`).catch(() => [[{ next_id: 11 }]]);
-        const nextId = Number(maxRow?.next_id || 11);
-        await poolOps.query(
-          `INSERT INTO usuario
+          `INSERT IGNORE INTO usuario
              (id, username, psw, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, ACTIVO, rol, FECHA_ALTA, departamento, cargo)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, b'1', 'ENCARGADO', NOW(), ?, ?)`,
           [
@@ -1575,55 +2337,25 @@ async function ensureSchemaAndUsers() {
             dir.departamento,
             dir.cargo,
           ]
-        ).catch(async () => {
-          await poolOps.query(
-            `INSERT INTO usuario
-               (id, username, psw, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, ACTIVO, rol, FECHA_ALTA, departamento)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, b'1', 'ENCARGADO', NOW(), ?)`,
-            [
-              nextId,
-              dir.username,
-              defaultHash,
-              dir.nombre,
-              dir.primer_ap,
-              dir.segundo_ap,
-              dir.id_oficialia,
-              dir.id_oficialia,
-              dir.departamento,
-            ]
-          ).catch(() => {});
-        });
+        ).catch(() => {});
       }
     }
 
-    // Actualización explícita del cargo y departamento de Rodrigo Molina Cosio
+    // v58: Rellenar cargo oficial SOLO si está vacío o obsoleto, sin tocar nombre, contraseña (psw) ni estado activo
     await poolOps.query(
-      `UPDATE usuario 
-       SET departamento = 'Enlace del programa \\'La Clínica es Nuestra\\'', 
-           cargo = 'Enlace del programa \\'La Clínica es Nuestra\\'' 
-       WHERE username = 'rodrigo'`
-    ).catch(async () => {
-      await poolOps.query(
-        `UPDATE usuario 
-         SET departamento = 'Enlace del programa \\'La Clínica es Nuestra\\'' 
-         WHERE username = 'rodrigo'`
-      ).catch(() => {});
-    });
-
+      `UPDATE usuario
+       SET cargo = 'Coordinador Operativo de Recursos Materiales'
+       WHERE (LOWER(TRIM(username)) IN ('jorge', 'jorgepatron'))
+         AND (cargo IS NULL OR TRIM(cargo) = '' OR cargo LIKE '%Coordinación%')`
+    ).catch(() => {});
     await poolOps.query(
-      `UPDATE usuarios 
-       SET departamento = 'Enlace del programa \\'La Clínica es Nuestra\\'', 
-           cargo = 'Enlace del programa \\'La Clínica es Nuestra\\'' 
-       WHERE username = 'rodrigo'`
-    ).catch(async () => {
-      await poolOps.query(
-        `UPDATE usuarios 
-         SET departamento = 'Enlace del programa \\'La Clínica es Nuestra\\'' 
-         WHERE username = 'rodrigo'`
-      ).catch(() => {});
-    });
+      `UPDATE usuario
+       SET cargo = 'Encargado de Almacén'
+       WHERE LOWER(TRIM(username)) IN ('luismayoral', 'luiseduardo', 'luis')
+         AND (cargo IS NULL OR TRIM(cargo) = '' OR cargo LIKE '%Tablets%')`
+    ).catch(() => {});
 
-    // 5c. Creación de usuarios faltantes (Región Comondú y Jefes de Departamento) sin duplicar
+    // 5c. Creación de usuarios faltantes (Región Comondú y Jefes de Departamento) SOLO si no existen
     //     NOTA: No se crea usuario para Recursos Humanos porque ya existe (id_oficialia 30030002).
     const [[ofiComonduRow]] = await poolRead.query(
       `SELECT id FROM oficinas_regionales WHERE region_id = ? AND nombre <> 'S/A (Sin Asignar)' ORDER BY id ASC LIMIT 1`,
@@ -1641,13 +2373,13 @@ async function ensureSchemaAndUsers() {
       // Enlace Regional Faltante (rol: 'regional')
       {
         username: "comondu",
-        nombre: "Enlace Regional Comondú / Loreto",
-        primer_ap: "",
-        segundo_ap: "",
+        nombre: "Humberto",
+        primer_ap: "Arce",
+        segundo_ap: "Cordero",
         rol: "regional",
         id_oficialia: 30030011,
         departamento: "Enlace Regional Comondú / Loreto",
-        cargo: "Enlace Regional Comondú / Loreto",
+        cargo: "Director Regional",
         region_id: regComonduId,
         oficina_id: ofiComonduId,
       },
@@ -1756,7 +2488,7 @@ async function ensureSchemaAndUsers() {
         rol: "departamento",
         id_oficialia: 30030015,
         departamento: "Dirección Regional La Paz",
-        cargo: "Dirección Regional La Paz",
+        cargo: "Director Regional",
         region_id: regLaPazId,
         oficina_id: ofiLaPazPrincipalId,
       },
@@ -1769,74 +2501,13 @@ async function ensureSchemaAndUsers() {
         [usr.username]
       ).catch(() => [[]]);
 
-      if (existingUsr && existingUsr.length) {
-        const row = existingUsr[0];
-        const hasValidPass = row.psw && String(row.psw).trim().length > 0;
-        await poolOps.query(
-          `UPDATE usuario
-           SET nombre = ?,
-               PRIMER_APELLIDO = ?,
-               SEGUNDO_APELLIDO = ?,
-               ID_OFICIALIA = ?,
-               OFICIALIA_ID = ?,
-               ACTIVO = b'1',
-               rol = ?,
-               departamento = ?,
-               cargo = ?,
-               region_id = ?,
-               oficina_id = ?,
-               psw = ?
-           WHERE id = ?`,
-          [
-            usr.nombre,
-            usr.primer_ap,
-            usr.segundo_ap,
-            usr.id_oficialia,
-            usr.id_oficialia,
-            usr.rol,
-            usr.departamento,
-            usr.cargo,
-            usr.region_id,
-            usr.oficina_id,
-            hasValidPass ? row.psw : defaultHash,
-            row.id,
-          ]
-        ).catch(async () => {
-          await poolOps.query(
-            `UPDATE usuario
-             SET nombre = ?,
-                 PRIMER_APELLIDO = ?,
-                 SEGUNDO_APELLIDO = ?,
-                 ID_OFICIALIA = ?,
-                 OFICIALIA_ID = ?,
-                 ACTIVO = b'1',
-                 rol = 'USUARIO',
-                 departamento = ?,
-                 region_id = ?,
-                 oficina_id = ?,
-                 psw = ?
-             WHERE id = ?`,
-            [
-              usr.nombre,
-              usr.primer_ap,
-              usr.segundo_ap,
-              usr.id_oficialia,
-              usr.id_oficialia,
-              usr.departamento,
-              usr.region_id,
-              usr.oficina_id,
-              hasValidPass ? row.psw : defaultHash,
-              row.id,
-            ]
-          ).catch(() => {});
-        });
-      } else {
+      if (!existingUsr || !existingUsr.length) {
         const [[maxRow]] = await poolRead.query(
-          `SELECT COALESCE(MAX(id), 12) + 1 AS next_id FROM usuario`
-        ).catch(() => [[{ next_id: 13 }]]);
-        const nextId = Number(maxRow?.next_id || 13);
+          `SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM usuario WHERE id > 0`
+        ).catch(() => [[{ nextId: 13 }]]);
+        const nextId = Number(maxRow?.nextId || 13);
         await poolOps.query(
-          `INSERT INTO usuario
+          `INSERT IGNORE INTO usuario
              (id, username, psw, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, ACTIVO, rol, FECHA_ALTA, departamento, cargo, rubro_id, region_id, oficina_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, b'1', ?, NOW(), ?, ?, NULL, ?, ?)`,
           [
@@ -1854,28 +2525,36 @@ async function ensureSchemaAndUsers() {
             usr.region_id,
             usr.oficina_id,
           ]
-        ).catch(async () => {
-          await poolOps.query(
-            `INSERT INTO usuario
-               (id, username, psw, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, ACTIVO, rol, FECHA_ALTA, departamento, rubro_id, region_id, oficina_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, b'1', 'USUARIO', NOW(), ?, NULL, ?, ?)`,
-            [
-              nextId,
-              usr.username,
-              defaultHash,
-              usr.nombre,
-              usr.primer_ap,
-              usr.segundo_ap,
-              usr.id_oficialia,
-              usr.id_oficialia,
-              usr.departamento,
-              usr.region_id,
-              usr.oficina_id,
-            ]
-          ).catch(() => {});
-        });
+        ).catch(() => {});
       }
     }
+
+    // 5d. Corrección ortográfica puntual (corrige error tipográfico 'Regionall')
+    await poolOps.query(
+      `UPDATE usuarios SET cargo = 'Director Regional' WHERE cargo LIKE '%Regionall%'`
+    ).catch(() => {});
+
+    await poolOps.query(
+      `UPDATE usuario SET cargo = 'Director Regional' WHERE cargo LIKE '%Regionall%'`
+    ).catch(() => {});
+
+    await poolOps.query(
+      `UPDATE inventario_oficina SET resguardante_puesto = 'Director Regional' WHERE resguardante_puesto LIKE '%Regionall%'`
+    ).catch(() => {});
+
+    await poolOps.query(
+      `UPDATE inventario_oficina
+       SET detalles_vehiculo = REPLACE(detalles_vehiculo, 'Coordinadora Regionall', 'Director Regional')
+       WHERE detalles_vehiculo LIKE '%Regionall%'`
+    ).catch(() => {});
+
+    await poolOps.query(
+      `UPDATE vales_prestamo SET recibe_cargo = 'Director Regional' WHERE recibe_cargo LIKE '%Regionall%'`
+    ).catch(() => {});
+
+    await poolOps.query(
+      `UPDATE vales_prestamo SET solicitante_cargo = 'Director Regional' WHERE solicitante_cargo LIKE '%Regionall%'`
+    ).catch(() => {});
 
     // 6. Asegurar tablas de Vales Provisionales (Préstamo de Material/Equipo para Operativos)
     await poolOps.query(
@@ -1941,12 +2620,16 @@ async function ensureSchemaAndUsers() {
     if (!vpColNames.has("archivo_pdf_firmado")) {
       await poolOps.query(`ALTER TABLE vales_prestamo ADD COLUMN archivo_pdf_firmado VARCHAR(255) DEFAULT NULL`).catch(() => {});
     }
+    if (!vpColNames.has("es_prueba")) {
+      await poolOps.query(`ALTER TABLE vales_prestamo ADD COLUMN es_prueba TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
+    }
 
     await poolOps.query(
       `CREATE TABLE IF NOT EXISTS vales_prestamo_detalle (
         id INT(11) NOT NULL AUTO_INCREMENT,
         vale_id INT(11) NOT NULL,
         articulo_id INT(11) DEFAULT NULL,
+        tableta_id INT(11) DEFAULT NULL,
         clave VARCHAR(60) DEFAULT NULL,
         descripcion VARCHAR(255) NOT NULL,
         serie VARCHAR(100) DEFAULT NULL,
@@ -1963,8 +2646,357 @@ async function ensureSchemaAndUsers() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
     ).catch(() => {});
 
+    // v53: Asegurar columnas en vales_prestamo_detalle para persistencia estricta de devoluciones y retornos forzados
+    const [vpdCols] = await poolRead.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'vales_prestamo_detalle'`,
+      [DB_NAME]
+    ).catch(() => [[]]);
+    const vpdColNames = new Set(vpdCols.map((c) => String(c.COLUMN_NAME || "").toLowerCase()));
+    if (!vpdColNames.has("devuelto")) {
+      await poolOps.query(`ALTER TABLE vales_prestamo_detalle ADD COLUMN devuelto TINYINT(1) DEFAULT 0`).catch(() => {});
+    }
+    if (!vpdColNames.has("cantidad_devuelta")) {
+      await poolOps.query(`ALTER TABLE vales_prestamo_detalle ADD COLUMN cantidad_devuelta INT(11) DEFAULT 0`).catch(() => {});
+    }
+    if (!vpdColNames.has("fecha_devolucion")) {
+      await poolOps.query(`ALTER TABLE vales_prestamo_detalle ADD COLUMN fecha_devolucion DATETIME DEFAULT NULL`).catch(() => {});
+    }
+    if (!vpdColNames.has("tableta_id")) {
+      await poolOps.query(`ALTER TABLE vales_prestamo_detalle ADD COLUMN tableta_id INT(11) NULL DEFAULT NULL`).catch(() => {});
+    }
+
+    // v53: Asegurar stock_minimo en inventario_oficina para semáforo de inventario regional
+    const [ioCols] = await poolRead.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'inventario_oficina'`,
+      [DB_NAME]
+    ).catch(() => [[]]);
+    const ioColNames = new Set(ioCols.map((c) => String(c.COLUMN_NAME || "").toLowerCase()));
+    if (!ioColNames.has("stock_minimo")) {
+      await poolOps.query(`ALTER TABLE inventario_oficina ADD COLUMN stock_minimo INT(11) DEFAULT 0`).catch(() => {});
+    }
+
+    // v44: Bitácora de movimientos del inventario para auditoría
+    await poolOps.query(
+      `CREATE TABLE IF NOT EXISTS bitacora_movimientos (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        usuario VARCHAR(100),
+        nombre_usuario VARCHAR(150),
+        modulo VARCHAR(50),
+        accion VARCHAR(50),
+        detalles TEXT,
+        fecha DATETIME DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_bit_fecha (fecha),
+        KEY idx_bit_usuario (usuario),
+        KEY idx_bit_modulo (modulo)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    ).catch(() => {});
+
     // Sincronizar Almacén General (Gabriel Fiol) con Inventario Regional Delegación La Paz Rubro 1
     await syncAlmacenCentralToInventarioRegional(poolOps);
+
+    // Normalización de claves en inventario regional: forzar mayúsculas y sin espacios
+    await poolOps.query(
+      `UPDATE inventario_oficina SET clave_bien = UPPER(TRIM(clave_bien)) WHERE clave_bien IS NOT NULL`
+    ).catch(() => {});
+
+    // Consolidar, deduplicar y asignar bodega general de Jesús (Rubro 3 - Mobiliario) a RM (Recursos Materiales)
+    // v53: Solo ejecutar si inventario_oficina para rubro 3 está completamente vacío para no sobreescribir datos ni retornos forzados del admin
+    const [[r3Count]] = await poolRead.query(`SELECT COUNT(*) AS n FROM inventario_oficina WHERE rubro_id = 3`).catch(() => [[{ n: 1 }]]);
+    if (Number(r3Count?.n || 0) === 0) {
+      await consolidarBodegaRMJesus(poolOps);
+    }
+
+    // v56: Tablas y semilla del Módulo de Tabletas Digitales (Luis Eduardo Mayoral Geraldo)
+    await poolOps.query(
+      `CREATE TABLE IF NOT EXISTS inventario_tabletas (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        no_resguardo INT NOT NULL UNIQUE,
+        imei VARCHAR(30) NOT NULL UNIQUE,
+        numero_serie VARCHAR(50) NOT NULL UNIQUE,
+        no_caja VARCHAR(20),
+        marca VARCHAR(50) DEFAULT 'Compac',
+        modelo VARCHAR(50) DEFAULT 'QTab LTE',
+        descripcion VARCHAR(100) DEFAULT 'Tablet Compac',
+        region ENUM('LA PAZ', 'LOS CABOS', 'COMONDU', 'MULEGE') NOT NULL,
+        oficina_programa VARCHAR(80) NOT NULL,
+        nombre_resguardante VARCHAR(150) DEFAULT '',
+        cargo_resguardante VARCHAR(120) DEFAULT 'Servidor de la nación',
+        estatus_fisico VARCHAR(50) DEFAULT 'BUENO',
+        tiene_cargador TINYINT(1) DEFAULT 1,
+        tiene_caja TINYINT(1) DEFAULT 1,
+        observaciones TEXT,
+        sin_resguardo_previo TINYINT(1) DEFAULT 0,
+        estado_asignacion ENUM('EN_RESGUARDO', 'DEVOLUCION_PENDIENTE', 'DISPONIBLE', 'EN_PRESTAMO_PROVISIONAL') NOT NULL DEFAULT 'EN_RESGUARDO',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    ).catch((errTab) => {
+      console.warn("[WARN] CREATE inventario_tabletas:", errTab?.message || errTab);
+    });
+
+    // v58: Asegurar estado EN_PRESTAMO_PROVISIONAL en inventario_tabletas existente
+    await poolOps.query(
+      `ALTER TABLE inventario_tabletas
+       MODIFY COLUMN estado_asignacion ENUM('EN_RESGUARDO', 'DEVOLUCION_PENDIENTE', 'DISPONIBLE', 'EN_PRESTAMO_PROVISIONAL') NOT NULL DEFAULT 'EN_RESGUARDO'`
+    ).catch(() => {});
+
+    await poolOps.query(
+      `CREATE TABLE IF NOT EXISTS movimientos_tabletas (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        tipo ENUM('DEVOLUCION', 'ASIGNACION') NOT NULL,
+        folio VARCHAR(30) NOT NULL,
+        tableta_id INT NOT NULL,
+        no_resguardo INT NOT NULL,
+        region VARCHAR(50),
+        oficina_programa VARCHAR(80),
+        nombre_persona VARCHAR(150) NOT NULL,
+        cargo_persona VARCHAR(120) DEFAULT 'Servidor de la nación',
+        tiene_cargador TINYINT(1) DEFAULT 1,
+        tiene_caja TINYINT(1) DEFAULT 1,
+        estatus_fisico VARCHAR(50) DEFAULT 'BUENO',
+        observaciones TEXT,
+        estado ENUM('EN_PROCESO', 'CONFIRMADO', 'CANCELADO') DEFAULT 'EN_PROCESO',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        confirmed_at DATETIME NULL,
+        KEY idx_movtab_tableta (tableta_id),
+        KEY idx_movtab_tipo_estado (tipo, estado)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    ).catch((errMovTab) => {
+      console.warn("[WARN] CREATE movimientos_tabletas:", errMovTab?.message || errMovTab);
+    });
+
+    await poolOps.query(
+      `CREATE TABLE IF NOT EXISTS bitacora_tabletas (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        tableta_id INT NULL,
+        no_resguardo INT NULL,
+        imei VARCHAR(30) NULL,
+        numero_serie VARCHAR(50) NULL,
+        usuario VARCHAR(80) NOT NULL,
+        accion VARCHAR(50) NOT NULL,
+        detalles TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_bittab_tableta (tableta_id),
+        KEY idx_bittab_accion (accion),
+        KEY idx_bittab_usuario (usuario),
+        KEY idx_bittab_created (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    ).catch((errBitTab) => {
+      console.warn("[WARN] CREATE bitacora_tabletas:", errBitTab?.message || errBitTab);
+    });
+
+    await seedInventarioTabletasIfEmpty().catch((errSeedTab) => {
+      console.warn("[WARN] seedInventarioTabletasIfEmpty:", errSeedTab?.message || errSeedTab);
+    });
+
+    // v61: Tabla de Configuración Global y Migración Única de Modo Prueba Grupal + Rescate de Vale #3 (Víctor Huerta)
+    await poolOps.query(
+      `CREATE TABLE IF NOT EXISTS configuracion_sistema (
+        clave VARCHAR(64) PRIMARY KEY,
+        valor VARCHAR(255) NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    ).catch((errCfg) => {
+      console.warn("[WARN] CREATE configuracion_sistema:", errCfg?.message || errCfg);
+    });
+
+    await poolOps.query(
+      `INSERT IGNORE INTO configuracion_sistema (clave, valor) VALUES
+         ('MODO_PRUEBA_GRUPAL', '1'),
+         ('MIGRACION_V61_APLICADA', '0'),
+         ('MIGRACION_V62_APLICADA', '0')`
+    ).catch(() => {});
+
+    try {
+      const [[migRow]] = await poolRead.query(
+        `SELECT valor FROM configuracion_sistema WHERE clave = 'MIGRACION_V61_APLICADA' LIMIT 1`
+      );
+      const migAplicada = String(migRow?.valor || "0").trim() === "1";
+      if (!migAplicada) {
+        console.log("[v61] Ejecutando migración única: preservando Vale #3 de Víctor Huerta y restaurando inventarios de vales/solicitudes de prueba...");
+
+        // 1. Marcar como es_prueba = 1 todos los vales EXCEPTO el Vale #3 de Víctor Huerta (que se preserva con es_prueba = 0)
+        await poolOps.query(
+          `UPDATE vales_prestamo
+           SET es_prueba = CASE
+             WHEN id = 3
+               OR LOWER(COALESCE(solicitante_nombre, '')) LIKE '%victor%huerta%'
+               OR LOWER(COALESCE(solicitante_nombre, '')) LIKE '%víctor%huerta%'
+               OR LOWER(COALESCE(recibe_nombre, '')) LIKE '%victor%huerta%'
+               OR LOWER(COALESCE(recibe_nombre, '')) LIKE '%víctor%huerta%'
+             THEN 0
+             ELSE 1
+           END`
+        ).catch((e) => console.warn("[v61] UPDATE vales_prestamo es_prueba:", e.message));
+
+        // 2. Marcar las solicitudes previas como es_prueba = 1
+        await poolOps.query(
+          `UPDATE solicitudes SET es_prueba = 1`
+        ).catch((e) => console.warn("[v61] UPDATE solicitudes es_prueba:", e.message));
+
+        // 3. Liberar tabletas que hayan quedado en EN_PRESTAMO_PROVISIONAL por vales de prueba
+        await poolOps.query(
+          `UPDATE inventario_tabletas t
+           SET t.estado_asignacion = 'DISPONIBLE',
+               t.region = 'LA PAZ',
+               t.oficina_programa = 'Delegación La Paz',
+               t.nombre_resguardante = ''
+           WHERE t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM vales_prestamo_detalle vpd
+               INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+               WHERE (vpd.tableta_id = t.id OR vpd.articulo_id = t.id)
+                 AND COALESCE(vp.es_prueba, 0) = 0
+                 AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+             )`
+        ).catch((e) => console.warn("[v61] Restaurar inventario_tabletas:", e.message));
+
+        // 4. Recalcular inventario_oficina (Rubros 2 y 3) tomando en cuenta ÚNICAMENTE vales reales activos (es_prueba = 0)
+        const [activeRealLoans] = await poolRead.query(
+          `SELECT vpd.articulo_id, COALESCE(SUM(vpd.cantidad), 0) AS total_prestado
+           FROM vales_prestamo_detalle vpd
+           INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+           WHERE vpd.articulo_id IS NOT NULL
+             AND COALESCE(vp.es_prueba, 0) = 0
+             AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+           GROUP BY vpd.articulo_id`
+        ).catch(() => [[]]);
+
+        const realLoanMap = new Map();
+        for (const r of activeRealLoans || []) {
+          realLoanMap.set(Number(r.articulo_id), Math.max(0, Number(r.total_prestado || 0)));
+        }
+
+        const [allInvRows] = await poolRead.query(
+          `SELECT id, cantidad_propia, estatus_uso FROM inventario_oficina`
+        ).catch(() => [[]]);
+
+        for (const inv of allInvRows || []) {
+          const prestadaReal = realLoanMap.get(Number(inv.id)) || 0;
+          const propia = Math.max(0, Number(inv.cantidad_propia || 0));
+          const nuevaDisp = Math.max(0, propia - prestadaReal);
+          let nuevoEstatus = inv.estatus_uso || "ACTIVO";
+          if (String(nuevoEstatus).toUpperCase() === "PRESTADO" && nuevaDisp > 0) {
+            nuevoEstatus = "ACTIVO";
+          } else if (propia > 0 && nuevaDisp === 0 && prestadaReal > 0) {
+            nuevoEstatus = "PRESTADO";
+          }
+          await poolOps.query(
+            `UPDATE inventario_oficina
+             SET cantidad_prestada_enviada = ?,
+                 cantidad_disponible = ?,
+                 estatus_uso = ?
+             WHERE id = ?`,
+            [prestadaReal, nuevaDisp, nuevoEstatus, inv.id]
+          ).catch(() => {});
+        }
+
+        await poolOps.query(
+          `UPDATE configuracion_sistema SET valor = '1' WHERE clave = 'MIGRACION_V61_APLICADA'`
+        ).catch(() => {});
+        console.log("[v61] Migración única completada exitosamente.");
+      }
+    } catch (errMig61) {
+      console.warn("[WARN] Migración v61:", errMig61?.message || errMig61);
+    }
+
+    // ============================================================================
+    // v62: Parche idempotente de estados de prueba (Vales y Solicitudes) y ajuste diferencial de inventario
+    // ============================================================================
+    try {
+      const [[mig62Row]] = await poolRead.query(
+        `SELECT valor FROM configuracion_sistema WHERE clave = 'MIGRACION_V62_APLICADA' LIMIT 1`
+      ).catch(() => [[]]);
+      const mig62Aplicada = String(mig62Row?.valor || "0").trim() === "1";
+
+      if (!mig62Aplicada) {
+        console.log("[v62] Aplicando migración única de estados de prueba y ajuste diferencial de inventario...");
+
+        // Consultar antes del UPDATE los deltas exactos de los vales afectados:
+        // a) Vales de Rubro 3 (excepto vale #13) que eran de prueba (es_prueba = 1) y pasarán a reales (es_prueba = 0)
+        const [rubro3DeltaRows] = await poolRead.query(
+          `SELECT vpd.articulo_id, COALESCE(SUM(vpd.cantidad), 0) AS total_cant
+           FROM vales_prestamo_detalle vpd
+           INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+           WHERE vp.rubro_id = 3
+             AND vp.id <> 13
+             AND COALESCE(vp.es_prueba, 0) = 1
+             AND vpd.articulo_id IS NOT NULL
+             AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+           GROUP BY vpd.articulo_id`
+        ).catch(() => [[]]);
+
+        // b) Vale #13 que pasará a prueba (es_prueba = 1), para devolver su stock al inventario
+        const [vale13DeltaRows] = await poolRead.query(
+          `SELECT vpd.articulo_id, COALESCE(SUM(vpd.cantidad), 0) AS total_cant
+           FROM vales_prestamo_detalle vpd
+           INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+           WHERE vp.id = 13
+             AND COALESCE(vp.es_prueba, 0) = 0
+             AND vpd.articulo_id IS NOT NULL
+             AND vp.estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO')
+           GROUP BY vpd.articulo_id`
+        ).catch(() => [[]]);
+
+        // 1. Rescatar Solicitud de Almacén #3 (Víctor Manuel Higuera Ruiz)
+        await poolOps.query(`UPDATE solicitudes SET es_prueba = 0 WHERE id = 3`).catch(() => {});
+        // 2. Vales Provisionales Reales (Jesús / Mobiliario - Rubro 3)
+        await poolOps.query(`UPDATE vales_prestamo SET es_prueba = 0 WHERE rubro_id = 3 AND id <> 13`).catch(() => {});
+        // 3. Vale Provisional Específico de Prueba (VP-2026-0013 - Víctor / Informática)
+        await poolOps.query(`UPDATE vales_prestamo SET es_prueba = 1 WHERE id = 13`).catch(() => {});
+
+        // 4a. Sumar el stock al inventario devolviendo lo del vale #13 (que pasó a es_prueba = 1)
+        for (const r13 of vale13DeltaRows || []) {
+          const cant = Math.max(0, Number(r13.total_cant || 0));
+          const artId = Number(r13.articulo_id || 0);
+          if (cant > 0 && artId > 0) {
+            await poolOps.query(
+              `UPDATE inventario_oficina
+               SET cantidad_disponible = LEAST(cantidad_propia, COALESCE(cantidad_disponible, cantidad_propia) + ?),
+                   cantidad_prestada_enviada = GREATEST(0, COALESCE(cantidad_prestada_enviada, 0) - ?),
+                   estatus_uso = CASE
+                     WHEN LEAST(cantidad_propia, COALESCE(cantidad_disponible, cantidad_propia) + ?) > 0
+                          AND UPPER(COALESCE(estatus_uso, '')) = 'PRESTADO'
+                     THEN 'ACTIVO'
+                     ELSE estatus_uso
+                   END
+               WHERE id = ?`,
+              [cant, cant, cant, artId]
+            ).catch(() => {});
+          }
+        }
+
+        // 4b. Descontar del inventario lo de los vales del Rubro 3 que eran de prueba y pasaron a reales (es_prueba = 0)
+        for (const r3 of rubro3DeltaRows || []) {
+          const cant = Math.max(0, Number(r3.total_cant || 0));
+          const artId = Number(r3.articulo_id || 0);
+          if (cant > 0 && artId > 0) {
+            await poolOps.query(
+              `UPDATE inventario_oficina
+               SET cantidad_disponible = GREATEST(0, COALESCE(cantidad_disponible, cantidad_propia) - ?),
+                   cantidad_prestada_enviada = COALESCE(cantidad_prestada_enviada, 0) + ?,
+                   estatus_uso = CASE
+                     WHEN GREATEST(0, COALESCE(cantidad_disponible, cantidad_propia) - ?) = 0
+                          AND cantidad_propia > 0
+                     THEN 'PRESTADO'
+                     ELSE estatus_uso
+                   END
+               WHERE id = ?`,
+              [cant, cant, cant, artId]
+            ).catch(() => {});
+          }
+        }
+
+        await poolOps.query(
+          `INSERT INTO configuracion_sistema (clave, valor) VALUES ('MIGRACION_V62_APLICADA', '1')
+           ON DUPLICATE KEY UPDATE valor = '1'`
+        ).catch(() => {});
+
+        console.log("[v62] Migración única v62 y ajuste diferencial de inventario completados.");
+      }
+    } catch (errV62) {
+      console.warn("[WARN] Parche v62:", errV62?.message || errV62);
+    }
 
     SCHEMA_MIGRATED = true;
     return true;
@@ -1974,9 +3006,72 @@ async function ensureSchemaAndUsers() {
   }
 }
 
+// v44: Registro centralizado de auditoría y movimientos de almacén / inventario
+async function registrarBitacora(reqOrUser, modulo, accion, detalles, dbHandle = poolOps) {
+  try {
+    let username = "SISTEMA";
+    let nombreUsuario = "Sistema Automático";
+    if (typeof reqOrUser === "string") {
+      username = reqOrUser;
+      nombreUsuario = reqOrUser;
+    } else if (reqOrUser?.user) {
+      username = reqOrUser.user.username || reqOrUser.user.usuario || "USUARIO";
+      nombreUsuario = reqOrUser.user.nombre || reqOrUser.user.nombre_completo || username;
+    } else if (reqOrUser?.username) {
+      username = reqOrUser.username;
+      nombreUsuario = reqOrUser.nombre || username;
+    }
+
+    const conn = dbHandle || poolOps;
+    await conn.query(
+      `INSERT INTO bitacora_movimientos (usuario, nombre_usuario, modulo, accion, detalles, fecha)
+       VALUES (?, ?, ?, ?, ?, NOW())`,
+      [username, nombreUsuario, String(modulo || "GENERAL").toUpperCase(), String(accion || "ACCION").toUpperCase(), String(detalles || "")]
+    );
+  } catch (err) {
+    console.warn("[WARN] registrarBitacora error:", err?.message || err);
+  }
+}
+const registrarMovimiento = registrarBitacora;
+
+// v44: Lematizador y normalizador de raíces de búsqueda en español (acentos, -ces, vocal+s, -es)
+function getSearchTokenRoots(queryStr) {
+  if (!queryStr) return [];
+  const normalized = String(queryStr)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+  if (!normalized) return [];
+
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const roots = [];
+
+  for (const token of tokens) {
+    if (!token) continue;
+    const variants = new Set([token]);
+    // 1. -ces -> -z / -c (ej: lapices -> lapiz, lapic)
+    if (token.endsWith("ces") && token.length > 3) {
+      variants.add(token.slice(0, -3) + "z");
+      variants.add(token.slice(0, -3) + "c");
+    }
+    // 2. Consonante + es (ej: plumones -> plumon, papeles -> papel, colores -> color; sobres -> sobre)
+    else if (token.length > 3 && /[^aeiou]es$/i.test(token)) {
+      variants.add(token.slice(0, -2));
+      variants.add(token.slice(0, -1));
+    }
+    // 3. Vocal + s (ej: sillas -> silla, carpetas -> carpeta, toldos -> toldo)
+    else if (token.length > 2 && /[aeiou]s$/i.test(token)) {
+      variants.add(token.slice(0, -1));
+    }
+    roots.push(Array.from(variants));
+  }
+  return roots;
+}
+
 function authRequired(req, res, next) {
 const token =
-req.cookies?.token || (req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : null);
+req.cookies?.token || (req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : null) || req.query?.token;
 if (!token) return httpError(res, 401, "No autenticado");
 try {
 req.user = jwt.verify(token, process.env.JWT_SECRET);
@@ -1992,7 +3087,46 @@ return httpError(res, 401, "Token invalido");
 }
 }
 
-app.post("/api/auth/login", async (req, res) => {
+function issueAuthSession(res, u) {
+  const resolvedRubroId = getUserRubroId({
+    username: u.username,
+    rol: normalizeRol(u.rol, u.username),
+    rubro_id: u.rubro_id,
+  });
+
+  const deptoId = u.ID_OFICIALIA || null;
+  const canSelectAny = canSelectAnyDepartment({ user: { username: u.username, rol: u.rol } });
+
+  // Datos que viajan dentro del token JWT
+  const payload = {
+    id: u.id,
+    username: u.username,
+    nombre: u.nombre,
+    primer_ap: u.PRIMER_APELLIDO,
+    segundo_ap: u.SEGUNDO_APELLIDO,
+    id_oficialia: deptoId,
+    departamento_id: deptoId,
+    departamento: u.departamento || null,
+    cargo: u.cargo || u.departamento || null,
+    rol: normalizeRol(u.rol, u.username),
+    rubro_id: resolvedRubroId,
+    region_id: u.region_id || null,
+    oficina_id: u.oficina_id || null,
+    puede_seleccionar_cualquier_departamento: canSelectAny,
+  };
+
+  const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "8h" });
+  res.cookie("token", token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: cookieSecure,
+    maxAge: 8 * 60 * 60 * 1000
+  });
+
+  return { token, payload };
+}
+
+async function handleLogin(req, res) {
   const { username, password } = req.body || {};
   // Obtener la IP del cliente (funciona en local, red LAN y tras proxy)
   const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || req.ip || '127.0.0.1';
@@ -2069,6 +3203,15 @@ app.post("/api/auth/login", async (req, res) => {
       return httpError(res, 401, "Usuario o contraseña inválidos");
     }
 
+    // Forzar cambio si la contraseña en texto plano coincide con la clave por defecto 'secreta123'
+    if (String(password) === "secreta123") {
+      return res.json({
+        requirePasswordChange: true,
+        userId: u.id,
+        username: u.username,
+      });
+    }
+
     // Registrar inicio de sesión exitoso en la bitácora
     if (poolOps) {
       await poolOps.query(
@@ -2077,42 +3220,89 @@ app.post("/api/auth/login", async (req, res) => {
       ).catch(() => {});
     }
 
-    const resolvedRubroId = getUserRubroId({
-      username: u.username,
-      rol: normalizeRol(u.rol, u.username),
-      rubro_id: u.rubro_id,
-    });
-
-    const deptoId = u.ID_OFICIALIA || null;
-    const canSelectAny = canSelectAnyDepartment({ user: { username: u.username, rol: u.rol } });
-
-    // Datos que viajan dentro del token JWT
-    const payload = {
-      id: u.id,
-      username: u.username,
-      nombre: u.nombre,
-      primer_ap: u.PRIMER_APELLIDO,
-      segundo_ap: u.SEGUNDO_APELLIDO,
-      id_oficialia: deptoId,
-      departamento_id: deptoId,
-      departamento: u.departamento || null,
-      cargo: u.cargo || u.departamento || null,
-      rol: normalizeRol(u.rol, u.username),
-      rubro_id: resolvedRubroId,
-      region_id: u.region_id || null,
-      oficina_id: u.oficina_id || null,
-      puede_seleccionar_cualquier_departamento: canSelectAny,
-    };
-
-    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "8h" });
-    res.cookie("token", token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: cookieSecure,
-      maxAge: 8 * 60 * 60 * 1000
-    });
-
+    const { token, payload } = issueAuthSession(res, u);
     res.json({ ok: true, token, user: payload });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+}
+
+app.post("/api/auth/login", handleLogin);
+app.post("/api/login", handleLogin);
+
+app.post("/api/login/force-change", async (req, res) => {
+  const { userId, newPassword } = req.body || {};
+  const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || req.ip || '127.0.0.1';
+  const uid = Number(userId);
+  const cleanNewPass = String(newPassword || "").trim();
+
+  if (!Number.isFinite(uid) || uid <= 0) {
+    return httpError(res, 400, "userId inválido");
+  }
+  if (!cleanNewPass || cleanNewPass.length < 6) {
+    return httpError(res, 400, "La nueva contraseña debe tener al menos 6 caracteres.");
+  }
+  if (cleanNewPass === "secreta123") {
+    return httpError(res, 400, "La nueva contraseña no puede ser 'secreta123'.");
+  }
+
+  try {
+    await ensureSchemaAndUsers();
+
+    let rows = [];
+    try {
+      const [rWithRubro] = await poolRead.query(
+        `SELECT u.id, u.username, u.psw, u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO,
+        u.ID_OFICIALIA, u.ACTIVO, COALESCE(u.departamento, u.rol, 'USUARIO') AS rol, u.rubro_id,
+        u.region_id, u.oficina_id
+        FROM usuario u
+        WHERE u.id = ? LIMIT 1`,
+        [uid]
+      );
+      rows = rWithRubro;
+    } catch {
+      const [rFallback] = await poolRead.query(
+        `SELECT u.id, u.username, u.psw, u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO,
+        u.ID_OFICIALIA, u.ACTIVO, COALESCE(u.departamento, 'USUARIO') AS rol, u.rubro_id
+        FROM usuario u
+        WHERE u.id = ? LIMIT 1`,
+        [uid]
+      );
+      rows = rFallback;
+    }
+
+    if (!rows.length) {
+      return httpError(res, 404, "Usuario no encontrado");
+    }
+
+    const u = rows[0];
+    if (u.ACTIVO === 0 || u.ACTIVO === false) {
+      return httpError(res, 403, "Usuario inactivo");
+    }
+
+    const stored = String(u.psw || "");
+    const isStillDefault = stored.startsWith("$2")
+      ? await bcrypt.compare("secreta123", stored)
+      : stored === "secreta123";
+    if (!isStillDefault) {
+      return httpError(res, 403, "Esta cuenta ya no utiliza la contraseña temporal por defecto.");
+    }
+
+    const hashedPassword = await bcrypt.hash(cleanNewPass, 10);
+    await poolOps.query("UPDATE usuario SET psw = ? WHERE id = ?", [hashedPassword, u.id]);
+    await poolOps.query("UPDATE usuarios SET password = ? WHERE id = ?", [hashedPassword, u.id]).catch(async () => {
+      await poolOps.query("UPDATE usuarios SET psw = ? WHERE id = ?", [hashedPassword, u.id]).catch(() => {});
+    });
+
+    if (poolOps) {
+      await poolOps.query(
+        "INSERT INTO log_accesos (usuario_id, username, ip_address, exito) VALUES (?, ?, ?, TRUE)",
+        [u.id, u.username, clientIp]
+      ).catch(() => {});
+    }
+
+    const { token, payload } = issueAuthSession(res, u);
+    return res.json({ ok: true, token, user: payload });
   } catch (e) {
     return httpError(res, 500, e.message);
   }
@@ -2290,7 +3480,9 @@ s.region_solicitante,
 s.nombre_solicitante_firma,
 s.fecha_firma_digital,
 s.folio_firma_digital,
-(CASE WHEN s.firma_solicitante_data IS NOT NULL AND s.firma_solicitante_data <> '' THEN 1 ELSE 0 END) AS tiene_firma_digital
+COALESCE(s.es_prueba, 0) AS es_prueba,
+COALESCE(s.inventario_descontado, 0) AS inventario_descontado,
+(CASE WHEN (s.firma_solicitante_data IS NOT NULL AND s.firma_solicitante_data <> '') OR (s.firma_solicitante IS NOT NULL AND s.firma_solicitante <> '') THEN 1 ELSE 0 END) AS tiene_firma_digital
 FROM solicitudes s
 LEFT JOIN usuario u ON u.id = s.usuario_id
 WHERE (? = '' OR CONCAT_WS(' ',
@@ -2409,6 +3601,9 @@ app.get("/api/usuarios", authRequired, async (req, res) => {
           u.region_id,
           u.oficina_id,
           u.rubro_id,
+          u.cargo,
+          u.licencia,
+          u.vigencia_licencia,
           r.nombre AS region_nombre,
           oreg.nombre AS oficina_nombre,
           rub.nombre_rubro AS rubro_nombre,
@@ -2451,6 +3646,9 @@ app.get("/api/usuarios", authRequired, async (req, res) => {
         u.region_id,
         u.oficina_id,
         u.rubro_id,
+        u.cargo,
+        u.licencia,
+        u.vigencia_licencia,
         r.nombre AS region_nombre,
         oreg.nombre AS oficina_nombre,
         rub.nombre_rubro AS rubro_nombre,
@@ -2482,21 +3680,23 @@ app.get("/api/usuarios", authRequired, async (req, res) => {
   }
 });
 
-// Punto 8: Edición de perfil de usuario exclusiva para Administrador (soporta /api/usuarios/:id y /api/usuarios/:id/perfil)
-app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil"], authRequired, async (req, res) => {
+// Punto 8: Edición de perfil de usuario exclusiva para Administrador (soporta /api/usuarios/:id, /api/usuarios/:id/perfil y /api/admin/usuarios/:id)
+app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil", "/api/admin/usuarios/:id"], authRequired, async (req, res) => {
   try {
     if (!isAdmin(req)) {
       return httpError(res, 403, "Acceso exclusivo para Administración para editar perfiles de usuarios.");
     }
-    const userId = Number(req.params.id);
-    if (!Number.isInteger(userId) || userId <= 0) {
-      return httpError(res, 400, "ID de usuario inválido.");
-    }
+    const rawParamId = Number(req.params.id);
+    const userId = Number.isInteger(rawParamId) && rawParamId >= 0 ? rawParamId : 0;
 
     const {
+      username,
       nombre,
       primer_apellido,
       segundo_apellido,
+      cargo,
+      licencia,
+      vigencia_licencia,
       password,
       id_oficialia,
       departamento_id,
@@ -2507,11 +3707,61 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil"], authRequired, async (
       activo
     } = req.body || {};
 
-    const [[existing]] = await poolRead.query(`SELECT id, username FROM usuario WHERE id = ? LIMIT 1`, [userId]);
+    const cleanBodyUsername = String(username || "").trim().toLowerCase();
+    if (userId <= 0 && !cleanBodyUsername) {
+      return httpError(res, 400, "ID de usuario inválido.");
+    }
+
+    let existing = null;
+    if (userId > 0) {
+      const [rowsById] = await poolRead.query(
+        `SELECT id, username, rol, ID_OFICIALIA, region_id, oficina_id
+         FROM usuario
+         WHERE id = ? OR (id <= 0 AND LOWER(TRIM(username)) = ?)
+         ORDER BY (id = ?) DESC
+         LIMIT 1`,
+        [userId, cleanBodyUsername, userId]
+      );
+      existing = rowsById && rowsById[0] ? rowsById[0] : null;
+    } else if (cleanBodyUsername) {
+      const [rowsByUser] = await poolRead.query(
+        `SELECT id, username, rol, ID_OFICIALIA, region_id, oficina_id
+         FROM usuario
+         WHERE (id = ? OR ((id <= 0 OR id IS NULL) AND LOWER(TRIM(username)) = ?)) OR LOWER(TRIM(username)) = ?
+         ORDER BY (id <= 0 OR id IS NULL) DESC
+         LIMIT 1`,
+        [userId, cleanBodyUsername, cleanBodyUsername]
+      );
+      existing = rowsByUser && rowsByUser[0] ? rowsByUser[0] : null;
+    }
     if (!existing) return httpError(res, 404, "Usuario no encontrado.");
 
+    const existingUsername = String(existing.username || cleanBodyUsername || "").trim();
+    let effectiveUserId = Number(existing.id || 0);
     const updates = [];
     const params = [];
+
+    if (effectiveUserId <= 0) {
+      const [[{ nextId }]] = await poolOps.query(`SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM usuario WHERE id > 0`);
+      effectiveUserId = Number(nextId) || 1;
+      updates.push("id = ?");
+      params.push(effectiveUserId);
+    }
+
+    if (username !== undefined) {
+      const cleanUsername = String(username || "").trim().toLowerCase();
+      if (cleanUsername && cleanUsername !== String(existing.username || "").toLowerCase()) {
+        const [dupU] = await poolRead.query(
+          `SELECT id FROM usuario WHERE LOWER(TRIM(username)) = ? AND id <> ? LIMIT 1`,
+          [cleanUsername, effectiveUserId]
+        );
+        if (dupU && dupU.length > 0) {
+          return httpError(res, 400, `El nombre de usuario "${cleanUsername}" ya está en uso.`);
+        }
+        updates.push("username = ?");
+        params.push(cleanUsername);
+      }
+    }
 
     if (nombre !== undefined) {
       updates.push("nombre = ?");
@@ -2525,6 +3775,18 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil"], authRequired, async (
       updates.push("SEGUNDO_APELLIDO = ?");
       params.push(String(segundo_apellido || "").trim());
     }
+    if (cargo !== undefined) {
+      updates.push("cargo = ?");
+      params.push(cargo ? String(cargo).trim() : null);
+    }
+    if (licencia !== undefined) {
+      updates.push("licencia = ?");
+      params.push(licencia ? String(licencia).trim() : null);
+    }
+    if (vigencia_licencia !== undefined) {
+      updates.push("vigencia_licencia = ?");
+      params.push(vigencia_licencia ? String(vigencia_licencia).trim() : null);
+    }
     if (password && String(password).trim().length > 0) {
       const hashed = await bcrypt.hash(String(password).trim(), 10);
       updates.push("psw = ?");
@@ -2533,14 +3795,17 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil"], authRequired, async (
 
     // Departamento / Oficialía
     const rawOfiId = departamento_id !== undefined ? departamento_id : id_oficialia;
+    let ofiNombre = null;
+    let ofiNum = null;
     if (rawOfiId !== undefined) {
-      const ofiNum = Number(rawOfiId) || null;
+      ofiNum = Number(rawOfiId) || null;
       updates.push("ID_OFICIALIA = ?");
       params.push(ofiNum);
       updates.push("OFICIALIA_ID = ?");
       params.push(ofiNum);
+      updates.push("departamento_id = ?");
+      params.push(ofiNum);
 
-      let ofiNombre = null;
       if (ofiNum) {
         const nameCol = await detectOficialiaNameCol();
         const [ofiRows] = await poolRead.query(
@@ -2555,15 +3820,19 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil"], authRequired, async (
       params.push(ofiNombre);
     }
 
+    let finalRegNum = existing.region_id;
     if (region_id !== undefined) {
       const regNum = Number(region_id) || null;
       updates.push("region_id = ?");
       params.push(regNum);
+      finalRegNum = regNum;
     }
+    let finalOfiRegNum = existing.oficina_id;
     if (oficina_id !== undefined) {
       const ofiRegNum = Number(oficina_id) || null;
       updates.push("oficina_id = ?");
       params.push(ofiRegNum);
+      finalOfiRegNum = ofiRegNum;
     }
     if (rubro_id !== undefined) {
       const rubNum = Number(rubro_id) || null;
@@ -2584,9 +3853,44 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil"], authRequired, async (
       return httpError(res, 400, "No se proporcionaron datos para actualizar.");
     }
 
-    params.push(userId);
-    await poolOps.query(`UPDATE usuario SET ${updates.join(", ")} WHERE id = ?`, params);
-    invalidateUserScope(userId);
+    const origId = Number(existing.id || 0);
+    await poolOps.query(
+      `UPDATE usuario SET ${updates.join(", ")} WHERE (id = ? AND ? > 0) OR (id <= 0 AND username = ?) LIMIT 1`,
+      [...params, origId, origId, existingUsername]
+    );
+
+    // Sincronizar en tabla usuarios si existe
+    await poolOps.query(
+      `UPDATE usuarios SET ${updates.join(", ")} WHERE (id = ? AND ? > 0) OR (id <= 0 AND username = ?) LIMIT 1`,
+      [...params, origId, origId, existingUsername]
+    ).catch(() => {});
+
+    // Sincronizar nombre/cargo con oficialias, regiones y oficinas si aplica
+    const cleanNombre = nombre !== undefined ? String(nombre || "").trim() : "";
+    const cleanAp1 = primer_apellido !== undefined ? String(primer_apellido || "").trim() : "";
+    const cleanAp2 = segundo_apellido !== undefined ? String(segundo_apellido || "").trim() : "";
+    const fullName = [cleanNombre, cleanAp1, cleanAp2].filter(Boolean).join(" ");
+    const cleanCargo = cargo !== undefined ? String(cargo || "").trim() : null;
+
+    if (fullName) {
+      const finalOfiId = ofiNum || existing.ID_OFICIALIA;
+      if (finalOfiId) {
+        await poolOps.query(`UPDATE oficialias SET oficial_reponsable = ? WHERE id = ?`, [fullName, finalOfiId]).catch(() => {});
+      }
+      if (finalRegNum) {
+        await poolOps.query(
+          `UPDATE regiones SET titular = ?, cargo_titular = COALESCE(?, cargo_titular, 'Director Regional') WHERE id = ?`,
+          [fullName, cleanCargo, finalRegNum]
+        ).catch(() => {});
+      }
+      if (finalOfiRegNum) {
+        await poolOps.query(`UPDATE oficinas_regionales SET responsable = ? WHERE id = ?`, [fullName, finalOfiRegNum]).catch(() => {});
+      }
+    } else if (cleanCargo && finalRegNum) {
+      await poolOps.query(`UPDATE regiones SET cargo_titular = ? WHERE id = ?`, [cleanCargo, finalRegNum]).catch(() => {});
+    }
+
+    invalidateUserScope(effectiveUserId);
 
     // Recuperar el objeto completo del usuario actualizado con JOIN a oficialías y regiones
     const nameCol = await detectOficialiaNameCol();
@@ -2602,6 +3906,9 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil"], authRequired, async (
         u.region_id,
         u.oficina_id,
         u.rubro_id,
+        u.cargo,
+        u.licencia,
+        u.vigencia_licencia,
         r.nombre AS region_nombre,
         oreg.nombre AS oficina_nombre,
         rub.nombre_rubro AS rubro_nombre,
@@ -2615,7 +3922,7 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil"], authRequired, async (
       LEFT JOIN rubros_inventario rub ON rub.id = u.rubro_id
       WHERE u.id = ?
       LIMIT 1`,
-      [userId]
+      [effectiveUserId]
     );
 
     const updatedUser = updatedRows && updatedRows[0] ? {
@@ -2633,6 +3940,653 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil"], authRequired, async (
     });
   } catch (e) {
     return httpError(res, e.statusCode || 500, e.message);
+  }
+});
+
+// v42/v60: Crear nuevo usuario con asignación explícita de ID consecutivo (CRUD Usuarios - Admin)
+app.post(["/api/usuarios", "/api/admin/usuarios"], authRequired, async (req, res) => {
+  try {
+    if (!isAdmin(req)) {
+      return httpError(res, 403, "Acceso exclusivo para Administración para crear usuarios.");
+    }
+
+    const {
+      username,
+      password,
+      nombre,
+      primer_apellido,
+      segundo_apellido,
+      cargo,
+      licencia,
+      vigencia_licencia,
+      id_oficialia,
+      departamento_id,
+      region_id,
+      oficina_id,
+      rubro_id,
+      rol,
+      activo
+    } = req.body || {};
+
+    const cleanUsername = String(username || "").trim().toLowerCase();
+    if (!cleanUsername) {
+      return httpError(res, 400, "El nombre de usuario (login) es obligatorio.");
+    }
+    if (!password || String(password).trim().length === 0) {
+      return httpError(res, 400, "La contraseña inicial es obligatoria para nuevos usuarios.");
+    }
+    const cleanNombre = String(nombre || "").trim();
+    if (!cleanNombre) {
+      return httpError(res, 400, "El nombre es obligatorio.");
+    }
+
+    // Verificar si el username ya existe
+    const [existRows] = await poolRead.query(
+      `SELECT id FROM usuario WHERE LOWER(TRIM(username)) = ? LIMIT 1`,
+      [cleanUsername]
+    );
+    if (existRows && existRows.length > 0) {
+      return httpError(res, 400, `El usuario "${cleanUsername}" ya existe en el sistema.`);
+    }
+
+    const hashedPassword = await bcrypt.hash(String(password).trim(), 10);
+    const rolNorm = normalizeRol(rol || "USUARIO", cleanUsername);
+
+    const rawOfiId = departamento_id !== undefined && departamento_id !== null ? departamento_id : id_oficialia;
+    const ofiNum = Number(rawOfiId) || null;
+    let ofiNombre = null;
+    if (ofiNum) {
+      const nameCol = await detectOficialiaNameCol();
+      const [ofiRows] = await poolRead.query(
+        `SELECT ${nameCol ? qi(nameCol) : "nombre"} AS nombre FROM oficialias WHERE id = ? LIMIT 1`,
+        [ofiNum]
+      ).catch(() => [[]]);
+      if (ofiRows && ofiRows.length) {
+        ofiNombre = ofiRows[0].nombre;
+      }
+    }
+
+    const regNum = region_id !== undefined && region_id !== null && region_id !== "" ? Number(region_id) || null : null;
+    const ofiRegNum = oficina_id !== undefined && oficina_id !== null && oficina_id !== "" ? Number(oficina_id) || null : null;
+    const rubNum = rubro_id !== undefined && rubro_id !== null && rubro_id !== "" ? Number(rubro_id) || null : null;
+    const cleanCargo = cargo ? String(cargo).trim() : null;
+    const cleanLic = licencia ? String(licencia).trim() : null;
+    const cleanVigLic = vigencia_licencia ? String(vigencia_licencia).trim() : null;
+    const cleanAp1 = primer_apellido ? String(primer_apellido).trim() : null;
+    const cleanAp2 = segundo_apellido ? String(segundo_apellido).trim() : null;
+    const isActivo = activo !== undefined ? (activo ? 1 : 0) : 1;
+
+    // v60: Calcular explícitamente el siguiente ID consecutivo para evitar usuarios con id = 0
+    const [[{ nextId }]] = await poolOps.query(
+      `SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM usuario WHERE id > 0`
+    );
+    const newUserId = Number(nextId) || 1;
+
+    await poolOps.query(
+      `INSERT INTO usuario
+         (id, username, psw, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, rol, cargo, licencia, vigencia_licencia,
+          ID_OFICIALIA, OFICIALIA_ID, departamento_id, departamento, region_id, oficina_id, rubro_id, ACTIVO)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        newUserId,
+        cleanUsername,
+        hashedPassword,
+        cleanNombre,
+        cleanAp1,
+        cleanAp2,
+        rolNorm,
+        cleanCargo,
+        cleanLic,
+        cleanVigLic,
+        ofiNum,
+        ofiNum,
+        ofiNum,
+        ofiNombre,
+        regNum,
+        ofiRegNum,
+        rubNum,
+        isActivo
+      ]
+    );
+
+    // Sincronizar en tabla usuarios si existe
+    await poolOps.query(
+      `INSERT INTO usuarios (id, username, password, nombre, rol, cargo, licencia, vigencia_licencia, ID_OFICIALIA, OFICIALIA_ID, departamento, region_id, oficina_id, rubro_id, ACTIVO)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         username = VALUES(username), password = VALUES(password), nombre = VALUES(nombre),
+         rol = VALUES(rol), cargo = VALUES(cargo), licencia = VALUES(licencia), vigencia_licencia = VALUES(vigencia_licencia),
+         ID_OFICIALIA = VALUES(ID_OFICIALIA), OFICIALIA_ID = VALUES(OFICIALIA_ID), departamento = VALUES(departamento),
+         region_id = VALUES(region_id), oficina_id = VALUES(oficina_id), rubro_id = VALUES(rubro_id), ACTIVO = VALUES(ACTIVO)`,
+      [
+        newUserId, cleanUsername, hashedPassword, cleanNombre, rolNorm, cleanCargo, cleanLic, cleanVigLic,
+        ofiNum, ofiNum, ofiNombre, regNum, ofiRegNum, rubNum, isActivo
+      ]
+    ).catch(() => {});
+
+    // Sincronizar nombre/cargo con oficialias, regiones y oficinas si aplica
+    const fullName = [cleanNombre, cleanAp1, cleanAp2].filter(Boolean).join(" ");
+    if (ofiNum && (cleanCargo || fullName)) {
+      await poolOps.query(`UPDATE oficialias SET oficial_reponsable = ? WHERE id = ?`, [fullName || cleanNombre, ofiNum]).catch(() => {});
+    }
+    if (regNum && (cleanCargo || fullName)) {
+      await poolOps.query(
+        `UPDATE regiones SET titular = ?, cargo_titular = ? WHERE id = ?`,
+        [fullName || cleanNombre, cleanCargo || "Director Regional", regNum]
+      ).catch(() => {});
+    }
+    if (ofiRegNum && (cleanCargo || fullName)) {
+      await poolOps.query(`UPDATE oficinas_regionales SET responsable = ? WHERE id = ?`, [fullName || cleanNombre, ofiRegNum]).catch(() => {});
+    }
+
+    return res.status(201).json({
+      ok: true,
+      message: "Usuario creado exitosamente.",
+      id: newUserId,
+      user: {
+        id: newUserId,
+        username: cleanUsername,
+        nombre: cleanNombre,
+        nombre_completo: fullName,
+        rol: rolNorm,
+        cargo: cleanCargo,
+        licencia: cleanLic,
+        vigencia_licencia: cleanVigLic,
+        region_id: regNum,
+        oficina_id: ofiRegNum,
+        rubro_id: rubNum,
+        id_oficialia: ofiNum,
+        departamento: ofiNombre,
+        activo: isActivo
+      }
+    });
+  } catch (e) {
+    return httpError(res, e.statusCode || 500, e.message);
+  }
+});
+
+// v42/v60: Eliminar usuario (CRUD Usuarios - Admin) con soporte de respaldo por username si id = 0
+app.delete(["/api/usuarios/:id", "/api/admin/usuarios/:id"], authRequired, async (req, res) => {
+  try {
+    if (!isAdmin(req)) {
+      return httpError(res, 403, "Acceso exclusivo para Administración para eliminar usuarios.");
+    }
+    const rawParamId = Number(req.params.id);
+    const userId = Number.isInteger(rawParamId) && rawParamId >= 0 ? rawParamId : 0;
+    const targetUsername = String(req.query?.username || req.body?.username || "").trim().toLowerCase();
+
+    if (userId <= 0 && !targetUsername) {
+      return httpError(res, 400, "ID de usuario inválido.");
+    }
+
+    if ((userId > 0 && Number(req.user?.id) === userId) || (targetUsername && String(req.user?.username || "").trim().toLowerCase() === targetUsername)) {
+      return httpError(res, 400, "No puedes eliminar tu propio usuario de sesión activa.");
+    }
+
+    let existing = null;
+    if (userId > 0) {
+      const [rowsById] = await poolRead.query(
+        `SELECT id, username FROM usuario WHERE id = ? OR (id <= 0 AND LOWER(TRIM(username)) = ?) ORDER BY (id = ?) DESC LIMIT 1`,
+        [userId, targetUsername, userId]
+      );
+      existing = rowsById && rowsById[0] ? rowsById[0] : null;
+    } else if (targetUsername) {
+      const [rowsByUser] = await poolRead.query(
+        `SELECT id, username FROM usuario WHERE (id = ? AND LOWER(TRIM(username)) = ?) OR LOWER(TRIM(username)) = ? ORDER BY (id <= 0) DESC LIMIT 1`,
+        [userId, targetUsername, targetUsername]
+      );
+      existing = rowsByUser && rowsByUser[0] ? rowsByUser[0] : null;
+    }
+
+    if (!existing) {
+      return httpError(res, 404, "Usuario no encontrado.");
+    }
+
+    const effId = Number(existing.id || 0);
+    const effUsername = String(existing.username || targetUsername || "").trim();
+
+    try {
+      await poolOps.query(
+        `DELETE FROM usuario WHERE (id = ? AND ? > 0) OR (id <= 0 AND username = ?) LIMIT 1`,
+        [effId, effId, effUsername]
+      );
+      await poolOps.query(
+        `DELETE FROM usuarios WHERE (id = ? AND ? > 0) OR (id <= 0 AND username = ?) LIMIT 1`,
+        [effId, effId, effUsername]
+      ).catch(() => {});
+    } catch (foreignErr) {
+      // Si tiene claves foráneas (pedidos, vales, etc.), desactivar usuario en vez de fallar
+      await poolOps.query(
+        `UPDATE usuario SET ACTIVO = 0 WHERE (id = ? AND ? > 0) OR (id <= 0 AND username = ?) LIMIT 1`,
+        [effId, effId, effUsername]
+      );
+      await poolOps.query(
+        `UPDATE usuarios SET ACTIVO = 0 WHERE (id = ? AND ? > 0) OR (id <= 0 AND username = ?) LIMIT 1`,
+        [effId, effId, effUsername]
+      ).catch(() => {});
+      invalidateUserScope(effId);
+      return res.json({
+        ok: true,
+        message: `El usuario "${existing.username}" tiene registros históricos vinculados y ha sido dado de baja (inactivo) correctamente.`,
+        deactivated: true
+      });
+    }
+
+    invalidateUserScope(effId);
+    return res.json({
+      ok: true,
+      message: `Usuario "${existing.username}" eliminado correctamente.`
+    });
+  } catch (e) {
+    return httpError(res, e.statusCode || 500, e.message);
+  }
+});
+
+// ============================================================================
+// v42: AUTO-ACTUALIZACIÓN Y MONITOR DE SESIONES ACTIVAS (HEARTBEAT)
+// ============================================================================
+const activeSessions = new Map();
+
+app.post("/api/ping", authRequired, (req, res) => {
+  const u = req.user || {};
+  const username = String(u.username || "anon").trim().toLowerCase();
+  const nombre = u.nombre_completo || [u.nombre, u.primer_apellido, u.segundo_apellido].filter(Boolean).join(" ") || u.nombre || username;
+  const rol = normalizeRol(u.rol, username);
+
+  activeSessions.set(username, {
+    username,
+    nombre,
+    rol,
+    ip: req.headers["x-forwarded-for"] || req.socket?.remoteAddress || req.ip || "127.0.0.1",
+    timestamp: Date.now()
+  });
+
+  return res.json({
+    ok: true,
+    version: 62,
+    timestamp: Date.now(),
+    username
+  });
+});
+
+app.get("/api/system-status", (req, res) => {
+  const now = Date.now();
+  const THREE_MINUTES = 3 * 60 * 1000;
+  const activeList = [];
+
+  for (const [key, session] of activeSessions.entries()) {
+    if (now - session.timestamp <= THREE_MINUTES) {
+      activeList.push({
+        username: session.username,
+        nombre: session.nombre,
+        rol: session.rol,
+        lastSeen: session.timestamp
+      });
+    } else {
+      activeSessions.delete(key);
+    }
+  }
+
+  // Comprobar si el solicitante es admin
+  let requesterIsAdmin = false;
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.split(" ")[1];
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || "secreta123");
+      if (decoded && (String(decoded.rol).toUpperCase() === "ADMIN" || decoded.username === "admin")) {
+        requesterIsAdmin = true;
+      }
+    }
+  } catch (_) {}
+
+  return res.json({
+    ok: true,
+    version: 62,
+    onlineCount: activeList.length,
+    activeUsers: requesterIsAdmin ? activeList : undefined
+  });
+});
+
+// ============================================================================
+// v61: CONTROL DE FASE DE PRUEBA GRUPAL Y PURGA DE REGISTROS DE PRUEBA (ADMIN)
+// ============================================================================
+app.get("/api/admin/modo-prueba", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    const activo = await isModoPruebaGrupalActivo();
+    return res.json({ ok: true, modoPruebaGrupal: activo, valor: activo ? "1" : "0" });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
+app.put("/api/admin/modo-prueba", authRequired, async (req, res) => {
+  try {
+    if (!isAdmin(req)) {
+      return httpError(res, 403, "Solo el Administrador puede cambiar el Modo de Prueba Grupal.");
+    }
+    await ensureSchemaAndUsers();
+    let nuevoValor;
+    if (req.body && req.body.activo !== undefined) {
+      nuevoValor = Boolean(req.body.activo && String(req.body.activo) !== "0" && String(req.body.activo).toLowerCase() !== "false") ? "1" : "0";
+    } else {
+      const actual = await isModoPruebaGrupalActivo();
+      nuevoValor = actual ? "0" : "1";
+    }
+
+    await poolOps.query(
+      `INSERT INTO configuracion_sistema (clave, valor) VALUES ('MODO_PRUEBA_GRUPAL', ?)
+       ON DUPLICATE KEY UPDATE valor = ?`,
+      [nuevoValor, nuevoValor]
+    );
+    const activo = nuevoValor === "1";
+    await registrarBitacora(
+      req,
+      "SISTEMA",
+      activo ? "ACTIVAR_MODO_PRUEBA" : "DESACTIVAR_MODO_PRUEBA",
+      `Modo de Prueba Grupal ${activo ? "ACTIVADO (cero afectación a inventarios)" : "DESACTIVADO (Modo Operación Real)"}.`
+    );
+    return res.json({
+      ok: true,
+      modoPruebaGrupal: activo,
+      valor: nuevoValor,
+      message: activo
+        ? "🧪 Fase de Prueba Grupal ACTIVADA. Las nuevas solicitudes y vales no descontarán inventario."
+        : "✅ Modo Operación Real ACTIVADO. Las solicitudes completadas y vales reales afectarán inventario."
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
+app.delete("/api/admin/purgar-pruebas", authRequired, async (req, res) => {
+  try {
+    if (!isAdmin(req)) {
+      return httpError(res, 403, "Solo el Administrador puede purgar registros de prueba.");
+    }
+    await ensureSchemaAndUsers();
+    const conn = await poolOps.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // Asegurar que el Vale #3 de Víctor Huerta NUNCA sea marcado como prueba antes de borrar
+      await conn.query(
+        `UPDATE vales_prestamo
+         SET es_prueba = 0
+         WHERE id = 3
+            OR LOWER(COALESCE(solicitante_nombre, '')) LIKE '%victor%huerta%'
+            OR LOWER(COALESCE(solicitante_nombre, '')) LIKE '%víctor%huerta%'
+            OR LOWER(COALESCE(recibe_nombre, '')) LIKE '%victor%huerta%'
+            OR LOWER(COALESCE(recibe_nombre, '')) LIKE '%víctor%huerta%'`
+      );
+
+      // 1. Eliminar detalles y cabeceras de solicitudes de prueba
+      const [delDetSol] = await conn.query(
+        `DELETE ds FROM detalles_solicitud ds
+         INNER JOIN solicitudes s ON s.id = ds.solicitud_id
+         WHERE COALESCE(s.es_prueba, 0) = 1`
+      );
+      const [delSol] = await conn.query(
+        `DELETE FROM solicitudes WHERE COALESCE(es_prueba, 0) = 1`
+      );
+
+      // 2. Eliminar detalles y cabeceras de vales_prestamo de prueba (protegiendo explícitamente el Vale #3 de Víctor Huerta)
+      const [delDetVp] = await conn.query(
+        `DELETE vpd FROM vales_prestamo_detalle vpd
+         INNER JOIN vales_prestamo vp ON vp.id = vpd.vale_id
+         WHERE COALESCE(vp.es_prueba, 0) = 1
+           AND vp.id <> 3
+           AND LOWER(COALESCE(vp.solicitante_nombre, '')) NOT LIKE '%victor%huerta%'
+           AND LOWER(COALESCE(vp.solicitante_nombre, '')) NOT LIKE '%víctor%huerta%'`
+      );
+      const [delVp] = await conn.query(
+        `DELETE FROM vales_prestamo
+         WHERE COALESCE(es_prueba, 0) = 1
+           AND id <> 3
+           AND LOWER(COALESCE(solicitante_nombre, '')) NOT LIKE '%victor%huerta%'
+           AND LOWER(COALESCE(solicitante_nombre, '')) NOT LIKE '%víctor%huerta%'`
+      );
+
+      await conn.commit();
+
+      const solBorradas = Number(delSol?.affectedRows || 0);
+      const vpBorrados = Number(delVp?.affectedRows || 0);
+
+      await registrarBitacora(
+        req,
+        "SISTEMA",
+        "PURGAR_PRUEBAS",
+        `Purga de registros de prueba ejecutada: ${solBorradas} solicitudes y ${vpBorrados} vales provisionales eliminados (Vale #3 de Víctor Huerta preservado).`
+      );
+
+      return res.json({
+        ok: true,
+        solicitudes_eliminadas: solBorradas,
+        detalles_solicitud_eliminados: Number(delDetSol?.affectedRows || 0),
+        vales_eliminados: vpBorrados,
+        detalles_vales_eliminados: Number(delDetVp?.affectedRows || 0),
+        message: `🧹 Purga completada: ${solBorradas} solicitudes de prueba y ${vpBorrados} vales de prueba eliminados. El Vale #3 de Víctor Huerta se conservó intacto.`
+      });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  } catch (e) {
+    return httpError(res, 500, e.message);
+  }
+});
+
+// ============================================================================
+// v44: CONSULTA DE BITÁCORA DE MOVIMIENTOS DEL INVENTARIO (ADMINISTRADOR)
+// ============================================================================
+app.get("/api/bitacora", authRequired, async (req, res) => {
+  try {
+    if (!isAdmin(req)) {
+      return httpError(res, 403, "Solo el Administrador puede consultar la bitácora de movimientos.");
+    }
+    const { q = "", fecha = "", limit = 500 } = req.query;
+    const lim = Math.min(Math.max(parseInt(limit) || 500, 1), 1000);
+
+    let whereSql = "WHERE 1=1";
+    const params = [];
+
+    if (fecha) {
+      whereSql += " AND DATE(fecha) = ?";
+      params.push(fecha);
+    }
+    if (q && q.trim()) {
+      const like = `%${q.trim()}%`;
+      whereSql += " AND (usuario LIKE ? OR nombre_usuario LIKE ? OR modulo LIKE ? OR accion LIKE ? OR detalles LIKE ?)";
+      params.push(like, like, like, like, like);
+    }
+
+    params.push(lim);
+    const [rows] = await poolRead.query(
+      `SELECT id, usuario, nombre_usuario, modulo, accion, detalles, fecha
+       FROM bitacora_movimientos
+       ${whereSql}
+       ORDER BY fecha DESC, id DESC
+       LIMIT ?`,
+      params
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al obtener bitácora");
+  }
+});
+
+// ============================================================================
+// v52: VISOR RÁPIDO DE BITÁCORA - RECUPERACIÓN DE CLAVES HOMOLOGADAS (ADMIN)
+// ============================================================================
+app.get("/api/ver-bitacora", authRequired, async (req, res) => {
+  try {
+    const rolNorm = String(req.user?.rol || "").trim().toLowerCase();
+    const isUserAdmin = isAdmin(req) || rolNorm === "admin" || String(req.user?.username || "").toLowerCase() === "admin";
+    if (!isUserAdmin) {
+      return res.status(403).send("<h1>403 Acceso Denegado</h1><p>Solo el Administrador puede consultar este registro de bitácora.</p>");
+    }
+
+    const [rows] = await poolRead.query(
+      `SELECT * FROM bitacora_movimientos WHERE accion = 'HOMOLOGAR_CLAVES' ORDER BY id DESC LIMIT 500`
+    );
+
+    function esc(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    let rowsHtml = "";
+    if (!rows || rows.length === 0) {
+      rowsHtml = `<tr><td colspan="4" style="text-align:center; padding:16px; color:#64748b;">No hay registros de homologación de claves en la bitácora.</td></tr>`;
+    } else {
+      rowsHtml = rows.map((r) => {
+        const fechaStr = r.fecha ? new Date(r.fecha).toLocaleString("es-MX", { timeZone: "America/Mazatlan" }) : "-";
+        const usuarioStr = esc(r.usuario_id || r.usuario || r.nombre_usuario || "admin");
+        const accionStr = esc(r.accion || "HOMOLOGAR_CLAVES");
+        const detallesStr = esc(r.detalles || "").replace(/\n/g, "<br>");
+        return `<tr>
+          <td style="white-space:nowrap; vertical-align:top; padding:8px 12px;">${fechaStr}</td>
+          <td style="white-space:nowrap; vertical-align:top; padding:8px 12px; font-weight:bold;">${usuarioStr}</td>
+          <td style="white-space:nowrap; vertical-align:top; padding:8px 12px;"><span style="background:#e0f2fe; color:#0369a1; padding:2px 6px; border-radius:4px; font-size:12px; font-weight:bold;">${accionStr}</span></td>
+          <td style="vertical-align:top; padding:8px 12px; font-family:monospace; font-size:13px; line-height:1.5;">${detallesStr}</td>
+        </tr>`;
+      }).join("\n");
+    }
+
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Visor de Bitácora - Homologación de Claves</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background:#f8fafc; color:#1e293b; margin:20px; padding:0; }
+    .container { max-width: 1200px; margin: 0 auto; background: #ffffff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); padding: 24px; }
+    h1 { margin-top:0; font-size: 22px; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 12px; }
+    p.meta { color: #64748b; font-size: 14px; margin-bottom: 20px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th { background: #f1f5f9; color: #334155; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; padding: 10px 12px; text-align: left; border: 1px solid #cbd5e1; }
+    td { border: 1px solid #e2e8f0; }
+    tr:nth-child(even) { background: #f8fafc; }
+    tr:hover { background: #f1f5f9; }
+    .btn { display: inline-block; padding: 6px 14px; background: #0284c7; color: #fff; text-decoration: none; border-radius: 6px; font-size: 13px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h1>📋 Visor de Bitácora: Homologación y Recuperación de Claves</h1>
+      <a href="/dashboard.html" class="btn">⬅ Volver al Panel</a>
+    </div>
+    <p class="meta">Mostrando los últimos 500 registros con acción <b>HOMOLOGAR_CLAVES</b>. Permite identificar qué clave anterior fue reemplazada por la nueva.</p>
+    <table border="1">
+      <thead>
+        <tr>
+          <th>fecha</th>
+          <th>usuario_id</th>
+          <th>accion</th>
+          <th>detalles</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsHtml}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>`;
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.send(html);
+  } catch (e) {
+    return res.status(500).send(`<h1>Error al consultar bitácora</h1><p>${e.message}</p>`);
+  }
+});
+
+// ============================================================================
+// v42: EXPORTACIÓN Y DESCARGA DE RESPALDO DE BASE DE DATOS (BACKUP DUMP .SQL)
+// ============================================================================
+app.get("/api/backup-db", authRequired, async (req, res) => {
+  try {
+    if (!isAdmin(req)) {
+      return httpError(res, 403, "Acceso denegado: solo el Administrador puede descargar respaldos de base de datos.");
+    }
+
+    const conn = await poolRead.getConnection();
+    try {
+      const [tableRows] = await conn.query(`SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'`);
+      const tableKey = Object.keys(tableRows[0] || {})[0];
+      const tables = tableRows.map((r) => r[tableKey]).filter(Boolean);
+
+      const now = new Date();
+      const isoDate = now.toISOString().replace(/[:.]/g, "-");
+      let sqlDump = `-- ====================================================================\n`;
+      sqlDump += `-- RESPALDO AUTOMÁTICO DE BASE DE DATOS - SISTEMA DE INVENTARIO V42\n`;
+      sqlDump += `-- FECHA DE GENERACIÓN: ${now.toISOString()}\n`;
+      sqlDump += `-- GENERADO POR: ${req.user?.username || "admin"}\n`;
+      sqlDump += `-- TABLAS TOTALES: ${tables.length}\n`;
+      sqlDump += `-- ====================================================================\n\n`;
+      sqlDump += `SET NAMES utf8mb4;\n`;
+      sqlDump += `SET FOREIGN_KEY_CHECKS = 0;\n`;
+      sqlDump += `SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';\n\n`;
+
+      for (const table of tables) {
+        const [[createRow]] = await conn.query(`SHOW CREATE TABLE \`${table}\``);
+        const createTableSql = createRow ? (createRow["Create Table"] || createRow[Object.keys(createRow)[1]]) : "";
+
+        sqlDump += `--\n-- Estructura de tabla para la tabla \`${table}\`\n--\n`;
+        sqlDump += `DROP TABLE IF EXISTS \`${table}\`;\n`;
+        if (createTableSql) {
+          sqlDump += `${createTableSql};\n\n`;
+        }
+
+        const [rows] = await conn.query(`SELECT * FROM \`${table}\``);
+        if (rows && rows.length > 0) {
+          sqlDump += `-- Volcado de datos para la tabla \`${table}\` (${rows.length} registros)\n`;
+          const cols = Object.keys(rows[0]);
+          const colList = cols.map((c) => `\`${c}\``).join(", ");
+
+          const CHUNK_SIZE = 100;
+          for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+            const chunk = rows.slice(i, i + CHUNK_SIZE);
+            const valuesSql = chunk.map((r) => {
+              const vals = cols.map((col) => {
+                const val = r[col];
+                if (val === null || val === undefined) return "NULL";
+                if (Buffer.isBuffer(val)) return `0x${val.toString("hex")}`;
+                if (typeof val === "boolean") return val ? "1" : "0";
+                if (typeof val === "number") return String(val);
+                if (val instanceof Date) {
+                  return conn.escape(val.toISOString().slice(0, 19).replace("T", " "));
+                }
+                return conn.escape(val);
+              });
+              return `(${vals.join(", ")})`;
+            }).join(",\n  ");
+
+            sqlDump += `INSERT INTO \`${table}\` (${colList}) VALUES\n  ${valuesSql};\n`;
+          }
+          sqlDump += "\n";
+        }
+      }
+
+      sqlDump += `SET FOREIGN_KEY_CHECKS = 1;\n`;
+      sqlDump += `-- FIN DEL RESPALDO V42 --\n`;
+
+      res.setHeader("Content-Type", "application/sql; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="respaldo_inventario_${isoDate}.sql"`);
+      return res.send(sqlDump);
+    } finally {
+      conn.release();
+    }
+  } catch (e) {
+    console.error("[ERROR] Generando respaldo de BD:", e);
+    return httpError(res, 500, e.message || "Error al generar respaldo de base de datos.");
   }
 });
 
@@ -2716,9 +4670,20 @@ async function handleGetOficialias(req, res) {
 app.get("/api/oficialias", authRequired, handleGetOficialias);
 app.get("/api/departamentos", authRequired, handleGetOficialias);
 
+app.get(["/api/reportes", "/api/graficas"], authRequired, async (req, res) => {
+  const uName = normalizeUser(req.user?.username);
+  if (uName === "gabrielfiol" || uName === "fiol" || !canViewReportes(req)) {
+    return httpError(res, 403, "No tienes permiso para ver reportes o gráficas");
+  }
+  return res.json({ ok: true, data: [] });
+});
+
 app.get("/api/reportes/oficialias", authRequired, async (req, res) => {
 try {
-if (!canViewReportes(req)) return httpError(res, 403, "No tienes permiso para ver reportes");
+const uName = normalizeUser(req.user?.username);
+if (uName === "gabrielfiol" || uName === "fiol" || !canViewReportes(req)) {
+  return httpError(res, 403, "No tienes permiso para ver reportes");
+}
 
 const rawOficialiaId = String(req.query.oficialia_id || "").trim();
 const selectedOficialiaId = rawOficialiaId && Number.isFinite(Number(rawOficialiaId)) && Number(rawOficialiaId) > 0 ? Number(rawOficialiaId) : null;
@@ -3087,7 +5052,11 @@ WHERE s.id = ? LIMIT 1`,
 if (!r2.length) return httpError(res, 404, "Solicitud no encontrada");
 const base = r2[0];
 base.oficialia_nombre = base.oficialia_nombre ?? (await getOficialiaNombre(base.id_oficialia ?? base.ID_OFICIALIA ?? null));
-base.tiene_firma_digital = Boolean(base.firma_solicitante_data || base.folio_firma_digital);
+base.firma_solicitante = base.firma_solicitante || base.firma_solicitante_data || null;
+base.firma_solicitante_data = base.firma_solicitante_data || base.firma_solicitante || null;
+base.tiene_firma_digital = Boolean(base.firma_solicitante || base.firma_solicitante_data || base.folio_firma_digital);
+base.es_prueba = Number(base.es_prueba || 0);
+base.inventario_descontado = Number(base.inventario_descontado || 0);
 base.usuario = {
 id: base.usuario_id ?? base.USUARIO_ID ?? null,
 username: base.username ?? null,
@@ -3101,7 +5070,7 @@ try {
   const [detRows] = await poolRead.query(
     `SELECT d.id AS detalle_id, d.id, d.solicitud_id, d.producto_id,
             p.CLAVE, p.DESCRIPCION, p.unidad, p.categoria,
-            d.cantidad, d.atendida, d.observaciones
+            d.cantidad, d.cantidad_surtida, d.atendida, d.observaciones
      FROM detalles_solicitud d
      LEFT JOIN productos p ON p.${await detectProductosPK()} = d.producto_id
      WHERE d.solicitud_id = ?
@@ -3144,36 +5113,6 @@ const sid = Number(req.params.id);
 if (!Number.isFinite(sid)) return httpError(res, 400, "ID invalido");
 await assertSolicitudAccess(req, sid);
 
-let rows = [];
-let useFallback = false;
-
-try {
-const [vrows] = await poolRead.query(
-"SELECT * FROM v_solicitudes_detalle WHERE solicitud_id = ? ORDER BY detalle_id",
-[sid]
-);
-if (vrows.length) {
-const hasCat = "categoria" in vrows[0] || "CATEGORIA" in vrows[0];
-const hasUni = "unidad" in vrows[0] || "UNIDAD" in vrows[0];
-if (!hasCat || !hasUni) {
-useFallback = true;
-} else {
-rows = vrows.map((r) => ({
-...r,
-CLAVE: r.CLAVE ?? r.sku ?? null,
-DESCRIPCION: r.DESCRIPCION ?? r.producto ?? null,
-categoria: r.categoria ?? r.CATEGORIA ?? null,
-unidad: r.unidad ?? r.UNIDAD ?? null,
-}));
-}
-} else {
-useFallback = true;
-}
-} catch {
-useFallback = true;
-}
-
-if (useFallback) {
 const [fallback] = await poolRead.query(
 `SELECT d.id AS detalle_id,
 d.solicitud_id,
@@ -3183,6 +5122,7 @@ p.DESCRIPCION,
 p.unidad AS unidad,
 p.categoria AS categoria,
 d.cantidad,
+d.cantidad_surtida,
 d.atendida,
 d.observaciones
 FROM detalles_solicitud d
@@ -3192,7 +5132,6 @@ ORDER BY d.id`,
 [sid]
 );
 rows = fallback;
-}
 
 const enriched = await attachCategoriaNombre(rows);
 const claves = Array.from(new Set(enriched.map(r => r.CLAVE || r.sku).filter(Boolean)));
@@ -3287,6 +5226,7 @@ const {
   region_solicitante = null,
   nombre_solicitante_firma = null,
   firma_solicitante_data = null,
+  firma_solicitante = null,
   items = [],
 } = req.body || {};
 
@@ -3295,31 +5235,38 @@ let loc = 0;
 let uid = Number(usuario_id || 0) || req.user.id;
 
 const canSelectAny = canSelectAnyDepartment(req);
+const uNameNorm = String(req.user?.username || "").toLowerCase().trim();
+const isFiolUser = uNameNorm === "gabrielfiol" || uNameNorm === "fiol" || uNameNorm === "encargado";
 
-if (!canSelectAny) {
-  // Regla de Negocio 1 & 3:
-  // Si el usuario no es admin ni gabrielfiol, se ignora cualquier id_oficialia o usuario_id enviado
-  // y se fuerza el departamento/oficialía que pertenece a su perfil en la tabla usuario.
+if (!canSelectAny || isFiolUser) {
+  // Regla de Negocio:
+  // Si el usuario no es admin o si es gabrielfiol, se ignora cualquier id_oficialia o usuario_id enviado
+  // y se fuerza el departamento/oficialía que pertenece a su perfil en la tabla usuario (para Fiol: 30030008).
   uid = req.user.id;
-  const [uRows] = await poolRead.query(
-    `SELECT u.id, u.ID_OFICIALIA, u.OFICIALIA_ID, u.departamento, u.region_id, u.oficina_id,
-            o.id AS ofi_id, o.id_localidad
-     FROM usuario u
-     LEFT JOIN oficialias o ON o.id = COALESCE(u.ID_OFICIALIA, u.OFICIALIA_ID)
-     WHERE u.id = ? LIMIT 1`,
-    [req.user.id]
-  );
-  const uProfile = uRows[0] || {};
-  ofi = Number(uProfile.ofi_id || uProfile.ID_OFICIALIA || uProfile.OFICIALIA_ID || req.user?.id_oficialia || req.user?.departamento_id || 0) || null;
-  loc = Number(uProfile.id_localidad || 0);
+  if (isFiolUser) {
+    ofi = 30030008;
+    loc = 0;
+  } else {
+    const [uRows] = await poolRead.query(
+      `SELECT u.id, u.ID_OFICIALIA, u.OFICIALIA_ID, u.departamento, u.region_id, u.oficina_id,
+              o.id AS ofi_id, o.id_localidad
+       FROM usuario u
+       LEFT JOIN oficialias o ON o.id = COALESCE(u.ID_OFICIALIA, u.OFICIALIA_ID)
+       WHERE u.id = ? LIMIT 1`,
+      [req.user.id]
+    );
+    const uProfile = uRows[0] || {};
+    ofi = Number(uProfile.ofi_id || uProfile.ID_OFICIALIA || uProfile.OFICIALIA_ID || req.user?.id_oficialia || req.user?.departamento_id || 0) || null;
+    loc = Number(uProfile.id_localidad || 0);
 
-  if (!ofi) {
-    const regId = Number(uProfile.region_id || req.user?.region_id || 0);
-    const uName = String(req.user?.username || "").toLowerCase();
-    if (uName === "loscabos" || regId === 2) ofi = 30030009;
-    else if (uName === "mulege" || regId === 4) ofi = 30030010;
-    else if (regId === 3) ofi = 30030011;
-    else ofi = 30030001;
+    if (!ofi) {
+      const regId = Number(uProfile.region_id || req.user?.region_id || 0);
+      const uName = String(req.user?.username || "").toLowerCase();
+      if (uName === "loscabos" || regId === 2) ofi = 30030009;
+      else if (uName === "mulege" || regId === 4) ofi = 30030010;
+      else if (regId === 3) ofi = 30030011;
+      else ofi = 30030001;
+    }
   }
 } else {
   if (!ofi && usuario_id && Number(usuario_id) >= 1000) {
@@ -3380,7 +5327,7 @@ if (userRole !== 'ADMIN' && (ofi === 30030000 || String(ofi) === '30030000')) {
   return httpError(res, 403, "No tienes permiso para solicitar materiales a nombre de Administración");
 }
 if (userRole === 'USUARIO' && (ofi === 30030008 || String(ofi) === '30030008')) {
-  return httpError(res, 403, "No tienes permiso para solicitar materiales a nombre de Encargado de Inventario");
+  return httpError(res, 403, "No tienes permiso para solicitar materiales a nombre de Encargado de Archivos y Materiales");
 }
 
 const scope = await getUserScope(req);
@@ -3392,27 +5339,39 @@ if (!canSelectAny && scope.region_nombre) {
 const regionKey = regionRaw.toUpperCase().replace(/[\s\/-]+/g, "_");
 const isForanea = scope.es_region_foranea || (isAdmin(req) && REGIONES_FORANEAS.has(regionKey));
 
-const cleanRegion = regionRaw ? regionRaw.slice(0, 50) : null;
-const cleanNombreFirma = isForanea && nombre_solicitante_firma ? String(nombre_solicitante_firma).trim().slice(0, 150) : null;
-const cleanFirmaData = isForanea && firma_solicitante_data && String(firma_solicitante_data).trim().startsWith("data:image/")
-  ? String(firma_solicitante_data).trim()
+const cleanRegion = regionRaw ? regionRaw.slice(0, 50) : "La Paz";
+const defaultUserFullName =
+  req.user?.nombre_completo ||
+  [req.user?.nombre, req.user?.primer_ap, req.user?.segundo_ap].filter(Boolean).join(" ") ||
+  req.user?.username ||
+  null;
+const cleanNombreFirma = nombre_solicitante_firma && String(nombre_solicitante_firma).trim()
+  ? String(nombre_solicitante_firma).trim().slice(0, 150)
+  : defaultUserFullName;
+const rawFirmaInput = firma_solicitante || firma_solicitante_data || null;
+const cleanFirmaData = rawFirmaInput && String(rawFirmaInput).trim().startsWith("data:image/")
+  ? String(rawFirmaInput).trim()
   : null;
-const fechaFirma = cleanFirmaData ? new Date() : null;
-const folioFirma = cleanFirmaData
-  ? buildFolioFirmaDigital(`${uid}|${ofi}|${cleanNombreFirma || ""}|${cleanFirmaData.slice(-64)}`)
-  : null;
+if (!cleanFirmaData) {
+  return httpError(res, 400, "La firma digital del solicitante es obligatoria para crear la orden de material.");
+}
+const fechaFirma = new Date();
+const folioFirma = buildFolioFirmaDigital(`${uid}|${ofi}|${cleanNombreFirma || ""}|${cleanFirmaData.slice(-64)}`);
 
 const conn = await poolOps.getConnection();
 try {
   await conn.beginTransaction();
+  const modoPruebaActivo = await isModoPruebaGrupalActivo(conn);
+  const esPruebaVal = modoPruebaActivo ? 1 : 0;
 
   const [rs] = await conn.query(
     `INSERT INTO solicitudes(
        tipo_solicitud, fecha_solicitud, id_oficialia, id_localidad, usuario_id,
        status, observaciones, region_solicitante, nombre_solicitante_firma,
-       firma_solicitante_data, fecha_firma_digital, folio_firma_digital
+       firma_solicitante_data, firma_solicitante, fecha_firma_digital, folio_firma_digital,
+       es_prueba, inventario_descontado
      )
-     VALUES (?, NOW(), ?, ?, ?, 'PENDIENTE', ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, NOW(), ?, ?, ?, 'PENDIENTE', ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     [
       tipo_solicitud,
       ofi,
@@ -3422,8 +5381,10 @@ try {
       cleanRegion,
       cleanNombreFirma,
       cleanFirmaData,
+      cleanFirmaData,
       fechaFirma,
       folioFirma,
+      esPruebaVal,
     ]
   );
   const solicitudId = rs.insertId;
@@ -3459,14 +5420,12 @@ try {
       }
     }
 
-    const rawAtendida = Number(it.atendida || 0);
-    const atendida = Number.isFinite(rawAtendida) && rawAtendida > 0 ? rawAtendida : 0;
     const itemObs = it.observaciones || null;
 
     await conn.query(
-      `INSERT INTO detalles_solicitud (solicitud_id, producto_id, cantidad, atendida, observaciones)
-       VALUES (?, ?, ?, ?, ?)`,
-      [solicitudId, prodId, cantidad, atendida, itemObs]
+      `INSERT INTO detalles_solicitud (solicitud_id, producto_id, cantidad, cantidad_surtida, atendida, observaciones)
+       VALUES (?, ?, ?, NULL, 0, ?)`,
+      [solicitudId, prodId, cantidad, itemObs]
     );
   }
 
@@ -3474,6 +5433,7 @@ try {
   res.json({
     ok: true,
     solicitud_id: solicitudId,
+    es_prueba: esPruebaVal,
     folio_firma_digital: folioFirma,
     fecha_firma_digital: fechaFirma,
   });
@@ -3488,6 +5448,14 @@ return httpError(res, 400, e.message);
 }
 });
 
+function hasSolicitudModifyPermission(req, ownerUserId) {
+  const uRol = String(req.user?.rol || "").trim().toUpperCase();
+  const uName = String(req.user?.username || "").trim().toLowerCase();
+  const isAuthorizedEncargado = ["gabrielfiol", "fiol", "encargado", "jorge", "jorgepatron"].includes(uName);
+  const isOwner = ownerUserId != null && Number(ownerUserId) === Number(req.user?.id);
+  return uRol === "ADMIN" || isAuthorizedEncargado || isOwner;
+}
+
 // Endpoint para firmar digitalmente una solicitud existente (ej. solicitudes pendientes de firma)
 app.post("/api/solicitudes/:id/firma", authRequired, async (req, res) => {
   try {
@@ -3495,19 +5463,27 @@ app.post("/api/solicitudes/:id/firma", authRequired, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return httpError(res, 400, "ID de solicitud inválido");
 
-    const { region_solicitante = null, nombre_solicitante_firma = null, firma_solicitante_data = null } = req.body || {};
-    const cleanFirmaData = firma_solicitante_data && String(firma_solicitante_data).trim().startsWith("data:image/")
-      ? String(firma_solicitante_data).trim()
+    const [rows] = await poolRead.query(
+      `SELECT id, usuario_id, status, region_solicitante, nombre_solicitante_firma FROM solicitudes WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    if (!rows.length) return httpError(res, 404, "Solicitud no encontrada");
+
+    const sol = rows[0];
+    if (!hasSolicitudModifyPermission(req, sol.usuario_id)) {
+      return res.status(403).json({ ok: false, error: "Forbidden: No tienes permiso para modificar esta solicitud." });
+    }
+
+    const { region_solicitante = null, nombre_solicitante_firma = null, firma_solicitante_data = null, firma_solicitante = null } = req.body || {};
+    const rawFirma = firma_solicitante || firma_solicitante_data || null;
+    const cleanFirmaData = rawFirma && String(rawFirma).trim().startsWith("data:image/")
+      ? String(rawFirma).trim()
       : null;
 
     if (!cleanFirmaData) {
       return httpError(res, 400, "Se requiere dibujar o adjuntar la firma digital en formato PNG.");
     }
 
-    const [rows] = await poolRead.query(`SELECT id, status, region_solicitante, nombre_solicitante_firma FROM solicitudes WHERE id = ? LIMIT 1`, [id]);
-    if (!rows.length) return httpError(res, 404, "Solicitud no encontrada");
-
-    const sol = rows[0];
     const cleanRegion = region_solicitante != null && String(region_solicitante).trim() !== ""
       ? String(region_solicitante).trim().slice(0, 50)
       : sol.region_solicitante;
@@ -3523,10 +5499,11 @@ app.post("/api/solicitudes/:id/firma", authRequired, async (req, res) => {
        SET region_solicitante = COALESCE(?, region_solicitante),
            nombre_solicitante_firma = COALESCE(?, nombre_solicitante_firma),
            firma_solicitante_data = ?,
+           firma_solicitante = ?,
            fecha_firma_digital = ?,
            folio_firma_digital = ?
        WHERE id = ?`,
-      [cleanRegion, cleanNombre, cleanFirmaData, fechaFirma, folioFirma, id]
+      [cleanRegion, cleanNombre, cleanFirmaData, cleanFirmaData, fechaFirma, folioFirma, id]
     );
 
     return res.json({
@@ -3546,7 +5523,14 @@ app.post("/api/solicitudes/:id/detalles", authRequired, async (req, res) => {
 try {
 const solicitudId = Number(req.params.id);
 const { producto_id, cantidad, observaciones = null } = req.body || {};
-if (!Number.isFinite(solicitudId)) return httpError(res, 400, "ID de solicitud invalido");
+if (!Number.isFinite(solicitudId) || solicitudId <= 0) return httpError(res, 400, "ID de solicitud invalido");
+
+const [solAuthRows] = await poolRead.query(`SELECT id, usuario_id FROM solicitudes WHERE id = ? LIMIT 1`, [solicitudId]);
+if (!solAuthRows.length) return httpError(res, 404, "Solicitud no encontrada");
+if (!hasSolicitudModifyPermission(req, solAuthRows[0].usuario_id)) {
+  return res.status(403).json({ ok: false, error: "Forbidden: No tienes permiso para modificar esta solicitud." });
+}
+
 if (!producto_id || !(Number(cantidad) > 0))
 return httpError(res, 400, "producto_id y cantidad (>0) son requeridos");
 
@@ -3590,7 +5574,14 @@ app.post("/api/solicitudes/:id/detalles/by-clave", authRequired, async (req, res
 try {
 const solicitudId = Number(req.params.id);
 const { clave, cantidad, observaciones = null } = req.body || {};
-if (!Number.isFinite(solicitudId)) return httpError(res, 400, "ID de solicitud invalido");
+if (!Number.isFinite(solicitudId) || solicitudId <= 0) return httpError(res, 400, "ID de solicitud invalido");
+
+const [solAuthRows] = await poolRead.query(`SELECT id, usuario_id FROM solicitudes WHERE id = ? LIMIT 1`, [solicitudId]);
+if (!solAuthRows.length) return httpError(res, 404, "Solicitud no encontrada");
+if (!hasSolicitudModifyPermission(req, solAuthRows[0].usuario_id)) {
+  return res.status(403).json({ ok: false, error: "Forbidden: No tienes permiso para modificar esta solicitud." });
+}
+
 if (!clave || !(Number(cantidad) > 0)) return httpError(res, 400, "clave y cantidad (>0) requeridos");
 
 const conn = await poolOps.getConnection();
@@ -3662,8 +5653,11 @@ return httpError(res, 400, e.message);
 
 async function surtirSolicitudHandler(req, res) {
   try {
+    if (isAuditorBlockedUser(req)) {
+      return httpError(res, 403, "Modo auditoría. No tienes permisos para modificar el estatus de las solicitudes.");
+    }
     if (!canManageSolicitudes(req)) {
-      return httpError(res, 403, "Solo el Encargado de Almacén o Administrador puede surtir solicitudes");
+      return httpError(res, 403, "Solo el Encargado de Almacén o Administrador puede gestionar solicitudes");
     }
     const solicitudId = Number(req.params.id);
     if (!Number.isInteger(solicitudId) || solicitudId <= 0) {
@@ -3671,16 +5665,14 @@ async function surtirSolicitudHandler(req, res) {
     }
 
     const rawItems = Array.isArray(req.body) ? req.body : (Array.isArray(req.body?.items) ? req.body.items : []);
-    if (!rawItems.length) {
-      return httpError(res, 400, "No se enviaron renglones para surtir");
-    }
+    const requestedStatusRaw = !Array.isArray(req.body) ? (req.body?.status || req.body?.nuevo_estado || null) : null;
 
     const conn = await poolOps.getConnection();
     try {
       await conn.beginTransaction();
 
       const [solRows] = await conn.query(
-        "SELECT id, status, fecha_solicitud FROM solicitudes WHERE id = ? FOR UPDATE",
+        "SELECT id, usuario_id, status, fecha_solicitud, COALESCE(es_prueba, 0) AS es_prueba, COALESCE(inventario_descontado, 0) AS inventario_descontado FROM solicitudes WHERE id = ? FOR UPDATE",
         [solicitudId]
       );
       if (!solRows.length) {
@@ -3688,15 +5680,28 @@ async function surtirSolicitudHandler(req, res) {
         return httpError(res, 404, "Solicitud no encontrada");
       }
       const sol = solRows[0];
-      const curStatus = String(sol.status || "").toUpperCase();
-      if (curStatus === "CANCELADA") {
+      if (!hasSolicitudModifyPermission(req, sol.usuario_id)) {
         await conn.rollback();
-        return httpError(res, 400, "No se puede surtir una solicitud cancelada");
+        return res.status(403).json({ ok: false, error: "Forbidden: No tienes permiso para modificar esta solicitud." });
+      }
+      const curStatus = String(sol.status || "").toUpperCase();
+      if (curStatus === "CANCELADA" || curStatus === "CANCELADO") {
+        await conn.rollback();
+        return httpError(res, 400, "No se puede procesar una solicitud cancelada");
+      }
+
+      let nextStatus = null;
+      if (requestedStatusRaw) {
+        nextStatus = await normalizeStatus(requestedStatusRaw);
+      } else if (curStatus === "PARA_FIRMAS") {
+        nextStatus = "COMPLETADA";
+      } else {
+        nextStatus = "PARA_FIRMAS";
       }
 
       const pk = await detectProductosPK();
       const [detRows] = await conn.query(
-        `SELECT ds.id, ds.solicitud_id, ds.producto_id, ds.cantidad, ds.atendida, ds.observaciones,
+        `SELECT ds.id, ds.solicitud_id, ds.producto_id, ds.cantidad, ds.cantidad_surtida, ds.atendida, ds.observaciones,
                 p.CLAVE AS clave, p.DESCRIPCION AS descripcion
          FROM detalles_solicitud ds
          LEFT JOIN productos p ON p.${qi(pk)} = ds.producto_id
@@ -3723,17 +5728,24 @@ async function surtirSolicitudHandler(req, res) {
         return det.descripcion || stockMap.get(c)?.desc || det.clave || `renglón ${det.id}`;
       };
 
-      // 1) Validar TODOS los renglones antes de tocar el inventario
       const plan = [];
-      for (const item of rawItems) {
+      const itemsToProcess = rawItems.length
+        ? rawItems
+        : detRows.map(d => ({
+            detalle_id: d.id,
+            cantidad_surtida: d.cantidad_surtida !== null && d.cantidad_surtida !== undefined ? d.cantidad_surtida : (Number(d.atendida || 0) > 0 ? d.atendida : d.cantidad),
+            observaciones: d.observaciones
+          }));
+
+      for (const item of itemsToProcess) {
         const detId = Number(item.detalle_id || item.id);
         const targetDet = detRows.find(d => Number(d.id) === detId);
         if (!targetDet) continue;
 
         const nombre = nombreDe(targetDet);
         const cantSolicitada = Number(targetDet.cantidad || 0);
-        const prevAtendida = Number(targetDet.atendida || 0);
-        const rawAt = item.atendida === "" || item.atendida === null || item.atendida === undefined ? NaN : Number(item.atendida);
+        const rawInputVal = item.cantidad_surtida !== undefined ? item.cantidad_surtida : item.atendida;
+        const rawAt = rawInputVal === "" || rawInputVal === null || rawInputVal === undefined ? NaN : Number(rawInputVal);
 
         if (!Number.isInteger(rawAt) || rawAt < 0) {
           await conn.rollback();
@@ -3748,9 +5760,8 @@ async function surtirSolicitudHandler(req, res) {
         const claveKey = clave ? clave.toUpperCase() : null;
         const almInfo = claveKey ? stockMap.get(claveKey) : null;
         const curStock = almInfo ? almInfo.stock : 0;
-        const delta = rawAt - prevAtendida;
 
-        if (delta > 0 && (!almInfo || curStock < delta)) {
+        if (rawAt > 0 && Number(sol.inventario_descontado || 0) === 0 && (!almInfo || curStock < rawAt)) {
           await conn.rollback();
           if (curStock <= 0) {
             return httpError(res, 400, `No hay stock disponible para ${nombre} (Existencia actual: 0)`);
@@ -3758,92 +5769,100 @@ async function surtirSolicitudHandler(req, res) {
             return httpError(res, 400, `Stock insuficiente para ${nombre}. Solicitado a surtir: ${rawAt}, Existencia disponible: ${curStock}`);
           }
         }
-        plan.push({ item, targetDet, nombre, clave, almInfo, curStock, delta, nextAtendida: rawAt });
+        plan.push({ item, targetDet, nombre, clave, almInfo, curStock, nextAtendida: rawAt });
       }
 
-      if (!plan.length) {
+      if (!plan.length && detRows.length > 0) {
         await conn.rollback();
         return httpError(res, 400, "Ninguno de los renglones enviados pertenece a esta solicitud.");
       }
 
-      // 2) Si todo queda en 0, bloquear el surtido con un mensaje claro
-      if (plan.every(p => p.nextAtendida === 0)) {
+      if (plan.length > 0 && ["PARA_FIRMAS", "COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus) && plan.every(p => p.nextAtendida === 0)) {
         await conn.rollback();
-        return httpError(res, 400, "No hay stock disponible para surtir esta solicitud (todas las cantidades a surtir están en 0).");
+        return httpError(res, 400, "Todas las cantidades a surtir están en 0. Ingresa al menos 1 artículo a entregar.");
       }
 
-      // 3) Aplicar movimientos de inventario y actualizar renglones
+      // Actualizar cantidad_surtida y atendida en detalles_solicitud
       for (const p of plan) {
-        const { item, targetDet, clave, almInfo, delta, nextAtendida } = p;
+        const { item, targetDet, nextAtendida } = p;
         const detId = Number(targetDet.id);
+        const newObs = item.observaciones !== undefined ? (item.observaciones ? String(item.observaciones).trim() : null) : targetDet.observaciones;
+        await conn.query(
+          "UPDATE detalles_solicitud SET cantidad_surtida = ?, atendida = ?, observaciones = ? WHERE id = ?",
+          [nextAtendida, nextAtendida, newObs, detId]
+        );
+      }
 
-        if (delta !== 0 && clave && almInfo) {
-          if (delta > 0) {
-            const newStock = almInfo.stock - delta;
+      const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
+      const esSolicitudDePrueba = Number(sol.es_prueba || 0) === 1 || modoPruebaGlobal;
+      const shouldDeductNow =
+        ["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus) &&
+        !esSolicitudDePrueba &&
+        Number(sol.inventario_descontado || 0) === 0;
+
+      if (shouldDeductNow) {
+        for (const p of plan) {
+          const { targetDet, clave, almInfo, nextAtendida, item } = p;
+          if (nextAtendida > 0 && clave && almInfo) {
+            const newStock = Math.max(0, almInfo.stock - nextAtendida);
             almInfo.stock = newStock;
             await conn.query("UPDATE almacen_dregcivil SET STOCK = ? WHERE ID = ?", [newStock, almInfo.id]);
             try {
-              await conn.query("UPDATE productos SET STOCK = GREATEST(0, COALESCE(STOCK, 0) - ?) WHERE CLAVE = ?", [delta, clave]);
+              await conn.query("UPDATE productos SET STOCK = GREATEST(0, COALESCE(STOCK, 0) - ?) WHERE CLAVE = ?", [nextAtendida, clave]);
             } catch {}
             try {
               if (targetDet.producto_id) {
-                await conn.query("UPDATE almacen_principal SET STOCK = GREATEST(0, COALESCE(STOCK, 0) - ?) WHERE producto_id = ?", [delta, targetDet.producto_id]);
+                await conn.query("UPDATE almacen_principal SET STOCK = GREATEST(0, COALESCE(STOCK, 0) - ?) WHERE producto_id = ?", [nextAtendida, targetDet.producto_id]);
               }
             } catch {}
 
             await logMovimiento(conn, {
               tipo: "SALIDA",
               clave,
-              cantidad: delta,
+              cantidad: nextAtendida,
               responsable: req.user?.username || "web",
               destino: "SOLICITUD",
               referencia: `SOL-${solicitudId}`,
-              observaciones: item.observaciones || "Surtido de solicitud",
-            });
-          } else {
-            const regreso = Math.abs(delta);
-            const newStock = almInfo.stock + regreso;
-            almInfo.stock = newStock;
-            await conn.query("UPDATE almacen_dregcivil SET STOCK = ? WHERE ID = ?", [newStock, almInfo.id]);
-            try {
-              await conn.query("UPDATE productos SET STOCK = COALESCE(STOCK, 0) + ? WHERE CLAVE = ?", [regreso, clave]);
-            } catch {}
-            try {
-              if (targetDet.producto_id) {
-                await conn.query("UPDATE almacen_principal SET STOCK = COALESCE(STOCK, 0) + ? WHERE producto_id = ?", [regreso, targetDet.producto_id]);
-              }
-            } catch {}
-
-            await logMovimiento(conn, {
-              tipo: "ENTRADA",
-              clave,
-              cantidad: regreso,
-              responsable: req.user?.username || "web",
-              destino: "SOLICITUD",
-              referencia: `SOL-${solicitudId}-AJUSTE`,
-              observaciones: "Ajuste de cantidad atendida",
+              observaciones: item?.observaciones || "Entrega completada de solicitud",
             });
           }
         }
+        await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
+      }
 
-        const newObs = item.observaciones !== undefined ? (item.observaciones ? String(item.observaciones).trim() : null) : targetDet.observaciones;
+      const nextInvDescontado = shouldDeductNow ? 1 : Number(sol.inventario_descontado || 0);
+      if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus)) {
         await conn.query(
-          "UPDATE detalles_solicitud SET atendida = ?, observaciones = ? WHERE id = ?",
-          [nextAtendida, newObs, detId]
+          "UPDATE solicitudes SET status = ?, inventario_descontado = ?, fecha_surtido = CURDATE() WHERE id = ?",
+          [nextStatus, nextInvDescontado, solicitudId]
+        );
+      } else {
+        await conn.query(
+          "UPDATE solicitudes SET status = ?, inventario_descontado = ? WHERE id = ?",
+          [nextStatus, nextInvDescontado, solicitudId]
         );
       }
 
-      const surtidaStatus = await normalizeStatus("SURTIDA").catch(() => "SURTIDA");
-      await conn.query(
-        "UPDATE solicitudes SET status = ?, fecha_surtido = CURDATE() WHERE id = ?",
-        [surtidaStatus, solicitudId]
+      const itemsBreakdown = plan
+        .filter(p => p.nextAtendida > 0)
+        .map(p => `${p.nextAtendida}x ${p.nombre || p.clave}`)
+        .join(", ");
+      await registrarBitacora(
+        req,
+        "ALMACEN",
+        `ORDEN_${nextStatus}`,
+        `Orden #${solicitudId} actualizada a ${nextStatus}${esSolicitudDePrueba ? " [MODO PRUEBA - SIN DESCUENTO DE STOCK]" : ""}: ${itemsBreakdown || "Sin artículos"}`,
+        conn
       );
 
-      // Sincronizar Almacén Central con Inventario Regional Delegación La Paz Rubro 1
-      await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
-
       await conn.commit();
-      return res.json({ ok: true, status: surtidaStatus, solicitud_id: solicitudId });
+      return res.json({
+        ok: true,
+        status: nextStatus,
+        solicitud_id: solicitudId,
+        es_prueba: esSolicitudDePrueba ? 1 : 0,
+        inventario_descontado: nextInvDescontado,
+      });
     } catch (err) {
       await conn.rollback();
       throw err;
@@ -3863,6 +5882,9 @@ app.patch("/api/solicitudes/:id/detalles", authRequired, surtirSolicitudHandler)
 
 app.patch("/api/solicitudes/:id/detalles/:detalleId", authRequired, async (req, res) => {
 try {
+if (isAuditorBlockedUser(req)) {
+  return httpError(res, 403, "Modo auditoría. No tienes permisos para modificar el estatus de las solicitudes.");
+}
 if (!canManageSolicitudes(req)) {
 return httpError(res, 403, "Solo el Encargado o Administrador puede modificar la cantidad atendida");
 }
@@ -3894,6 +5916,9 @@ return httpError(res, 400, e.message);
 
 app.patch("/api/detalles/:id", authRequired, async (req, res) => {
 try {
+if (isAuditorBlockedUser(req)) {
+  return httpError(res, 403, "Modo auditoría. No tienes permisos para modificar el estatus de las solicitudes.");
+}
 if (!canManageSolicitudes(req)) {
 return httpError(res, 403, "Solo el Encargado o Administrador puede modificar la cantidad atendida");
 }
@@ -3918,17 +5943,34 @@ return httpError(res, 400, e.message);
 }
 });
 
-app.patch("/api/solicitudes/:id/status", authRequired, async (req, res) => {
+const handleSolicitudStatusChange = async (req, res) => {
 try {
+const id = Number(req.params.id);
+if (!Number.isFinite(id) || id <= 0) return httpError(res, 400, "ID invalido");
+
+if (isAuditorBlockedUser(req)) {
+  return httpError(res, 403, "Modo auditoría. No tienes permisos para modificar el estatus de las solicitudes.");
+}
+
+const [solAuthRows] = await poolRead.query(`SELECT id, usuario_id FROM solicitudes WHERE id = ? LIMIT 1`, [id]);
+if (!solAuthRows.length) return httpError(res, 404, "Solicitud no encontrada");
+if (!hasSolicitudModifyPermission(req, solAuthRows[0].usuario_id)) {
+  return res.status(403).json({ ok: false, error: "Forbidden: No tienes permiso para modificar esta solicitud." });
+}
+
 if (!canManageSolicitudes(req)) {
 return httpError(res, 403, "No tienes permiso para cambiar el status de la solicitud");
 }
 
-const id = Number(req.params.id);
-if (!Number.isFinite(id)) return httpError(res, 400, "ID invalido");
-
-const { status, observaciones = null } = req.body || {};
+const status = req.body?.status || req.body?.estado || req.body?.nuevo_estado || null;
+const observaciones = req.body?.observaciones ?? null;
+const items = Array.isArray(req.body?.items) ? req.body.items : null;
 if (!status) return httpError(res, 400, "status requerido");
+
+if (items && items.length) {
+  req.body.status = status;
+  return surtirSolicitudHandler(req, res);
+}
 
 const result = await updateSolicitudStatusStockAware({
 solicitudId: id,
@@ -3937,16 +5979,35 @@ observaciones,
 username: req.user?.username || "web",
 });
 
-res.json({ ok: true, updated: true, id, status: result.status, restored_qty: result.restoredQty || 0 });
+res.json({
+  ok: true,
+  updated: true,
+  id,
+  status: result.status,
+  restored_qty: result.restoredQty || 0,
+  deducted_qty: result.deductedQty || 0,
+  es_prueba: result.esPrueba ? 1 : 0,
+});
 } catch (e) {
 if (e.statusCode) return httpError(res, e.statusCode, e.message);
 return httpError(res, 400, e.message);
 }
-});
+};
+
+app.patch("/api/solicitudes/:id/status", authRequired, handleSolicitudStatusChange);
+app.put("/api/solicitudes/:id/status", authRequired, handleSolicitudStatusChange);
+app.patch("/api/solicitudes/:id/estatus", authRequired, handleSolicitudStatusChange);
+app.put("/api/solicitudes/:id/estatus", authRequired, handleSolicitudStatusChange);
+app.patch("/api/solicitudes/:id/estado", authRequired, handleSolicitudStatusChange);
+app.put("/api/solicitudes/:id/estado", authRequired, handleSolicitudStatusChange);
 
 async function deleteOrDiscardSolicitud(req, res, { isDraftDiscard = false } = {}) {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return httpError(res, 400, "ID invalido");
+
+  if (isAuditorBlockedUser(req)) {
+    return httpError(res, 403, "Modo auditoría. No tienes permisos para modificar el estatus de las solicitudes.");
+  }
 
   const admin = isAdmin(req);
   const canManage = canManageSolicitudes(req);
@@ -3958,7 +6019,7 @@ async function deleteOrDiscardSolicitud(req, res, { isDraftDiscard = false } = {
   try {
     await conn.beginTransaction();
     const [solRows] = await conn.query(
-      "SELECT id, usuario_id, status FROM solicitudes WHERE id=? LIMIT 1 FOR UPDATE",
+      "SELECT id, usuario_id, status, COALESCE(es_prueba, 0) AS es_prueba, COALESCE(inventario_descontado, 0) AS inventario_descontado FROM solicitudes WHERE id=? LIMIT 1 FOR UPDATE",
       [id]
     );
     if (!solRows.length) {
@@ -3974,7 +6035,7 @@ async function deleteOrDiscardSolicitud(req, res, { isDraftDiscard = false } = {
 
     const pk = await detectProductosPK();
     const [detRows] = await conn.query(
-      `SELECT ds.id, ds.atendida, p.CLAVE AS clave
+      `SELECT ds.id, ds.atendida, ds.cantidad_surtida, p.CLAVE AS clave
        FROM detalles_solicitud ds
        LEFT JOIN productos p ON p.${qi(pk)} = ds.producto_id
        WHERE ds.solicitud_id = ?
@@ -3982,22 +6043,27 @@ async function deleteOrDiscardSolicitud(req, res, { isDraftDiscard = false } = {
       [id]
     );
 
-    const totalAtendida = detRows.reduce((acc, r) => acc + (Number(r.atendida || 0) || 0), 0);
+    const totalAtendida = detRows.reduce((acc, r) => acc + (Number(r.cantidad_surtida ?? r.atendida ?? 0) || 0), 0);
     if (isDraftDiscard && totalAtendida > 0 && !admin) {
       await conn.rollback();
       return httpError(res, 409, "No se puede descartar una solicitud ya surtida");
     }
 
-    for (const row of detRows) {
-      const atendida = Number(row.atendida || 0);
-      if (atendida > 0 && row.clave) {
-        await applySolicitudStockDeltaForClave(conn, {
-          clave: row.clave,
-          delta: -atendida,
-          responsable: req.user?.username || "web",
-          referencia: `SOL-${id}-DEL`,
-          observaciones: "Eliminacion de solicitud",
-        });
+    const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
+    const shouldRestoreStock = Number(sol.es_prueba || 0) === 0 && Number(sol.inventario_descontado || 0) === 1 && !modoPruebaGlobal;
+
+    if (shouldRestoreStock) {
+      for (const row of detRows) {
+        const atendida = Number(row.cantidad_surtida ?? row.atendida ?? 0);
+        if (atendida > 0 && row.clave) {
+          await applySolicitudStockDeltaForClave(conn, {
+            clave: row.clave,
+            delta: -atendida,
+            responsable: req.user?.username || "web",
+            referencia: `SOL-${id}-DEL`,
+            observaciones: "Eliminacion de solicitud",
+          });
+        }
       }
     }
 
@@ -4451,7 +6517,7 @@ try {
 await conn.beginTransaction();
 
 const [solRows] = await conn.query(
-`SELECT id, status
+`SELECT id, status, COALESCE(es_prueba, 0) AS es_prueba, COALESCE(inventario_descontado, 0) AS inventario_descontado
 FROM solicitudes
 WHERE id=?
 LIMIT 1
@@ -4464,67 +6530,126 @@ err.statusCode = 404;
 throw err;
 }
 
+const sol = solRows[0];
 const cancelStatus = await normalizeStatus("CANCELADA").catch(() => "CANCELADA");
 const nextStatus = await normalizeStatus(status);
-const prevStatus = String(solRows[0].status || "").trim().toUpperCase();
+const prevStatus = String(sol.status || "").trim().toUpperCase();
 
-if (prevStatus === cancelStatus && nextStatus !== cancelStatus) {
+if ((prevStatus === cancelStatus || prevStatus === "CANCELADO") && nextStatus !== cancelStatus) {
 const err = new Error("La solicitud cancelada ya no puede volver a otro estatus");
 err.statusCode = 409;
 throw err;
 }
 
+const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
+const esPrueba = Number(sol.es_prueba || 0) === 1 || modoPruebaGlobal;
 let restoredQty = 0;
-if (nextStatus === cancelStatus && prevStatus !== cancelStatus) {
+let deductedQty = 0;
+let nextInvDescontado = Number(sol.inventario_descontado || 0);
+
 const pk = await detectProductosPK();
-const [detRows] = await conn.query(
-`SELECT ds.id, ds.atendida, p.CLAVE AS clave
-FROM detalles_solicitud ds
-LEFT JOIN productos p ON p.${qi(pk)} = ds.producto_id
-WHERE ds.solicitud_id = ?
-AND COALESCE(ds.atendida, 0) > 0
-FOR UPDATE`,
-[solicitudId]
-);
 
-for (const row of detRows) {
-const atendida = Number(row.atendida || 0);
-if (!(atendida > 0)) continue;
-if (!row.clave) {
-const err = new Error("No se pudo resolver la CLAVE del detalle");
-err.statusCode = 400;
-throw err;
-}
-await applySolicitudStockDeltaForClave(conn, {
-clave: row.clave,
-delta: -atendida,
-responsable: username,
-referencia: `SOL-${solicitudId}-CANCEL`,
-observaciones: observaciones || "Cancelacion de solicitud",
-});
-restoredQty += atendida;
+// Si pasa a COMPLETADA / SURTIDA / ENTREGADA y NO es de prueba y aún no se ha descontado inventario
+if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus) && !esPrueba && nextInvDescontado === 0) {
+  const [detRows] = await conn.query(
+    `SELECT ds.id, ds.cantidad, ds.cantidad_surtida, ds.atendida, p.CLAVE AS clave, p.DESCRIPCION AS descripcion
+     FROM detalles_solicitud ds
+     LEFT JOIN productos p ON p.${qi(pk)} = ds.producto_id
+     WHERE ds.solicitud_id = ?
+     FOR UPDATE`,
+    [solicitudId]
+  );
+
+  for (const row of detRows) {
+    const cantSurtir = Number(
+      row.cantidad_surtida !== null && row.cantidad_surtida !== undefined
+        ? row.cantidad_surtida
+        : (Number(row.atendida || 0) > 0 ? row.atendida : row.cantidad || 0)
+    );
+    if (!(cantSurtir > 0)) continue;
+    if (!row.clave) {
+      const err = new Error("No se pudo resolver la CLAVE del detalle");
+      err.statusCode = 400;
+      throw err;
+    }
+    await applySolicitudStockDeltaForClave(conn, {
+      clave: row.clave,
+      delta: cantSurtir,
+      responsable: username,
+      referencia: `SOL-${solicitudId}`,
+      observaciones: observaciones || "Entrega completada de solicitud",
+    });
+    deductedQty += cantSurtir;
+    await conn.query(
+      `UPDATE detalles_solicitud SET cantidad_surtida = COALESCE(cantidad_surtida, ?), atendida = ? WHERE id = ?`,
+      [cantSurtir, cantSurtir, row.id]
+    );
+  }
+  nextInvDescontado = 1;
+} else if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus) && esPrueba) {
+  // En modo prueba: asegurar que cantidad_surtida/atendida tengan valor para PDF sin descontar stock
+  await conn.query(
+    `UPDATE detalles_solicitud
+     SET cantidad_surtida = COALESCE(cantidad_surtida, CASE WHEN COALESCE(atendida, 0) > 0 THEN atendida ELSE cantidad END),
+         atendida = COALESCE(cantidad_surtida, CASE WHEN COALESCE(atendida, 0) > 0 THEN atendida ELSE cantidad END)
+     WHERE solicitud_id = ?`,
+    [solicitudId]
+  );
 }
 
-if (detRows.length) {
-await conn.query(
-`UPDATE detalles_solicitud
-SET atendida = 0
-WHERE solicitud_id = ?
-AND COALESCE(atendida, 0) > 0`,
-[solicitudId]
-);
-}
+if (nextStatus === cancelStatus && prevStatus !== cancelStatus) {
+  if (!esPrueba && nextInvDescontado === 1) {
+    const [detRows] = await conn.query(
+      `SELECT ds.id, ds.cantidad_surtida, ds.atendida, p.CLAVE AS clave
+       FROM detalles_solicitud ds
+       LEFT JOIN productos p ON p.${qi(pk)} = ds.producto_id
+       WHERE ds.solicitud_id = ?
+       FOR UPDATE`,
+      [solicitudId]
+    );
+
+    for (const row of detRows) {
+      const atendida = Number(row.cantidad_surtida ?? row.atendida ?? 0);
+      if (!(atendida > 0)) continue;
+      if (!row.clave) continue;
+      await applySolicitudStockDeltaForClave(conn, {
+        clave: row.clave,
+        delta: -atendida,
+        responsable: username,
+        referencia: `SOL-${solicitudId}-CANCEL`,
+        observaciones: observaciones || "Cancelacion de solicitud",
+      });
+      restoredQty += atendida;
+    }
+    nextInvDescontado = 0;
+  }
+
+  await conn.query(
+    `UPDATE detalles_solicitud
+     SET atendida = 0, cantidad_surtida = 0
+     WHERE solicitud_id = ?`,
+    [solicitudId]
+  );
 }
 
-await conn.query(
-`UPDATE solicitudes
-SET status = ?, observaciones = COALESCE(?, observaciones)
-WHERE id = ?`,
-[nextStatus, observaciones, solicitudId]
-);
+if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus)) {
+  await conn.query(
+    `UPDATE solicitudes
+     SET status = ?, inventario_descontado = ?, fecha_surtido = CURDATE(), observaciones = COALESCE(?, observaciones)
+     WHERE id = ?`,
+    [nextStatus, nextInvDescontado, observaciones, solicitudId]
+  );
+} else {
+  await conn.query(
+    `UPDATE solicitudes
+     SET status = ?, inventario_descontado = ?, observaciones = COALESCE(?, observaciones)
+     WHERE id = ?`,
+    [nextStatus, nextInvDescontado, observaciones, solicitudId]
+  );
+}
 
 await conn.commit();
-return { status: nextStatus, restoredQty };
+return { status: nextStatus, restoredQty, deductedQty, esPrueba };
 } catch (e) {
 await conn.rollback();
 throw e;
@@ -4535,22 +6660,56 @@ conn.release();
 
 
 async function getNextAlmacenClave(connOrPool = poolRead) {
-  const [almRows] = await connOrPool.query("SELECT CLAVE FROM almacen_dregcivil WHERE CLAVE IS NOT NULL");
-  let prodRows = [];
-  try {
-    const [pRows] = await connOrPool.query("SELECT CLAVE FROM productos WHERE CLAVE IS NOT NULL");
-    prodRows = pRows;
-  } catch {}
   let maxNum = 0;
-  for (const r of [...almRows, ...prodRows]) {
-    const c = String(r.CLAVE || "").trim().toUpperCase();
-    const m = c.match(/^CL-(\d+)$/);
-    if (m) {
-      const n = parseInt(m[1], 10);
-      if (Number.isFinite(n) && n > maxNum) maxNum = n;
+  try {
+    const [rows] = await connOrPool.query(`
+      SELECT CLAVE
+      FROM almacen_dregcivil
+      WHERE UPPER(TRIM(CLAVE)) REGEXP '^MAT-[0-9]+$'
+      ORDER BY CAST(SUBSTRING(UPPER(TRIM(CLAVE)), 5) AS UNSIGNED) DESC
+      LIMIT 1
+    `);
+    if (rows && rows.length > 0) {
+      const m = String(rows[0].CLAVE || "").trim().toUpperCase().match(/^MAT-(\d+)$/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n > maxNum) maxNum = n;
+      }
     }
+  } catch {}
+
+  try {
+    const [pRows] = await connOrPool.query(`
+      SELECT CLAVE
+      FROM productos
+      WHERE UPPER(TRIM(CLAVE)) REGEXP '^MAT-[0-9]+$'
+      ORDER BY CAST(SUBSTRING(UPPER(TRIM(CLAVE)), 5) AS UNSIGNED) DESC
+      LIMIT 1
+    `);
+    if (pRows && pRows.length > 0) {
+      const m = String(pRows[0].CLAVE || "").trim().toUpperCase().match(/^MAT-(\d+)$/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n > maxNum) maxNum = n;
+      }
+    }
+  } catch {}
+
+  let nextNum = maxNum + 1;
+  let candidate = `MAT-${String(nextNum).padStart(3, "0")}`;
+
+  // Verificar en bucle para evitar duplicados concurrentes
+  while (true) {
+    const [dup] = await connOrPool.query(
+      `SELECT ID FROM almacen_dregcivil WHERE UPPER(TRIM(CLAVE)) = ? LIMIT 1`,
+      [candidate]
+    );
+    if (!dup || dup.length === 0) break;
+    nextNum++;
+    candidate = `MAT-${String(nextNum).padStart(3, "0")}`;
   }
-  return `CL-${String(maxNum + 1).padStart(3, "0")}`;
+
+  return candidate;
 }
 
 // GET /api/almacen: LECTURA abierta a CUALQUIER usuario autenticado (USUARIO, REGIONAL, ENCARGADO, ADMIN).
@@ -4577,6 +6736,7 @@ const almStatusCol = await detectAlmacenStatusCol();
 const hasUnidad = await hasAlmacenUnidad();
 const catIsNum = await almCategoriaIsNumeric();
 const meta = await detectCategorias();
+const catMap = await getCategoriasNameMap();
 let nextClave = null;
 if (!isNormalUser) {
   try { nextClave = await getNextAlmacenClave(poolRead); } catch { nextClave = null; }
@@ -4591,47 +6751,63 @@ const extraParam = clave ? [clave] : [];
 const unidadExpr = hasUnidad ? "a.UNIDAD" : "p.unidad";
 const unidadSelect = `${unidadExpr} AS UNIDAD`;
 const joinProductos = "LEFT JOIN productos p ON p.CLAVE = a.CLAVE";
+const hasCatJoin = Boolean(meta.table && meta.id && meta.name);
+const catJoinSql = hasCatJoin
+  ? (catIsNum
+      ? `LEFT JOIN ${qi(meta.table)} c ON c.${qi(meta.id)} = a.CATEGORIA`
+      : `LEFT JOIN ${qi(meta.table)} c ON (TRIM(CAST(a.CATEGORIA AS CHAR)) REGEXP '^[0-9]+$' AND c.${qi(meta.id)} = CAST(TRIM(CAST(a.CATEGORIA AS CHAR)) AS UNSIGNED))`)
+  : "";
 
 const statusSel = hasEstado && almStatusCol ? `a.${qi(almStatusCol)} AS status` : `'ACTIVO' AS status`;
 const orderExpr =
-orderSafe === "CATEGORIA" && catIsNum && meta.table
-? `c.${qi(meta.name).slice(1, -1)}`
+orderSafe === "CATEGORIA" && hasCatJoin
+? `COALESCE(c.${qi(meta.name).slice(1, -1)}, CAST(a.CATEGORIA AS CHAR))`
 : orderSafe === "STATUS" && almStatusCol
 ? `a.${qi(almStatusCol)}`
 : `a.${orderSafe}`;
 
-if (catIsNum && meta.table) {
-const cols = `a.ID, a.CLAVE, a.DESCRIPCION, a.CATEGORIA, c.${qi(meta.name).slice(1, -1)} AS CATEGORIA_NOMBRE, ${unidadSelect}, a.STOCK, a.STOCK AS stock, (a.STOCK > 0) AS disponible, a.STOCK AS existencia, a.STOCK AS cantidad_disponible, p.minimo AS minimo, COALESCE(a.stock_minimo, p.stock_minimo, p.minimo, 0) AS stock_minimo, a.origen_adquisicion, a.observaciones_control, ${statusSel}`;
-const [rows] = await poolRead.query(
-`SELECT ${cols}
-FROM almacen_dregcivil a
-${joinProductos}
-LEFT JOIN ${qi(meta.table)} c ON c.${qi(meta.id)} = a.CATEGORIA
-WHERE (?='' OR CONCAT_WS(' ', a.CLAVE, a.DESCRIPCION, c.${qi(meta.name).slice(1, -1)}${
-hasEstado && almStatusCol ? `, a.${qi(almStatusCol)}` : ""
-}) LIKE ?)
-${extraWhere}
-ORDER BY ${orderExpr} ${dirSafe}
-LIMIT ? OFFSET ?`,
-[q, like, ...extraParam, lim, off]
-);
-return res.json({ ok: true, data: rows, next_clave: nextClave });
-} else {
-const cols = `a.ID, a.CLAVE, a.DESCRIPCION, a.CATEGORIA, ${unidadSelect}, a.STOCK, a.STOCK AS stock, (a.STOCK > 0) AS disponible, a.STOCK AS existencia, a.STOCK AS cantidad_disponible, p.minimo AS minimo, COALESCE(a.stock_minimo, p.stock_minimo, p.minimo, 0) AS stock_minimo, a.origen_adquisicion, a.observaciones_control, ${statusSel}`;
-const [rows] = await poolRead.query(
-`SELECT ${cols}
-FROM almacen_dregcivil a
-${joinProductos}
-WHERE (?='' OR CONCAT_WS(' ', a.CLAVE, a.DESCRIPCION, a.CATEGORIA${
-hasEstado && almStatusCol ? `, a.${qi(almStatusCol)}` : ""
-}) LIKE ?)
-${extraWhere}
-ORDER BY ${orderExpr} ${dirSafe}
-LIMIT ? OFFSET ?`,
-[q, like, ...extraParam, lim, off]
-);
-return res.json({ ok: true, data: rows, next_clave: nextClave });
+const tokenGroups = getSearchTokenRoots(q);
+let searchWhere = "";
+const searchParams = [];
+
+if (tokenGroups.length > 0) {
+  const searchTargetExpr = hasCatJoin
+    ? `CONCAT_WS(' ', a.CLAVE, a.DESCRIPCION, c.${qi(meta.name).slice(1, -1)}, a.CATEGORIA${hasEstado && almStatusCol ? `, a.${qi(almStatusCol)}` : ""})`
+    : `CONCAT_WS(' ', a.CLAVE, a.DESCRIPCION, a.CATEGORIA${hasEstado && almStatusCol ? `, a.${qi(almStatusCol)}` : ""})`;
+
+  const andClauses = [];
+  for (const group of tokenGroups) {
+    const orClauses = [];
+    for (const variant of group) {
+      orClauses.push(`${searchTargetExpr} LIKE ?`);
+      searchParams.push(`%${variant}%`);
+    }
+    andClauses.push(`(${orClauses.join(" OR ")})`);
+  }
+  searchWhere = " AND " + andClauses.join(" AND ");
 }
+
+const catNameExpr = hasCatJoin ? `c.${qi(meta.name).slice(1, -1)} AS CATEGORIA_NOMBRE,` : "";
+const cols = `a.ID, a.CLAVE, a.DESCRIPCION, a.CATEGORIA, ${catNameExpr} ${unidadSelect}, a.STOCK, a.STOCK AS stock, (a.STOCK > 0) AS disponible, a.STOCK AS existencia, a.STOCK AS cantidad_disponible, p.minimo AS minimo, COALESCE(a.stock_minimo, p.stock_minimo, p.minimo, 0) AS stock_minimo, a.origen_adquisicion, a.observaciones_control, ${statusSel}`;
+const [rawRows] = await poolRead.query(
+`SELECT ${cols}
+FROM almacen_dregcivil a
+${joinProductos}
+${catJoinSql}
+WHERE 1=1 ${searchWhere} ${extraWhere}
+ORDER BY ${orderExpr} ${dirSafe}
+LIMIT ? OFFSET ?`,
+[...searchParams, ...extraParam, lim, off]
+);
+const rows = rawRows.map((r) => {
+  const resolvedCat = resolveCategoriaTexto(r.CATEGORIA, r.CATEGORIA_NOMBRE, catMap);
+  return {
+    ...r,
+    CATEGORIA_NOMBRE: resolvedCat,
+    CATEGORIA: /^\d+$/.test(String(r.CATEGORIA ?? "").trim()) ? resolvedCat : r.CATEGORIA,
+  };
+});
+return res.json({ ok: true, data: rows, next_clave: nextClave });
 } catch (e) {
 res.status(500).json({ ok: false, error: e.message });
 }
@@ -4649,7 +6825,8 @@ const replace = admin && String(req.query.replace || "") === "1";
 
 const body = req.body || {};
 try {
-let CLAVE = String(body.CLAVE ?? body.clave ?? "").trim().toUpperCase();
+let manualClave = String(body.CLAVE ?? body.clave ?? body.clave_bien ?? "").trim().toUpperCase();
+let CLAVE = manualClave;
 const DESCRIPCION = String(body.DESCRIPCION ?? body.descripcion ?? "").trim();
 const rawStock = body.STOCK ?? body.stock;
 const cantNueva = Number(rawStock);
@@ -4698,12 +6875,19 @@ const conn = await poolOps.getConnection();
 try {
 await conn.beginTransaction();
 
+// v53: Si el campo clave viene vacío, asigna automáticamente la siguiente (MAT-XXX).
+// Si el usuario ingresó una clave manual, NUNCA re-asignar automáticamente ni auto-renumerar.
+// Si la clave ya existe y no es un reemplazo explícito del administrador, devolver 409 Conflict.
 if (!CLAVE) {
   CLAVE = await getNextAlmacenClave(conn);
-} else if (!replace) {
-  const [dupCheck] = await conn.query("SELECT ID FROM almacen_dregcivil WHERE CLAVE=? LIMIT 1", [CLAVE]);
-  if (dupCheck.length) {
-    CLAVE = await getNextAlmacenClave(conn);
+} else {
+  const [checkDup] = await conn.query(
+    "SELECT ID FROM almacen_dregcivil WHERE UPPER(TRIM(CLAVE)) = ? LIMIT 1",
+    [CLAVE]
+  );
+  if (checkDup.length > 0 && !replace) {
+    await conn.rollback();
+    return httpError(res, 409, "⚠️ Error: La clave de producto ingresada ya existe. Por favor asigna una clave diferente.");
   }
 }
 
@@ -4712,6 +6896,10 @@ const [ex] = await conn.query(`SELECT ID, STOCK FROM almacen_dregcivil WHERE CLA
 let idAlm = null;
 let delta = cantNueva;
 if (ex.length) {
+  if (!replace) {
+    await conn.rollback();
+    return httpError(res, 409, "⚠️ Error: La clave de producto ingresada ya existe. Por favor asigna una clave diferente.");
+  }
 const stockActual = Number(ex[0].STOCK || 0);
 let nuevoStock = replace ? cantNueva : stockActual + cantNueva;
 
@@ -4733,6 +6921,13 @@ const params = hasUnidad
 await conn.query(`UPDATE almacen_dregcivil SET ${sets} WHERE ID=?`, params);
 idAlm = ex[0].ID;
 delta = replace ? nuevoStock - stockActual : cantNueva;
+await registrarBitacora(
+  req,
+  'ALMACEN',
+  replace ? 'AJUSTE_STOCK' : 'ENTRADA_STOCK',
+  `${replace ? 'Ajuste' : 'Entrada'} de stock en "${CLAVE} - ${DESCRIPCION}": ${delta > 0 ? '+' : ''}${delta} (Nuevo stock: ${nuevoStock})`,
+  conn
+);
 } else {
 ensureEntradaAllowed(req, cantNueva, { isNew: true, viaAddStock: false });
 
@@ -4754,6 +6949,13 @@ params = [CLAVE, DESCRIPCION, CATEGORIA, cantNueva, stockMinimo, origenAdquisici
 }
 const [rs] = await conn.query(sql, params);
 idAlm = rs.insertId;
+await registrarBitacora(
+  req,
+  'ALMACEN',
+  'ALTA_PRODUCTO',
+  `Alta de nuevo material "${CLAVE} - ${DESCRIPCION}" (Stock inicial: ${cantNueva} ${UNIDAD}, Categoría: ${rawCat})`,
+  conn
+);
 }
 
 await upsertProductoFromAlmacen(conn, {
@@ -4793,168 +6995,455 @@ return httpError(res, 400, e.message);
 }
 });
 
-app.patch("/api/almacen/:id", authRequired, async (req, res) => {
-const admin = isAdminDemo(req);
-const canAlmacen = hasAlmacenAccess(req);
-if (!admin && !canAlmacen) {
-return httpError(res, 403, "No tienes permiso para editar almacAn");
+async function handleUpdateAlmacen(req, res) {
+  const admin = isAdminDemo(req);
+  const canAlmacen = hasAlmacenAccess(req);
+  if (!admin && !canAlmacen) {
+    return httpError(res, 403, "No tienes permiso para editar almacén");
+  }
+
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return httpError(res, 400, "ID inválido");
+
+    const hasUnidad = await hasAlmacenUnidad();
+    const catIsNum = await almCategoriaIsNumeric();
+    const almStatusCol = await detectAlmacenStatusCol();
+
+    const allowed = ["CLAVE", "DESCRIPCION", "CATEGORIA", "STOCK", "STOCK_MINIMO", "ORIGEN_ADQUISICION", "OBSERVACIONES_CONTROL"];
+    if (hasUnidad) allowed.push("UNIDAD");
+    if (almStatusCol) allowed.push(almStatusCol);
+
+    const addStock = req.body.addStock != null && req.body.addStock !== "" ? Number(req.body.addStock) : null;
+    if (addStock != null && !Number.isFinite(addStock)) return httpError(res, 400, "addStock debe ser numérico");
+
+    const data = {};
+    for (const k of Object.keys(req.body || {})) {
+      const ku = k.toUpperCase();
+      if (allowed.includes(ku) || ku === (almStatusCol || "").toUpperCase()) {
+        data[ku] = req.body[k];
+      }
+      if (ku === "STATUS" || ku === "ESTADO") {
+        if (almStatusCol) data[almStatusCol.toUpperCase()] = String(req.body[k] || "ACTIVO").toUpperCase();
+      }
+    }
+
+    if (!("CLAVE" in data)) {
+      if (req.body.clave != null && req.body.clave !== "") data.CLAVE = String(req.body.clave).trim().toUpperCase();
+      else if (req.body.clave_bien != null && req.body.clave_bien !== "") data.CLAVE = String(req.body.clave_bien).trim().toUpperCase();
+    }
+    if (!("DESCRIPCION" in data) && req.body.descripcion != null) {
+      data.DESCRIPCION = String(req.body.descripcion).trim();
+    }
+    if (!("CATEGORIA" in data) && req.body.categoria != null) {
+      data.CATEGORIA = req.body.categoria;
+    }
+    if (!("UNIDAD" in data) && req.body.unidad != null) {
+      data.UNIDAD = String(req.body.unidad).trim();
+    }
+    if (!("STOCK" in data) && req.body.stock != null && req.body.stock !== "") {
+      data.STOCK = Number(req.body.stock);
+    }
+
+    if (Object.keys(data).length === 0 && addStock == null) return httpError(res, 400, "Nada que actualizar");
+
+    const [curRows] = await poolRead.query(`SELECT * FROM almacen_dregcivil WHERE ID=? LIMIT 1`, [id]);
+    if (!curRows.length) return httpError(res, 404, "Registro no encontrado");
+    const cur = curRows[0];
+
+    if ("STOCK" in data && data.STOCK !== "") {
+      const n = Number(data.STOCK);
+      if (!Number.isFinite(n)) return httpError(res, 400, "STOCK debe ser numérico");
+      data.STOCK = n;
+    }
+    if ("STOCK_MINIMO" in data) {
+      data.stock_minimo = Math.max(Number(data.STOCK_MINIMO) || 0, 0);
+      delete data.STOCK_MINIMO;
+    }
+    if ("ORIGEN_ADQUISICION" in data) {
+      const ro = String(data.ORIGEN_ADQUISICION || "").toUpperCase();
+      data.origen_adquisicion = ["COMPRA_DELEGACION", "POR_CONTRATO", "OTRO"].includes(ro) ? ro : "COMPRA_DELEGACION";
+      delete data.ORIGEN_ADQUISICION;
+    }
+    if ("OBSERVACIONES_CONTROL" in data) {
+      data.observaciones_control = data.OBSERVACIONES_CONTROL ? String(data.OBSERVACIONES_CONTROL).trim() : null;
+      delete data.OBSERVACIONES_CONTROL;
+    }
+    if ("CATEGORIA" in data) {
+      const val = data.CATEGORIA;
+      if (val == null || String(val).trim() === "") {
+        delete data.CATEGORIA;
+      } else if (catIsNum) {
+        data.CATEGORIA = Number.isFinite(Number(val))
+          ? Number(val)
+          : await resolveCategoriaIdOrCreate(val);
+      } else {
+        let c = String(val || "").trim().toUpperCase();
+        if (c.length > 50) c = c.slice(0, 50);
+        data.CATEGORIA = c || null;
+      }
+    }
+    // v44: Restricción de privilegios: Solo ADMIN puede modificar clave o descripción de productos existentes
+    if (!admin) {
+      delete data.CLAVE;
+      delete data.DESCRIPCION;
+    }
+    if ("CLAVE" in data) {
+      data.CLAVE = String(data.CLAVE || "").trim().toUpperCase();
+      if (!data.CLAVE) return httpError(res, 400, "CLAVE no puede ir vacía");
+    }
+    if ("DESCRIPCION" in data) {
+      data.DESCRIPCION = String(data.DESCRIPCION || "").trim();
+      if (!data.DESCRIPCION) return httpError(res, 400, "DESCRIPCION no puede ir vacía");
+    }
+    if (hasUnidad && "UNIDAD" in data) {
+      data.UNIDAD = data.UNIDAD == null || data.UNIDAD === "" ? null : String(data.UNIDAD).toUpperCase().slice(0, 20);
+    }
+
+    const conn = await poolOps.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const [rowx] = await conn.query(`SELECT * FROM almacen_dregcivil WHERE ID=? FOR UPDATE`, [id]);
+      if (!rowx.length) {
+        await conn.rollback();
+        return httpError(res, 404, "Registro no encontrado");
+      }
+      const row = rowx[0];
+      const oldClave = String(row.CLAVE || "").trim().toUpperCase();
+      const newClave = data.CLAVE ? String(data.CLAVE).trim().toUpperCase() : oldClave;
+
+      let delta = 0;
+      const isAdd = addStock != null;
+      if (isAdd) {
+        delta = Number(addStock);
+        data.STOCK = Number(row.STOCK || 0) + delta;
+      } else if ("STOCK" in data) {
+        delta = Number(data.STOCK) - Number(row.STOCK || 0);
+      }
+
+      ensureEntradaAllowed(req, delta, { isNew: false, viaAddStock: isAdd });
+
+      const fields = [];
+      const values = [];
+      for (const k of Object.keys(data)) {
+        fields.push(`${k}=?`);
+        values.push(data[k]);
+      }
+      if (fields.length) {
+        await conn.query(`UPDATE almacen_dregcivil SET ${fields.join(", ")} WHERE ID=?`, [...values, id]);
+      }
+
+      await upsertProductoFromAlmacen(conn, {
+        CLAVE: newClave,
+        DESCRIPCION: data.DESCRIPCION || row.DESCRIPCION,
+        CATEGORIA: "CATEGORIA" in data ? data.CATEGORIA : row.CATEGORIA,
+        UNIDAD: hasUnidad ? ("UNIDAD" in data ? data.UNIDAD : row.UNIDAD) : null,
+        ESTADO: almStatusCol ? data[almStatusCol] ?? row[almStatusCol] ?? "ACTIVO" : "ACTIVO",
+        stock_minimo: "stock_minimo" in data ? data.stock_minimo : undefined,
+        origen_adquisicion: "origen_adquisicion" in data ? data.origen_adquisicion : undefined,
+        observaciones_control: "observaciones_control" in data ? data.observaciones_control : undefined,
+      });
+
+      if (newClave && oldClave && newClave !== oldClave) {
+        await conn.query("UPDATE productos SET CLAVE = ? WHERE CLAVE = ?", [newClave, oldClave]).catch(() => {});
+        await conn.query("UPDATE inventario_oficina SET clave_bien = ? WHERE clave_bien = ? AND rubro_id = 1", [newClave, oldClave]).catch(() => {});
+        await conn.query("UPDATE movimientos SET clave = ? WHERE clave = ?", [newClave, oldClave]).catch(() => {});
+      }
+
+      if (delta !== 0) {
+        await logMovimiento(conn, {
+          tipo: delta > 0 ? "ENTRADA" : "SALIDA",
+          clave: newClave,
+          cantidad: Math.abs(delta),
+          responsable: req.user?.username || "web",
+          destino: "ALMACEN",
+          referencia: req.method === "PUT" ? "PUT /almacen/:id" : "PATCH /almacen/:id",
+          observaciones: req.body.observaciones || null,
+        });
+      }
+
+      await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
+
+      // v44: Registrar en bitácora_movimientos
+      const accionBit = addStock != null ? "ENTRADA_STOCK" : ("STOCK" in data ? "AJUSTE_STOCK" : "EDICION_MATERIAL");
+      const detStock = addStock != null ? `Entrada +${addStock} unidades` : ("STOCK" in data ? `Stock modificado a ${data.STOCK}` : "Actualización de datos");
+      await registrarBitacora(
+        req,
+        "ALMACEN",
+        accionBit,
+        `${detStock} en material #${id} (${newClave || oldClave} - ${data.DESCRIPCION || row.DESCRIPCION || ""})`,
+        conn
+      );
+
+      await conn.commit();
+      res.json({ ok: true, updated: true, id, clave: newClave, stock: "STOCK" in data ? data.STOCK : row.STOCK });
+    } catch (e) {
+      await conn.rollback();
+      if (e.statusCode) return httpError(res, e.statusCode, e.message);
+      throw e;
+    } finally {
+      conn.release();
+    }
+  } catch (e) {
+    return httpError(res, 400, e.message);
+  }
 }
 
-try {
-const id = Number(req.params.id);
-if (!Number.isFinite(id)) return httpError(res, 400, "ID invalido");
+app.patch("/api/almacen/:id", authRequired, handleUpdateAlmacen);
+app.put(["/api/almacen/:id", "/api/almacen/:id/actualizar"], authRequired, handleUpdateAlmacen);
 
-const hasUnidad = await hasAlmacenUnidad();
-const catIsNum = await almCategoriaIsNumeric();
-const almStatusCol = await detectAlmacenStatusCol();
+// ============================================================================
+// v44: REPORTE PDF INSTITUCIONAL DE ALMACÉN GENERAL (TODO O SELECCIONADOS)
+// ============================================================================
+async function handleAlmacenReportePdf(req, res) {
+  try {
+    let ids = [];
+    if (req.body && Array.isArray(req.body.ids)) {
+      ids = req.body.ids.map(Number).filter(n => Number.isFinite(n) && n > 0);
+    } else if (req.query && req.query.ids) {
+      ids = String(req.query.ids).split(',').map(n => Number(n.trim())).filter(n => Number.isFinite(n) && n > 0);
+    }
 
-const allowed = ["CLAVE", "DESCRIPCION", "CATEGORIA", "STOCK", "STOCK_MINIMO", "ORIGEN_ADQUISICION", "OBSERVACIONES_CONTROL"];
-if (hasUnidad) allowed.push("UNIDAD");
-if (almStatusCol) allowed.push(almStatusCol);
+    const catIsNum = await almCategoriaIsNumeric();
+    const meta = await detectCategorias();
+    const catMap = await getCategoriasNameMap();
+    const hasUnidad = await hasAlmacenUnidad();
+    const hasEstado = await hasAlmacenEstado();
+    const almStatusCol = await detectAlmacenStatusCol();
 
-const addStock = req.body.addStock != null && req.body.addStock !== "" ? Number(req.body.addStock) : null;
-if (addStock != null && !Number.isFinite(addStock)) return httpError(res, 400, "addStock debe ser numArico");
+    const unidadExpr = hasUnidad ? "a.UNIDAD" : "p.unidad";
+    const statusSel = hasEstado && almStatusCol ? `a.${qi(almStatusCol)} AS status` : `'ACTIVO' AS status`;
+    const joinProductos = "LEFT JOIN productos p ON p.CLAVE = a.CLAVE";
 
-const data = {};
-for (const k of Object.keys(req.body || {})) {
-const ku = k.toUpperCase();
-if (allowed.includes(ku) || ku === (almStatusCol || "").toUpperCase()) {
-data[ku] = req.body[k];
-}
-if (ku === "STATUS" || ku === "ESTADO") {
-if (almStatusCol) data[almStatusCol.toUpperCase()] = String(req.body[k] || "ACTIVO").toUpperCase();
-}
+    let catSelect = "a.CATEGORIA AS categoria_raw, a.CATEGORIA AS categoria_nombre";
+    let catJoin = "";
+    if (meta.table && meta.id && meta.name) {
+      catSelect = `a.CATEGORIA AS categoria_raw, COALESCE(c.${qi(meta.name).slice(1, -1)}, CAST(a.CATEGORIA AS CHAR)) AS categoria_nombre`;
+      catJoin = catIsNum
+        ? `LEFT JOIN ${qi(meta.table)} c ON c.${qi(meta.id)} = a.CATEGORIA`
+        : `LEFT JOIN ${qi(meta.table)} c ON (TRIM(CAST(a.CATEGORIA AS CHAR)) REGEXP '^[0-9]+$' AND c.${qi(meta.id)} = CAST(TRIM(CAST(a.CATEGORIA AS CHAR)) AS UNSIGNED))`;
+    }
+
+    let whereSql = "WHERE 1=1";
+    const queryParams = [];
+    if (ids.length > 0) {
+      whereSql += ` AND a.ID IN (${ids.map(() => '?').join(',')})`;
+      queryParams.push(...ids);
+    }
+
+    const querySql = `
+      SELECT a.ID, a.CLAVE, a.DESCRIPCION, ${catSelect},
+             COALESCE(${unidadExpr}, 'PIEZA') AS unidad,
+             COALESCE(a.STOCK, 0) AS stock,
+             ${statusSel}
+      FROM almacen_dregcivil a
+      ${joinProductos}
+      ${catJoin}
+      ${whereSql}
+      ORDER BY a.CLAVE ASC, a.ID ASC
+    `;
+
+    const [rows] = await poolRead.query(querySql, queryParams);
+
+    const isFiltered = ids.length > 0;
+    const reportTitle = isFiltered ? "REPORTE DE MATERIALES" : "CATÁLOGO E INVENTARIO GENERAL DE MATERIALES";
+    const filename = isFiltered ? `reporte_materiales_${Date.now()}.pdf` : `inventario_general_almacen_${Date.now()}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+
+    // v56: Definición de documento y márgenes estilo docDefinition [left, top, right, bottom]
+    // Se incrementa ampliamente el margen inferior (170 pt) para garantizar que las filas de la
+    // tabla nunca colisionen con las firmas fijas ni desborden a una página en blanco.
+    const docDefinition = {
+      pageSize: "LETTER",
+      pageMargins: [36, 30, 36, 170], // [left, top, right, bottom]
+    };
+
+    const doc = new PDFDocument({
+      size: docDefinition.pageSize,
+      margins: {
+        top: docDefinition.pageMargins[1],
+        bottom: 0, // margen inferior a 0 a nivel de motor para evitar salto fantasma de página en el footer
+        left: docDefinition.pageMargins[0],
+        right: docDefinition.pageMargins[2]
+      },
+      autoFirstPage: true,
+      bufferPages: true
+    });
+    doc.pipe(res);
+
+    const pageWidth = doc.page.width;   // 612 pt
+    const pageHeight = doc.page.height; // 792 pt
+    const leftX = docDefinition.pageMargins[0]; // 36 pt
+    const rightLimit = pageWidth - docDefinition.pageMargins[2];  // 576 pt
+    const contentWidth = rightLimit - leftX; // 540 pt
+
+    const COLOR_PRIMARY = "#621132";
+    const COLOR_SECONDARY = "#4E0D28";
+    const COLOR_ACCENT = "#B38E5D";
+    const COLOR_SOFT_BG = "#F8FAFC";
+    const COLOR_BORDER = "#CBD5E1";
+
+    const logoGobPath = [
+      path.join(__dirname, "public", "LogoGobiernoMX.png"),
+      path.join(__dirname, "public", "logoGobiernoMx.png"),
+      path.join(__dirname, "public", "logoGobiernoMX.png"),
+      path.join(__dirname, "public", "logogobiernomx.png")
+    ].find(p => fs.existsSync(p)) || null;
+
+    const logoBienPath = [
+      path.join(__dirname, "public", "logo.png"),
+      path.join(__dirname, "public", "logo.original.png")
+    ].find(p => fs.existsSync(p)) || null;
+
+    const totalStock = rows.reduce((acc, r) => acc + (Number(r.stock) || 0), 0);
+    const nowStr = new Date().toLocaleString("es-MX", { timeZone: "America/Mazatlan", hour12: false });
+
+    function drawHeader() {
+      if (logoGobPath && fs.existsSync(logoGobPath)) {
+        try { doc.image(logoGobPath, leftX, 20, { fit: [95, 30], align: "left", valign: "top" }); } catch {}
+      }
+      if (logoBienPath && fs.existsSync(logoBienPath)) {
+        try { doc.image(logoBienPath, rightLimit - 85, 20, { fit: [85, 30], align: "right", valign: "top" }); } catch {}
+      }
+
+      doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(10)
+        .text("SECRETARÍA DE BIENESTAR", leftX, 18, { width: contentWidth, align: "center" });
+      doc.fillColor("#1F2937").font("Helvetica-Bold").fontSize(9)
+        .text("DELEGACIÓN DE PROGRAMAS PARA EL BIENESTAR EN BAJA CALIFORNIA SUR", leftX, 31, { width: contentWidth, align: "center" });
+      doc.fillColor(COLOR_SECONDARY).font("Helvetica-Bold").fontSize(10)
+        .text(reportTitle, leftX, 44, { width: contentWidth, align: "center" });
+
+      doc.save();
+      doc.moveTo(leftX + 80, 58).lineTo(rightLimit - 80, 58).lineWidth(1).strokeColor(COLOR_ACCENT).stroke();
+      doc.restore();
+
+      doc.fillColor("#4B5563").font("Helvetica").fontSize(7.5)
+        .text(`Fecha y hora de emisión: ${nowStr} hrs  |  Total de artículos: ${rows.length}  |  Existencia total: ${totalStock.toLocaleString("es-MX")} unidades`, leftX, 62, { width: contentWidth, align: "center" });
+    }
+
+    // Column widths: Total = 540 pt
+    const colW = { clave: 70, cat: 95, desc: 260, uni: 55, stock: 60 };
+    const colX = {
+      clave: leftX,
+      cat: leftX + colW.clave,
+      desc: leftX + colW.clave + colW.cat,
+      uni: leftX + colW.clave + colW.cat + colW.desc,
+      stock: leftX + colW.clave + colW.cat + colW.desc + colW.uni
+    };
+
+    function drawTableHeader(y) {
+      doc.save();
+      doc.rect(leftX, y, contentWidth, 18).fillColor(COLOR_PRIMARY).fill();
+      doc.restore();
+
+      doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(7.5);
+      doc.text("CLAVE", colX.clave + 4, y + 5, { width: colW.clave - 8, align: "left" });
+      doc.text("CATEGORÍA", colX.cat + 4, y + 5, { width: colW.cat - 8, align: "left" });
+      doc.text("DESCRIPCIÓN", colX.desc + 4, y + 5, { width: colW.desc - 8, align: "left" });
+      doc.text("UNIDAD", colX.uni + 4, y + 5, { width: colW.uni - 8, align: "center" });
+      doc.text("EXISTENCIA", colX.stock + 4, y + 5, { width: colW.stock - 8, align: "right" });
+
+      return y + 18;
+    }
+
+    drawHeader();
+    let currentY = drawTableHeader(76);
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const clave = String(r.CLAVE || "").trim();
+      const cat = resolveCategoriaTexto(r.categoria_raw ?? r.CATEGORIA, r.categoria_nombre, catMap).toUpperCase();
+      const desc = String(r.DESCRIPCION || "").trim();
+      const uni = String(r.unidad || "PIEZA").trim().toUpperCase();
+      const stock = Number(r.stock || 0);
+
+      // Estimate height for description
+      const descHeight = doc.font("Helvetica").fontSize(7.5).heightOfString(desc, { width: colW.desc - 8 });
+      const rowHeight = Math.max(16, descHeight + 6);
+
+      // Reserva de espacio inferior para firmas fijas y pie de página según docDefinition.pageMargins[3]
+      const tableBottomLimit = pageHeight - docDefinition.pageMargins[3];
+      if (currentY + rowHeight > tableBottomLimit) {
+        doc.addPage();
+        doc.page.margins.bottom = 0;
+        drawHeader();
+        currentY = drawTableHeader(76);
+      }
+
+      // Zebra background
+      if (i % 2 === 1) {
+        doc.save();
+        doc.rect(leftX, currentY, contentWidth, rowHeight).fillColor(COLOR_SOFT_BG).fill();
+        doc.restore();
+      }
+
+      // Draw bottom border
+      doc.save();
+      doc.moveTo(leftX, currentY + rowHeight).lineTo(rightLimit, currentY + rowHeight).lineWidth(0.5).strokeColor(COLOR_BORDER).stroke();
+      doc.restore();
+
+      // Draw text
+      doc.fillColor("#000000").font("Helvetica-Bold").fontSize(7.5)
+        .text(clave, colX.clave + 4, currentY + 4, { width: colW.clave - 8, lineBreak: false });
+
+      doc.fillColor("#374151").font("Helvetica").fontSize(7)
+        .text(cat, colX.cat + 4, currentY + 4, { width: colW.cat - 8, lineBreak: false });
+
+      doc.fillColor("#111827").font("Helvetica").fontSize(7.5)
+        .text(desc, colX.desc + 4, currentY + 4, { width: colW.desc - 8 });
+
+      doc.fillColor("#374151").font("Helvetica").fontSize(7)
+        .text(uni, colX.uni + 4, currentY + 4, { width: colW.uni - 8, align: "center", lineBreak: false });
+
+      const stockColor = stock <= 0 ? "#DC2626" : "#000000";
+      doc.fillColor(stockColor).font("Helvetica-Bold").fontSize(7.5)
+        .text(stock.toLocaleString("es-MX"), colX.stock + 4, currentY + 4, { width: colW.stock - 8, align: "right" });
+
+      currentY += rowHeight;
+    }
+
+    // v56: Bloque de firmas anclado en la zona reservada del footer de la última página
+    const sigY = pageHeight - 110;
+    const sigW = 200;
+    const sig1X = leftX + 40;
+    const sig2X = rightLimit - 40 - sigW;
+
+    doc.save();
+    doc.moveTo(sig1X, sigY + 20).lineTo(sig1X + sigW, sigY + 20).lineWidth(0.75).strokeColor("#000000").stroke();
+    doc.moveTo(sig2X, sigY + 20).lineTo(sig2X + sigW, sigY + 20).lineWidth(0.75).strokeColor("#000000").stroke();
+    doc.restore();
+
+    doc.fillColor("#000000").font("Helvetica-Bold").fontSize(7.5);
+    doc.text("GABRIEL ADÁN FIOL COLLINS", sig1X, sigY + 24, { width: sigW, align: "center", lineBreak: false });
+    doc.text("JORGE LUIS PATRÓN MURILLO", sig2X, sigY + 24, { width: sigW, align: "center", lineBreak: false });
+
+    doc.fillColor("#4B5563").font("Helvetica").fontSize(7);
+    doc.text("ENCARGADO DE ARCHIVOS Y MATERIALES", sig1X, sigY + 36, { width: sigW, align: "center", lineBreak: false });
+    doc.text("COORDINADOR OPERATIVO DE RECURSOS MATERIALES", sig2X, sigY + 36, { width: sigW, align: "center", lineBreak: false });
+
+    // Pie de página institucional (numeración de páginas asegurando bottom: 0 para evitar salto extra a hoja en blanco)
+    const pages = doc.bufferedPageRange();
+    for (let pIdx = 0; pIdx < pages.count; pIdx++) {
+      doc.switchToPage(pIdx);
+      doc.page.margins.bottom = 0;
+      doc.fillColor("#6B7280").font("Helvetica").fontSize(7)
+        .text(`Página ${pIdx + 1} de ${pages.count}  |  Sistema de Control de Inventario y Resguardo — Delegación BCS`, leftX, pageHeight - 24, { width: contentWidth, align: "center", lineBreak: false });
+    }
+
+    doc.end();
+  } catch (err) {
+    console.error("[ERROR] handleAlmacenReportePdf:", err);
+    if (!res.headersSent) {
+      return httpError(res, 500, err.message || "Error al generar reporte PDF de almacén");
+    }
+  }
 }
 
-if (canAlmacen && !admin) {
-const touchingOther = Object.keys(data).some((k) => !["STOCK", "STOCK_MINIMO", "ORIGEN_ADQUISICION", "OBSERVACIONES_CONTROL", (almStatusCol || "").toUpperCase()].includes(k));
-if (touchingOther) {
-return httpError(res, 403, "EdiciAn bloqueada: solo puedes modificar stock con addStock");
-}
-if ("STOCK" in data && addStock == null) {
-return httpError(res, 403, "Usa addStock para modificar existencias");
-}
-}
-
-if (Object.keys(data).length === 0 && addStock == null) return httpError(res, 400, "Nada que actualizar");
-
-const [curRows] = await poolRead.query(`SELECT * FROM almacen_dregcivil WHERE ID=? LIMIT 1`, [id]);
-if (!curRows.length) return httpError(res, 404, "Registro no encontrado");
-const cur = curRows[0];
-
-if ("STOCK" in data && data.STOCK !== "") {
-const n = Number(data.STOCK);
-if (!Number.isFinite(n)) return httpError(res, 400, "STOCK debe ser numArico");
-data.STOCK = n;
-}
-if ("STOCK_MINIMO" in data) {
-  data.stock_minimo = Math.max(Number(data.STOCK_MINIMO) || 0, 0);
-  delete data.STOCK_MINIMO;
-}
-if ("ORIGEN_ADQUISICION" in data) {
-  const ro = String(data.ORIGEN_ADQUISICION || "").toUpperCase();
-  data.origen_adquisicion = ["COMPRA_DELEGACION", "POR_CONTRATO", "OTRO"].includes(ro) ? ro : "COMPRA_DELEGACION";
-  delete data.ORIGEN_ADQUISICION;
-}
-if ("OBSERVACIONES_CONTROL" in data) {
-  data.observaciones_control = data.OBSERVACIONES_CONTROL ? String(data.OBSERVACIONES_CONTROL).trim() : null;
-  delete data.OBSERVACIONES_CONTROL;
-}
-if ("CATEGORIA" in data) {
-if (catIsNum) {
-const val = data.CATEGORIA;
-data.CATEGORIA =
-val == null || val === ""
-? null
-: Number.isFinite(Number(val))
-? Number(val)
-: await resolveCategoriaIdOrCreate(val);
-} else {
-let c = String(data.CATEGORIA || "").trim().toUpperCase();
-if (c.length > 50) c = c.slice(0, 50);
-data.CATEGORIA = c || null;
-}
-}
-if ("CLAVE" in data) {
-data.CLAVE = String(data.CLAVE || "").trim();
-if (!data.CLAVE) return httpError(res, 400, "CLAVE no puede ir vacAa");
-}
-if ("DESCRIPCION" in data) {
-data.DESCRIPCION = String(data.DESCRIPCION || "").trim();
-if (!data.DESCRIPCION) return httpError(res, 400, "DESCRIPCION no puede ir vacAa");
-}
-if (hasUnidad && "UNIDAD" in data) {
-data.UNIDAD = data.UNIDAD == null || data.UNIDAD === "" ? null : String(data.UNIDAD).toUpperCase().slice(0, 20);
-}
-
-const conn = await poolOps.getConnection();
-try {
-await conn.beginTransaction();
-
-const [rowx] = await conn.query(`SELECT * FROM almacen_dregcivil WHERE ID=? FOR UPDATE`, [id]);
-if (!rowx.length) {
-await conn.rollback();
-return httpError(res, 404, "Registro no encontrado");
-}
-const row = rowx[0];
-
-let delta = 0;
-const isAdd = addStock != null;
-if (isAdd) {
-delta = Number(addStock);
-data.STOCK = Number(row.STOCK || 0) + delta;
-} else if ("STOCK" in data) {
-delta = Number(data.STOCK) - Number(row.STOCK || 0);
-}
-
-ensureEntradaAllowed(req, delta, { isNew: false, viaAddStock: isAdd });
-
-const fields = [];
-const values = [];
-for (const k of Object.keys(data)) {
-fields.push(`${k}=?`);
-values.push(data[k]);
-}
-if (fields.length) {
-await conn.query(`UPDATE almacen_dregcivil SET ${fields.join(", ")} WHERE ID=?`, [...values, id]);
-}
-
-await upsertProductoFromAlmacen(conn, {
-CLAVE: data.CLAVE || row.CLAVE,
-DESCRIPCION: data.DESCRIPCION || row.DESCRIPCION,
-CATEGORIA: "CATEGORIA" in data ? data.CATEGORIA : row.CATEGORIA,
-UNIDAD: hasUnidad ? ("UNIDAD" in data ? data.UNIDAD : row.UNIDAD) : null,
-ESTADO: almStatusCol ? data[almStatusCol] ?? row[almStatusCol] ?? "ACTIVO" : "ACTIVO",
-stock_minimo: "stock_minimo" in data ? data.stock_minimo : undefined,
-origen_adquisicion: "origen_adquisicion" in data ? data.origen_adquisicion : undefined,
-observaciones_control: "observaciones_control" in data ? data.observaciones_control : undefined,
-});
-
-if (delta !== 0) {
-await logMovimiento(conn, {
-tipo: delta > 0 ? "ENTRADA" : "SALIDA",
-clave: data.CLAVE || row.CLAVE,
-cantidad: Math.abs(delta),
-responsable: req.user?.username || "web",
-destino: "ALMACEN",
-referencia: "PATCH /almacen/:id",
-observaciones: req.body.observaciones || null,
-});
-}
-
-await conn.commit();
-res.json({ ok: true, updated: true, id, stock: "STOCK" in data ? data.STOCK : row.STOCK });
-} catch (e) {
-await conn.rollback();
-if (e.statusCode) return httpError(res, e.statusCode, e.message);
-throw e;
-} finally {
-conn.release();
-}
-} catch (e) {
-return httpError(res, 400, e.message);
-}
-});
+app.post("/api/almacen/reporte-pdf", authRequired, handleAlmacenReportePdf);
+app.get("/api/almacen/reporte-pdf", authRequired, handleAlmacenReportePdf);
 
 app.delete("/api/almacen/:id", authRequired, async (req, res) => {
 if (!isAdminDemo(req)) {
@@ -5164,8 +7653,8 @@ const maxN = maximo === "" || maximo == null ? null : Number(maximo);
 
 const conn = await poolOps.getConnection();
 try {
-const [dup] = await conn.query("SELECT CLAVE FROM productos WHERE CLAVE=? LIMIT 1", [String(CLAVE)]);
-if (dup.length) return httpError(res, 409, "La CLAVE ya existe");
+const [dup] = await conn.query("SELECT CLAVE FROM productos WHERE UPPER(TRIM(CLAVE))=UPPER(TRIM(?)) LIMIT 1", [String(CLAVE)]);
+if (dup.length) return httpError(res, 409, "⚠️ Error: La clave de producto ingresada ya existe. Por favor asigna una clave diferente.");
 
 const cols = ["CLAVE", "DESCRIPCION", "minimo", "maximo"];
 const vals = [String(CLAVE), String(DESCRIPCION), minN, maxN];
@@ -5370,6 +7859,8 @@ app.get("/api/ui-config", authRequired, async (req, res) => {
   const puedePdfReg = canGeneratePdfRegional(req);
   const puedeSeleccionarDepto = canSelectAnyDepartment(req);
   const puedeCuatroFirmas = canUseCuatroFirmas(req);
+  const modoPruebaGrupal = await isModoPruebaGrupalActivo();
+  const puedePdfSolicitud = canDownloadSolicitudPdf(req);
 
   res.json({
     ok: true,
@@ -5377,10 +7868,12 @@ app.get("/api/ui-config", authRequired, async (req, res) => {
     rol: rol,
     rubro_id: userRubroId,
     scope: scope,
+    modoPruebaGrupal: modoPruebaGrupal,
     puedeSeleccionarCualquierDepartamento: puedeSeleccionarDepto,
     permisos: {
       admin: admin,
       encargado: almacenEncargado,
+      modoPruebaGrupal: modoPruebaGrupal,
       puedeAccederAlmacen: almacenEncargado,
       puedeEditarAlmacen: almacenEncargado,
       puedeEliminarAlmacen: admin,
@@ -5390,6 +7883,8 @@ app.get("/api/ui-config", authRequired, async (req, res) => {
       puedeUsarCuatroFirmas: puedeCuatroFirmas,
       puedeVerInventarioEstatal: canViewInventarioGeneral(req.user),
       puedeVerInventarioGeneral: canViewInventarioGeneral(req.user),
+      puedeAccederTabletas: canAccessTabletas(req),
+      puedeEditarTabletas: canEditTabletas(req),
       puedeVerTodasSolicitudes: canSeeAllSolicitudes(req),
       puedeSeleccionarCualquierDepartamento: puedeSeleccionarDepto,
       gestionarUsuarios: admin,
@@ -5404,9 +7899,10 @@ app.get("/api/ui-config", authRequired, async (req, res) => {
       },
       solicitudes: {
         puedeCrear: true,
-        puedeSurtir: canManageSolicitudes(req),
-        puedeCancelar: canManageSolicitudes(req),
-        puedeEliminar: admin,
+        puedeSurtir: !isAuditorBlockedUser(req) && canManageSolicitudes(req),
+        puedeCancelar: !isAuditorBlockedUser(req) && canManageSolicitudes(req),
+        puedeEliminar: !isAuditorBlockedUser(req) && admin,
+        puedeDescargarPdf: puedePdfSolicitud,
         puedeSeleccionarCualquierDepartamento: puedeSeleccionarDepto,
       },
       verLogs: admin,
@@ -5419,6 +7915,9 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return httpError(res, 400, "ID invalido");
+    if (!canDownloadSolicitudPdf(req)) {
+      return httpError(res, 403, "Solo el Encargado de Almacén o el Administrador pueden imprimir el Vale PDF de suministros.");
+    }
     await assertSolicitudAccess(req, id);
 
     // 1. Obtener datos de la solicitud, usuario, departamento y encargado del área
@@ -5452,7 +7951,7 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
       const [rows] = await poolRead.query(
         `SELECT d.id AS detalle_id, d.solicitud_id, d.producto_id,
           p.CLAVE, p.DESCRIPCION, p.unidad AS unidad, p.categoria AS categoria,
-          d.cantidad, d.atendida, d.observaciones
+          d.cantidad, d.cantidad_surtida, d.atendida, d.observaciones
         FROM detalles_solicitud d
         LEFT JOIN productos p ON p.${await detectProductosPK()} = d.producto_id
         WHERE d.solicitud_id = ?
@@ -5511,10 +8010,10 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
     ).trim();
 
     // Datos para las 5 firmas de Vale de Suministro:
-    // 1. SOLICITANTE | 2. ENTREGA (Gabriel Fiol) | 3. VALIDA (Jorge Luis Patrón Murillo) | 4. RECIBE | 5. AUTORIZA (Delegada)
-    const entregaCargo = process.env.VALE_ENTREGA_CARGO || "ENCARGADO DE ALMACÉN / RECURSOS MATERIALES";
-    const entregaNombre = process.env.VALE_ENTREGA_NOMBRE || "GABRIEL FIOL";
-    const validaCargo = process.env.VALE_VALIDA_CARGO || "ENCARGADO DE RECURSOS MATERIALES";
+    // 1. SOLICITANTE | 2. ENTREGA (Gabriel Adán Fiol Collins) | 3. VALIDA (Jorge Luis Patrón Murillo) | 4. RECIBE | 5. AUTORIZA (Delegada)
+    const entregaCargo = process.env.VALE_ENTREGA_CARGO || "ENCARGADO DE ARCHIVOS Y MATERIALES";
+    const entregaNombre = process.env.VALE_ENTREGA_NOMBRE || "GABRIEL ADÁN FIOL COLLINS";
+    const validaCargo = process.env.VALE_VALIDA_CARGO || "COORDINADOR OPERATIVO DE RECURSOS MATERIALES";
     const validaNombre = process.env.VALE_VALIDA_NOMBRE || "JORGE LUIS PATRÓN MURILLO";
     const autorizaCargo = process.env.VALE_AUTORIZA_CARGO || "DELEGADA DE PROGRAMAS PARA EL BIENESTAR EN BCS";
     const autorizaNombre = process.env.VALE_AUTORIZA_NOMBRE || "DIPHNA YANSSEN WEICHSELBAUM CALDERÓN";
@@ -5647,11 +8146,12 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
       const descText = item ? String(item.DESCRIPCION || "").trim() : "";
       const uniText = item ? String(item.unidad || "").trim() : "";
       const solText = item && item.cantidad != null ? String(item.cantidad) : "";
-      // Si ya tiene cantidad atendida > 0 o el estatus es SURTIDA/APROBADA la muestra; si está PENDIENTE y en 0, deja el espacio para llenado o muestra el valor
-      const entVal = item ? Number(item.atendida || 0) : 0;
-      const entText = item && (entVal > 0 || ["SURTIDA", "ENTREGADA"].includes(String(solicitud.status || "").toUpperCase()))
-        ? String(entVal)
-        : "";
+      const entVal = item
+        ? (item.cantidad_surtida !== null && item.cantidad_surtida !== undefined
+            ? Number(item.cantidad_surtida)
+            : (Number(item.atendida || 0) > 0 ? Number(item.atendida) : Number(item.cantidad || 0)))
+        : 0;
+      const entText = item ? String(entVal) : "";
 
       doc.font("Helvetica").fontSize(8);
       const descH = descText ? doc.heightOfString(descText, { width: colDescW - 8 }) : 9;
@@ -5710,10 +8210,11 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
     const fechaFirmaFmt = solicitud.fecha_firma_digital ? fmtDate(solicitud.fecha_firma_digital) : fechaTexto;
     const folio = solicitud.folio_firma_digital || `SOL-${id}`;
     const selloFirmaTxt = folio;
-    const hasDigitalSig = Boolean(solicitud.firma_solicitante_data && String(solicitud.firma_solicitante_data).includes("base64,"));
+    const firmaSolSource = solicitud.firma_solicitante || solicitud.firma_solicitante_data || null;
+    const hasDigitalSig = Boolean(firmaSolSource && String(firmaSolSource).includes("base64,"));
     const hasRecibeSig = Boolean(solicitud.firma_recibe_data && String(solicitud.firma_recibe_data).includes("base64,"));
 
-    // Validación específica Mulegé para firma 4 (RECIBE)
+    // Validación específica por región para firma 4 (RECIBE)
     const isMulegeSol = Boolean(
       Number(solicitud.id_oficialia) === 30030010 ||
       Number(solicitud.ID_OFICIALIA) === 30030010 ||
@@ -5723,6 +8224,32 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
       /muleg[eé]/i.test(String(areaNombre || "")) ||
       /muleg[eé]/i.test(String(regionSolicitante || ""))
     );
+    const isLosCabosSol = Boolean(
+      Number(solicitud.id_oficialia) === 30030009 ||
+      Number(solicitud.ID_OFICIALIA) === 30030009 ||
+      String(solicitud.username || "").toLowerCase() === "loscabos" ||
+      /cabos/i.test(String(solicitud.oficialia_nombre || "")) ||
+      /cabos/i.test(String(solicitud.departamento || "")) ||
+      /cabos/i.test(String(areaNombre || "")) ||
+      /cabos/i.test(String(regionSolicitante || ""))
+    );
+    const isComonduSol = Boolean(
+      Number(solicitud.id_oficialia) === 30030011 ||
+      Number(solicitud.ID_OFICIALIA) === 30030011 ||
+      String(solicitud.username || "").toLowerCase() === "comondu" ||
+      /comond[uú]|loreto/i.test(String(solicitud.oficialia_nombre || "")) ||
+      /comond[uú]|loreto/i.test(String(solicitud.departamento || "")) ||
+      /comond[uú]|loreto/i.test(String(areaNombre || "")) ||
+      /comond[uú]|loreto/i.test(String(regionSolicitante || ""))
+    );
+    const isRegForaneaSol = isMulegeSol || isLosCabosSol || isComonduSol;
+    const titularRegionalSolFallback = isMulegeSol
+      ? "DIANA RAMÍREZ HERNÁNDEZ"
+      : isLosCabosSol
+        ? "SAMIR SAVIN RUIZ"
+        : isComonduSol
+          ? "HUMBERTO ARCE CORDERO"
+          : "";
 
     const valeBoxes = [
       // Fila 1: 3 columnas (SOLICITANTE, ENTREGA, VALIDA)
@@ -5765,8 +8292,10 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
         h: signBoxH,
         lineY: row2LineY,
         titulo: "4.- RECIBE",
-        cargo: isMulegeSol ? "Enlace Regional Mulegé" : String(solicitud.recibe_cargo || "").trim(),
-        nombre: isMulegeSol ? "Diana Ramirez Hernandez" : String(solicitud.recibe_nombre || "Nombre y firma de quien recibe el material").trim(),
+        cargo: isRegForaneaSol ? String(solicitud.recibe_cargo || "Director Regional").trim() : String(solicitud.recibe_cargo || "").trim(),
+        nombre: isRegForaneaSol
+          ? String(solicitud.recibe_nombre || solicitud.encargado_area || solicitud.nombre_usuario || titularRegionalSolFallback).trim()
+          : String(solicitud.recibe_nombre || "Nombre y firma de quien recibe el material").trim(),
         isRecibe: true,
       },
       {
@@ -5805,7 +8334,7 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
       // 3. Firma digital si existe (Solicitante o Recibe)
       if (b.isSolicitante && hasDigitalSig) {
         try {
-          const b64Clean = String(solicitud.firma_solicitante_data).split("base64,")[1];
+          const b64Clean = String(firmaSolSource).split("base64,")[1];
           if (b64Clean) {
             const sigBuf = Buffer.from(b64Clean, "base64");
             doc.image(sigBuf, b.x + 10, b.y + 15, {
@@ -5897,11 +8426,50 @@ app.get("/api/oficinas", authRequired, async (req, res) => {
 
     const uName = normalizeUser(req.user?.username);
     const effectiveRubroId = Number(req.query?.rubro_id || getUserRubroId(req) || 0);
+    const isAdminUser = isAdmin(req) || uName === "admin";
+    const isAdminOrDirectivo = isAdminUser || ["jorge", "jorgepatron", "rodrigo"].includes(uName);
     const canSeeRM =
-      (isAdmin(req) || ["evelia", "jorge", "jorgepatron", "rodrigo"].includes(uName)) &&
-      (!effectiveRubroId || effectiveRubroId === 2);
+      ((isAdminOrDirectivo || uName === "evelia") && (!effectiveRubroId || effectiveRubroId === 2)) ||
+      ((isAdminOrDirectivo || uName === "jesus") && (!effectiveRubroId || effectiveRubroId === 3));
     const isMobiliario = effectiveRubroId === 3 || uName === "jesus";
-    const isVehicular = effectiveRubroId === 2 || uName === "evelia";
+    const isVehicular =
+      effectiveRubroId === 2 ||
+      uName === "evelia" ||
+      String(req.query?.modulo || "").toLowerCase() === "vehiculos" ||
+      String(req.query?.tipo || "").toLowerCase() === "vehiculos";
+    const canSeeSA = isAdminUser || isAdminOrDirectivo || isMobiliario || uName === "jesus";
+
+    // v47: Asegurar que exista al menos una oficina S/A (Sin Asignar) cuando el usuario tiene permiso de verla
+    const hasAnySA = rows.some((o) => {
+      const n = String(o.nombre || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      return n.includes("s/a") || n.includes("sin asignar");
+    });
+    if (canSeeSA && !hasAnySA && (!hasRegion || regionId === 1)) {
+      try {
+        await poolOps.query(
+          `INSERT INTO oficinas_regionales (region_id, municipio, nombre, responsable_oficina, activo)
+           SELECT 1, 'La Paz', 'S/A (Sin Asignar)', 'Pendiente Regional', 1
+           FROM DUAL
+           WHERE NOT EXISTS (
+             SELECT 1 FROM oficinas_regionales
+             WHERE LOWER(nombre) LIKE '%s/a%' OR LOWER(nombre) LIKE '%sin asignar%'
+           )`
+        );
+        const [saRows] = await poolRead.query(
+          `SELECT o.id, o.region_id, r.nombre AS region_nombre, r.clave AS region_clave,
+                  o.municipio, o.nombre, o.responsable_oficina, o.activo, o.created_at
+           FROM oficinas_regionales o
+           LEFT JOIN regiones r ON r.id = o.region_id
+           WHERE (LOWER(o.nombre) LIKE '%s/a%' OR LOWER(o.nombre) LIKE '%sin asignar%')
+             AND (? = 0 OR o.region_id = ?)
+           ORDER BY o.id ASC`,
+          [hasRegion ? 1 : 0, hasRegion ? regionId : 0]
+        );
+        for (const sr of saRows || []) {
+          if (!rows.some((r) => Number(r.id) === Number(sr.id))) rows.push(sr);
+        }
+      } catch (_) {}
+    }
 
     const filteredRows = rows.filter((o) => {
       const nombreNorm = String(o.nombre || "")
@@ -5915,15 +8483,23 @@ app.get("/api/oficinas", authRequired, async (req, res) => {
       if (isRM && !canSeeRM) return false;
 
       const isSA = nombreNorm.includes("s/a") || nombreNorm.includes("sin asignar");
+      if (isSA) {
+        // v55: Ni evelia ni el módulo de vehículos pueden ver o asignar a oficinas S/A
+        if (isVehicular || uName === "evelia") return false;
+        return canSeeSA;
+      }
 
-      if (isVehicular) {
-        if (isSA) return false;
+      // v55: Ni evelia ni el módulo de vehículos pueden ver o asignar a Coordinación Regional La Paz
+      const isCoordRegionalLaPaz =
+        nombreNorm.includes("coordinacion regional la paz") ||
+        nombreNorm.includes("coordinacion regional") ||
+        nombreNorm === "coordinacion regional la paz";
+      if (isCoordRegionalLaPaz && (isVehicular || uName === "evelia")) {
+        return false;
       }
 
       if (isMobiliario) {
-        if (isRM) return false;
         if (Number(o.id) === 1 || nombreNorm.includes("delegacion la paz")) return false;
-        if (isSA) return false;
       }
       return true;
     });
@@ -5944,7 +8520,7 @@ app.get("/api/rubros", authRequired, async (req, res) => {
       `SELECT id, codigo, nombre_rubro, encargado_nombre, encargado_cargo, activo
        FROM rubros_inventario
        WHERE (activo IS NULL OR activo = 1)
-         AND id != 1
+         AND id NOT IN (1, 4)
          AND (? = 0 OR id = ?)
        ORDER BY id ASC`,
       [assignedRubroId ? 1 : 0, assignedRubroId || 0]
@@ -5962,25 +8538,81 @@ async function ensureDetallesVehiculoCol() {
     const [cols] = await poolRead.query(
       `SELECT COLUMN_NAME
        FROM INFORMATION_SCHEMA.COLUMNS
-       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'inventario_oficina' AND COLUMN_NAME = 'detalles_vehiculo'
-       LIMIT 1`,
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'inventario_oficina'`,
       [DB_NAME]
     );
-    if (cols.length) {
-      INV_HAS_DETALLES_VEHICULO = true;
-      return true;
-    }
+    const colSet = new Set(cols.map((c) => String(c.COLUMN_NAME || "").toLowerCase()));
+    const neededCols = [
+      { name: "detalles_vehiculo", ddl: "LONGTEXT DEFAULT NULL" },
+      { name: "resguardante_nombre", ddl: "VARCHAR(180) DEFAULT NULL" },
+      { name: "resguardante_rfc", ddl: "VARCHAR(30) DEFAULT NULL" },
+      { name: "resguardante_puesto", ddl: "VARCHAR(150) DEFAULT NULL" },
+      { name: "resguardante_adscripcion", ddl: "VARCHAR(180) DEFAULT NULL" },
+      { name: "resguardante_programa", ddl: "VARCHAR(180) DEFAULT NULL" },
+      { name: "resguardante_licencia", ddl: "VARCHAR(60) DEFAULT NULL" },
+      { name: "resguardante_vigencia_licencia", ddl: "VARCHAR(60) DEFAULT NULL" },
+    ];
     if (poolOps) {
-      await poolOps.query(
-        `ALTER TABLE inventario_oficina ADD COLUMN detalles_vehiculo LONGTEXT DEFAULT NULL AFTER observaciones`
-      );
-      INV_HAS_DETALLES_VEHICULO = true;
-      return true;
+      for (const col of neededCols) {
+        if (!colSet.has(col.name)) {
+          await poolOps.query(`ALTER TABLE inventario_oficina ADD COLUMN ${qi(col.name)} ${col.ddl}`).catch(() => {});
+        }
+      }
     }
+    INV_HAS_DETALLES_VEHICULO = colSet.has("detalles_vehiculo") || Boolean(poolOps);
+    return INV_HAS_DETALLES_VEHICULO;
   } catch (err) {
-    console.warn("[WARN] No se pudo verificar/crear columna detalles_vehiculo:", err?.message || err);
+    console.warn("[WARN] No se pudo verificar/crear columnas de vehículo/resguardante:", err?.message || err);
   }
   return INV_HAS_DETALLES_VEHICULO;
+}
+
+function normalizeRegionalCargo(rawCargo) {
+  const s = String(rawCargo || "").trim();
+  if (!s) return "";
+  return s
+    .replace(/Coordinadora?\s+Regionall?(\s+(de\s+)?(Muleg[eé]|Los\s+Cabos|Comond[uú](\s*\/\s*Loreto)?|La\s+Paz))?/gi, "Director Regional")
+    .replace(/Coordinadora?\s+Regionall?/gi, "Director Regional");
+}
+
+function extractResguardanteFields(body = {}, detallesObj = null, existingRow = null) {
+  const detResg = (detallesObj && detallesObj.resguardante && typeof detallesObj.resguardante === "object")
+    ? detallesObj.resguardante
+    : {};
+  const exDet = existingRow && existingRow.detalles_vehiculo ? parseDetallesVehiculo(existingRow.detalles_vehiculo) : null;
+  const exResg = (exDet && exDet.resguardante && typeof exDet.resguardante === "object") ? exDet.resguardante : {};
+
+  const pick = (bodyKeys, detKey, colKey, upper = false) => {
+    for (const k of bodyKeys) {
+      if (body[k] !== undefined && body[k] !== null) {
+        const v = String(body[k]).trim();
+        return upper ? v.toUpperCase() : v;
+      }
+    }
+    if (detResg[detKey] !== undefined && detResg[detKey] !== null) {
+      const v = String(detResg[detKey]).trim();
+      return upper ? v.toUpperCase() : v;
+    }
+    if (existingRow && existingRow[colKey] !== undefined && existingRow[colKey] !== null && String(existingRow[colKey]).trim() !== "") {
+      const v = String(existingRow[colKey]).trim();
+      return upper ? v.toUpperCase() : v;
+    }
+    if (exResg[detKey] !== undefined && exResg[detKey] !== null) {
+      const v = String(exResg[detKey]).trim();
+      return upper ? v.toUpperCase() : v;
+    }
+    return "";
+  };
+
+  return {
+    resguardante_nombre: pick(["resguardante_nombre", "nombre_resguardante"], "nombre_completo", "resguardante_nombre", false),
+    resguardante_rfc: pick(["resguardante_rfc", "rfc_resguardante"], "rfc", "resguardante_rfc", true),
+    resguardante_puesto: normalizeRegionalCargo(pick(["resguardante_puesto", "puesto_resguardante"], "puesto", "resguardante_puesto", false)),
+    resguardante_adscripcion: pick(["resguardante_adscripcion", "adscripcion_resguardante"], "adscripcion", "resguardante_adscripcion", false),
+    resguardante_programa: pick(["resguardante_programa", "programa_resguardante"], "programa", "resguardante_programa", false),
+    resguardante_licencia: pick(["resguardante_licencia", "licencia_resguardante"], "licencia_no", "resguardante_licencia", true),
+    resguardante_vigencia_licencia: pick(["resguardante_vigencia_licencia", "vigencia_licencia_resguardante", "resguardante_vigencia"], "vigencia_licencia", "resguardante_vigencia_licencia", false),
+  };
 }
 
 function parseDetallesVehiculo(raw) {
@@ -6050,7 +8682,7 @@ const VEHICULO_CHECKLIST_ITEMS = [
   { key: "bayoneta_transmision", label: "Bayoneta de transmisión" },
 ];
 
-async function queryRegionalInventory({ region_id, oficina_id, rubro_id, activo_id, forceUngrouped = false }) {
+async function queryRegionalInventory({ region_id, oficina_id, rubro_id, activo_id, forceUngrouped = false, includeBodega = false }) {
   const hasDetCol = await ensureDetallesVehiculoCol();
   const regionId = Number(region_id || 0);
   const oficinaId = Number(oficina_id || 0);
@@ -6073,7 +8705,11 @@ async function queryRegionalInventory({ region_id, oficina_id, rubro_id, activo_
     } catch {}
   }
 
-  if (!hasOficina && hasRegion && !hasActivo && !forceUngrouped && !isParqueVehicular) {
+  // En La Paz (region_id = 1) cuando el usuario tiene acceso a bodega RM (ej. Jesús o Admin),
+  // no agrupamos para que pueda ver y transferir individualmente entre RM y Coordinación Regional La Paz.
+  const shouldGroup = !hasOficina && hasRegion && !hasActivo && !forceUngrouped && !isParqueVehicular && !(regionId === 1 && includeBodega);
+
+  if (shouldGroup) {
     const [rows] = await poolRead.query(
       `SELECT
          MIN(io.id) AS id,
@@ -6083,6 +8719,7 @@ async function queryRegionalInventory({ region_id, oficina_id, rubro_id, activo_
          GROUP_CONCAT(DISTINCT NULLIF(TRIM(io.numero_serie_placas), '') SEPARATOR ', ') AS numero_serie_placas,
          MAX(io.unidad) AS unidad,
          SUM(io.cantidad_propia) AS cantidad_propia,
+         SUM(COALESCE(io.cantidad_disponible, io.cantidad_propia)) AS cantidad_disponible,
          SUM(io.cantidad_prestada_recibida) AS cantidad_prestada_recibida,
          SUM(io.cantidad_prestada_enviada) AS cantidad_prestada_enviada,
          MAX(io.estado_fisico) AS estado_fisico,
@@ -6141,14 +8778,16 @@ async function queryRegionalInventory({ region_id, oficina_id, rubro_id, activo_
        io.numero_serie_placas,
        io.unidad,
        io.cantidad_propia,
+       COALESCE(io.cantidad_disponible, io.cantidad_propia) AS cantidad_disponible,
        io.cantidad_prestada_recibida,
        io.cantidad_prestada_enviada,
+       io.es_bodega_delegacion,
        io.estado_fisico,
        io.estatus_uso,
        io.observaciones,
        io.origen_adquisicion,
        io.observaciones_control,
-       ${hasDetCol ? "io.detalles_vehiculo" : "NULL AS detalles_vehiculo"},
+       ${hasDetCol ? "io.detalles_vehiculo, io.resguardante_nombre, io.resguardante_rfc, io.resguardante_puesto, io.resguardante_adscripcion, io.resguardante_programa, io.resguardante_licencia, io.resguardante_vigencia_licencia" : "NULL AS detalles_vehiculo, NULL AS resguardante_nombre, NULL AS resguardante_rfc, NULL AS resguardante_puesto, NULL AS resguardante_adscripcion, NULL AS resguardante_programa, NULL AS resguardante_licencia, NULL AS resguardante_vigencia_licencia"},
        io.updated_at
      FROM inventario_oficina io
      INNER JOIN oficinas_regionales o ON o.id = io.oficina_id
@@ -6159,19 +8798,41 @@ async function queryRegionalInventory({ region_id, oficina_id, rubro_id, activo_
        AND (? = 0 OR io.oficina_id = ?)
        AND (? = 0 OR io.rubro_id = ?)
        AND (? = 0 OR io.id = ?)
-       AND (io.rubro_id != 2 OR (o.nombre NOT LIKE '%S/A%' AND o.nombre NOT LIKE '%Sin Asignar%'))
-       AND COALESCE(io.es_bodega_delegacion, 0) = 0
+       AND (? = 1 OR io.rubro_id != 2 OR (o.nombre NOT LIKE '%S/A%' AND o.nombre NOT LIKE '%Sin Asignar%'))
+       AND (io.rubro_id != 3 OR io.oficina_id != 1)
+       AND (? = 1 OR COALESCE(io.es_bodega_delegacion, 0) = 0)
      ORDER BY r.id ASC, o.id ASC, io.clave_bien ASC`,
     [
       hasRegion ? 1 : 0, hasRegion ? regionId : 0,
       hasOficina ? 1 : 0, hasOficina ? oficinaId : 0,
       hasRubro ? 1 : 0, hasRubro ? rubroId : 0,
       hasActivo ? 1 : 0, hasActivo ? activoId : 0,
+      hasOficina ? 1 : 0,
+      includeBodega ? 1 : 0,
     ]
   );
   return {
     grouped: false,
-    rows: rows.map((r) => ({ ...r, detalles_vehiculo: parseDetallesVehiculo(r.detalles_vehiculo) })),
+    rows: rows.map((r) => {
+      const det = parseDetallesVehiculo(r.detalles_vehiculo);
+      const resg = extractResguardanteFields({}, det, r);
+      if (det && typeof det === "object") {
+        det.resguardante = {
+          nombre_completo: resg.resguardante_nombre,
+          rfc: resg.resguardante_rfc,
+          puesto: resg.resguardante_puesto,
+          adscripcion: resg.resguardante_adscripcion,
+          programa: resg.resguardante_programa,
+          licencia_no: resg.resguardante_licencia,
+          vigencia_licencia: resg.resguardante_vigencia_licencia,
+        };
+      }
+      return {
+        ...r,
+        ...resg,
+        detalles_vehiculo: det,
+      };
+    }),
   };
 }
 
@@ -6198,6 +8859,7 @@ app.get("/api/inventario-regional", authRequired, async (req, res) => {
       oficina_id,
       rubro_id: effectiveRubroId,
       activo_id,
+      includeBodega: canEdit,
     });
     return res.json({
       ok: true,
@@ -6213,7 +8875,7 @@ app.get("/api/inventario-regional", authRequired, async (req, res) => {
   }
 });
 
-// Alta de un activo en el inventario de una oficina regional (incluye soporte híbrido para PARQUE_VEHICULAR)
+// Alta de un activo en el inventario de una oficina regional (incluye soporte híbrido para PARQUE_VEHICULAR y fusión automática en RM)
 app.post("/api/inventario-regional", authRequired, async (req, res) => {
   try {
     if (!canEditRegional(req)) {
@@ -6227,7 +8889,7 @@ app.post("/api/inventario-regional", authRequired, async (req, res) => {
     if (assignedRubroId && b.rubro_id && Number(b.rubro_id) !== Number(assignedRubroId)) {
       return httpError(res, 403, "Solo puedes agregar activos del rubro asignado a tu usuario.");
     }
-    const claveBien = String(b.clave_bien ?? "").trim();
+    const claveBienNorm = String(b.clave_bien ?? "").trim().toUpperCase();
     const descripcion = String(b.descripcion ?? "").trim();
     let marcaModelo = String(b.marca_modelo ?? "").trim() || null;
     let seriePlacas = String(b.numero_serie_placas ?? "").trim() || null;
@@ -6259,37 +8921,83 @@ app.post("/api/inventario-regional", authRequired, async (req, res) => {
 
     if (!Number.isInteger(oficinaId) || oficinaId <= 0) return httpError(res, 400, "Oficina requerida");
     if (!Number.isInteger(rubroId) || rubroId <= 0) return httpError(res, 400, "Rubro requerido");
-    if (!claveBien) return httpError(res, 400, "Clave del bien requerida");
+    if (!claveBienNorm) return httpError(res, 400, "Clave del bien requerida");
     if (!descripcion) return httpError(res, 400, "Descripción requerida");
-    if (!Number.isInteger(cantidad) || cantidad < 1) return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 1");
-    if (!["BUENO", "REGULAR", "MALO", "BAJA"].includes(estadoFisico)) return httpError(res, 400, "Estado físico inválido");
-    if (!["ACTIVO", "PRESTADO", "EN_REPARACION", "BAJA"].includes(estatusUso)) return httpError(res, 400, "Estatus de uso inválido");
-    if (claveBien.length > 60) return httpError(res, 400, "La clave del bien excede 60 caracteres");
+    // v42: el Administrador puede guardar cambios (observaciones, nombres, etc.) aunque las cantidades sean 0
+    const isAdminEditor = isAdmin(req) || String(req.user?.rol || "").trim().toLowerCase() === "admin";
+    if (isAdminEditor) {
+      if (!Number.isInteger(cantidad) || cantidad < 0) return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 0");
+    } else if (!Number.isInteger(cantidad) || cantidad < 1) {
+      return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 1");
+    }
+    if (!["BUENO", "REGULAR", "MALO", "BAJA", "SINIESTRO / EN ASEGURADORA", "NO DISPONIBLE (SINIESTRO)"].includes(estadoFisico)) return httpError(res, 400, "Estado físico inválido");
+    if (!["ACTIVO", "PRESTADO", "EN_REPARACION", "BAJA", "SINIESTRO / EN ASEGURADORA", "NO DISPONIBLE (SINIESTRO)"].includes(estatusUso)) return httpError(res, 400, "Estatus de uso inválido");
+    if (claveBienNorm.length > 60) return httpError(res, 400, "La clave del bien excede 60 caracteres");
     if (descripcion.length > 255) return httpError(res, 400, "La descripción excede 255 caracteres");
     if (marcaModelo && marcaModelo.length > 150) return httpError(res, 400, "Marca / Modelo excede 150 caracteres");
     if (seriePlacas && seriePlacas.length > 100) return httpError(res, 400, "Serie / Placas excede 100 caracteres");
 
-    const [[ofi]] = await poolRead.query(`SELECT id FROM oficinas_regionales WHERE id = ? LIMIT 1`, [oficinaId]);
+    const [[ofi]] = await poolRead.query(`SELECT id, nombre FROM oficinas_regionales WHERE id = ? LIMIT 1`, [oficinaId]);
     if (!ofi) return httpError(res, 400, "La oficina seleccionada no existe");
     const [[rub]] = await poolRead.query(`SELECT id FROM rubros_inventario WHERE id = ? LIMIT 1`, [rubroId]);
     if (!rub) return httpError(res, 400, "El rubro seleccionado no existe");
 
-    const detallesJson = detallesVehiculoObj ? JSON.stringify(detallesVehiculoObj) : null;
+    const destIsRM = /rm\b|recursos materiales/i.test(String(ofi.nombre || ""));
+    const esBodegaVal = destIsRM || oficinaId === 1 ? 1 : 0;
+
+    // v53: Bloqueo estricto de claves duplicadas sin auto-renumerar en inventario regional
+    const [dupRows] = await poolRead.query(
+      `SELECT id FROM inventario_oficina
+       WHERE oficina_id = ?
+         AND UPPER(TRIM(clave_bien)) = ?
+       LIMIT 1`,
+      [oficinaId, claveBienNorm]
+    );
+    if (dupRows && dupRows.length > 0) {
+      return httpError(res, 409, "⚠️ Error: La clave de producto ingresada ya existe. Por favor asigna una clave diferente.");
+    }
+
+    const resgFields = extractResguardanteFields(b, detallesVehiculoObj, null);
+    let finalDetallesObj = detallesVehiculoObj;
+    const hasAnyResg = Object.values(resgFields).some((v) => String(v || "").trim() !== "");
+    if (finalDetallesObj || hasAnyResg || Number(rubroId) === 2) {
+      finalDetallesObj = finalDetallesObj && typeof finalDetallesObj === "object" ? { ...finalDetallesObj } : {};
+      finalDetallesObj.resguardante = {
+        nombre_completo: resgFields.resguardante_nombre,
+        rfc: resgFields.resguardante_rfc,
+        puesto: resgFields.resguardante_puesto,
+        adscripcion: resgFields.resguardante_adscripcion,
+        programa: resgFields.resguardante_programa,
+        licencia_no: resgFields.resguardante_licencia,
+        vigencia_licencia: resgFields.resguardante_vigencia_licencia,
+      };
+    }
+    const detallesJson = finalDetallesObj ? JSON.stringify(finalDetallesObj) : null;
 
     let result;
     if (hasDetCol) {
       [result] = await poolOps.query(
         `INSERT INTO inventario_oficina
-           (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas, cantidad_propia, estado_fisico, estatus_uso, observaciones, origen_adquisicion, observaciones_control, detalles_vehiculo)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [oficinaId, rubroId, claveBien, descripcion, marcaModelo, seriePlacas, cantidad, estadoFisico, estatusUso, observaciones, origenAdquisicion, observacionesControl, detallesJson]
+           (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas, cantidad_propia, cantidad_disponible, es_bodega_delegacion, estado_fisico, estatus_uso, observaciones, origen_adquisicion, observaciones_control, detalles_vehiculo,
+            resguardante_nombre, resguardante_rfc, resguardante_puesto, resguardante_adscripcion, resguardante_programa, resguardante_licencia, resguardante_vigencia_licencia)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          oficinaId, rubroId, claveBienNorm, descripcion, marcaModelo, seriePlacas, cantidad, cantidad, esBodegaVal, estadoFisico, estatusUso, observaciones, origenAdquisicion, observacionesControl, detallesJson,
+          resgFields.resguardante_nombre || null,
+          resgFields.resguardante_rfc || null,
+          resgFields.resguardante_puesto || null,
+          resgFields.resguardante_adscripcion || null,
+          resgFields.resguardante_programa || null,
+          resgFields.resguardante_licencia || null,
+          resgFields.resguardante_vigencia_licencia || null,
+        ]
       );
     } else {
       [result] = await poolOps.query(
         `INSERT INTO inventario_oficina
-           (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas, cantidad_propia, estado_fisico, estatus_uso, observaciones, origen_adquisicion, observaciones_control)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [oficinaId, rubroId, claveBien, descripcion, marcaModelo, seriePlacas, cantidad, estadoFisico, estatusUso, observaciones, origenAdquisicion, observacionesControl]
+           (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas, cantidad_propia, cantidad_disponible, es_bodega_delegacion, estado_fisico, estatus_uso, observaciones, origen_adquisicion, observaciones_control)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [oficinaId, rubroId, claveBienNorm, descripcion, marcaModelo, seriePlacas, cantidad, cantidad, esBodegaVal, estadoFisico, estatusUso, observaciones, origenAdquisicion, observacionesControl]
       );
     }
 
@@ -6303,7 +9011,7 @@ app.post("/api/inventario-regional", authRequired, async (req, res) => {
            STOCK = VALUES(STOCK),
            origen_adquisicion = VALUES(origen_adquisicion),
            observaciones_control = VALUES(observaciones_control)`,
-        [claveBien, descripcion, b.unidad || 'PIEZA', cantidad, origenAdquisicion, observacionesControl]
+        [claveBienNorm, descripcion, b.unidad || 'PIEZA', cantidad, origenAdquisicion, observacionesControl]
       ).catch(() => {});
     }
 
@@ -6313,7 +9021,7 @@ app.post("/api/inventario-regional", authRequired, async (req, res) => {
   }
 });
 
-// Edición de un activo en el inventario regional (incluye datos y checklist de PARQUE_VEHICULAR)
+// Edición de un activo en el inventario regional (incluye fusión inteligente si se mueve a una oficina donde ya existe)
 app.put("/api/inventario-regional/:id", authRequired, async (req, res) => {
   try {
     if (!canEditRegional(req)) {
@@ -6323,22 +9031,20 @@ app.put("/api/inventario-regional/:id", authRequired, async (req, res) => {
     const id = Number(req.params.id || 0);
     if (!Number.isInteger(id) || id <= 0) return httpError(res, 400, "ID de activo inválido");
 
-    if (assignedRubroId) {
-      const [[existingAsset]] = await poolRead.query(
-        `SELECT id, rubro_id FROM inventario_oficina WHERE id = ? LIMIT 1`,
-        [id]
-      );
-      if (!existingAsset) return httpError(res, 404, "Activo no encontrado");
-      if (Number(existingAsset.rubro_id) !== Number(assignedRubroId)) {
-        return httpError(res, 403, "Solo puedes editar activos del rubro del cual eres encargado.");
-      }
+    const [[existingAsset]] = await poolRead.query(
+      `SELECT * FROM inventario_oficina WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    if (!existingAsset) return httpError(res, 404, "Activo no encontrado");
+    if (assignedRubroId && Number(existingAsset.rubro_id) !== Number(assignedRubroId)) {
+      return httpError(res, 403, "Solo puedes editar activos del rubro del cual eres encargado.");
     }
 
     const hasDetCol = await ensureDetallesVehiculoCol();
     const b = req.body || {};
     const oficinaId = Number(b.oficina_id || 0);
     const rubroId = assignedRubroId ? Number(assignedRubroId) : Number(b.rubro_id || 0);
-    const claveBien = String(b.clave_bien ?? "").trim();
+    const claveBienNorm = String(b.clave_bien ?? "").trim().toUpperCase();
     const descripcion = String(b.descripcion ?? "").trim();
     let marcaModelo = String(b.marca_modelo ?? "").trim() || null;
     let seriePlacas = String(b.numero_serie_placas ?? "").trim() || null;
@@ -6370,33 +9076,94 @@ app.put("/api/inventario-regional/:id", authRequired, async (req, res) => {
 
     if (!Number.isInteger(oficinaId) || oficinaId <= 0) return httpError(res, 400, "Oficina requerida");
     if (!Number.isInteger(rubroId) || rubroId <= 0) return httpError(res, 400, "Rubro requerido");
-    if (!claveBien) return httpError(res, 400, "Clave del bien requerida");
+    if (!claveBienNorm) return httpError(res, 400, "Clave del bien requerida");
     if (!descripcion) return httpError(res, 400, "Descripción requerida");
-    if (!Number.isInteger(cantidad) || cantidad < 1) return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 1");
-    if (!["BUENO", "REGULAR", "MALO", "BAJA"].includes(estadoFisico)) return httpError(res, 400, "Estado físico inválido");
-    if (!["ACTIVO", "PRESTADO", "EN_REPARACION", "BAJA"].includes(estatusUso)) return httpError(res, 400, "Estatus de uso inválido");
+    // v42: el Administrador puede guardar cambios (observaciones, nombres, etc.) aunque las cantidades sean 0
+    const isAdminEditor = isAdmin(req) || String(req.user?.rol || "").trim().toLowerCase() === "admin";
+    if (isAdminEditor) {
+      if (!Number.isInteger(cantidad) || cantidad < 0) return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 0");
+    } else if (!Number.isInteger(cantidad) || cantidad < 1) {
+      return httpError(res, 400, "La cantidad debe ser un entero mayor o igual a 1");
+    }
+    if (!["BUENO", "REGULAR", "MALO", "BAJA", "SINIESTRO / EN ASEGURADORA", "NO DISPONIBLE (SINIESTRO)"].includes(estadoFisico)) return httpError(res, 400, "Estado físico inválido");
+    if (!["ACTIVO", "PRESTADO", "EN_REPARACION", "BAJA", "SINIESTRO / EN ASEGURADORA", "NO DISPONIBLE (SINIESTRO)"].includes(estatusUso)) return httpError(res, 400, "Estatus de uso inválido");
 
-    const detallesJson = detallesVehiculoObj ? JSON.stringify(detallesVehiculoObj) : null;
+    const [[ofi]] = await poolRead.query(`SELECT id, nombre FROM oficinas_regionales WHERE id = ? LIMIT 1`, [oficinaId]);
+    if (!ofi) return httpError(res, 400, "La oficina seleccionada no existe");
+    const destIsRM = /rm\b|recursos materiales/i.test(String(ofi.nombre || ""));
+    const esBodegaVal = destIsRM || oficinaId === 1 ? 1 : 0;
+
+    // v53: Bloqueo estricto de claves duplicadas sin auto-renumerar en inventario regional (Ediciones)
+    const [dupEdit] = await poolRead.query(
+      `SELECT id FROM inventario_oficina
+       WHERE oficina_id = ?
+         AND UPPER(TRIM(clave_bien)) = ?
+         AND id <> ?
+       LIMIT 1`,
+      [oficinaId, claveBienNorm, id]
+    );
+    if (dupEdit && dupEdit.length > 0) {
+      return httpError(res, 409, "⚠️ Error: La clave de producto ingresada ya existe. Por favor asigna una clave diferente.");
+    }
+
+    const resgFields = extractResguardanteFields(b, detallesVehiculoObj, existingAsset);
+    let finalDetallesObj = detallesVehiculoObj || parseDetallesVehiculo(existingAsset.detalles_vehiculo);
+    const hasAnyResg = Object.values(resgFields).some((v) => String(v || "").trim() !== "");
+    if (finalDetallesObj || hasAnyResg || Number(rubroId) === 2) {
+      finalDetallesObj = finalDetallesObj && typeof finalDetallesObj === "object" ? { ...finalDetallesObj } : {};
+      finalDetallesObj.resguardante = {
+        nombre_completo: resgFields.resguardante_nombre,
+        rfc: resgFields.resguardante_rfc,
+        puesto: resgFields.resguardante_puesto,
+        adscripcion: resgFields.resguardante_adscripcion,
+        programa: resgFields.resguardante_programa,
+        licencia_no: resgFields.resguardante_licencia,
+        vigencia_licencia: resgFields.resguardante_vigencia_licencia,
+      };
+    }
+    const detallesJson = finalDetallesObj ? JSON.stringify(finalDetallesObj) : null;
+    const prestadoAct = Math.max(0, Number(existingAsset.cantidad_prestada_enviada || 0));
+    const nuevoPrestado = Math.min(prestadoAct, cantidad);
+    let nuevaDisponible = Math.max(0, cantidad - nuevoPrestado);
+    if (isAdminEditor && b.cantidad_disponible !== undefined && b.cantidad_disponible !== null && b.cantidad_disponible !== "") {
+      const dispAdmin = Number(b.cantidad_disponible);
+      if (Number.isInteger(dispAdmin) && dispAdmin >= 0) nuevaDisponible = dispAdmin;
+    }
 
     if (hasDetCol) {
       await poolOps.query(
         `UPDATE inventario_oficina
          SET oficina_id = ?, rubro_id = ?, clave_bien = ?, descripcion = ?,
              marca_modelo = ?, numero_serie_placas = ?, cantidad_propia = ?,
+             cantidad_disponible = ?, cantidad_prestada_enviada = ?, es_bodega_delegacion = ?,
              estado_fisico = ?, estatus_uso = ?, observaciones = ?,
-             origen_adquisicion = ?, observaciones_control = ?, detalles_vehiculo = ?
+             origen_adquisicion = ?, observaciones_control = ?, detalles_vehiculo = ?,
+             resguardante_nombre = ?, resguardante_rfc = ?, resguardante_puesto = ?,
+             resguardante_adscripcion = ?, resguardante_programa = ?,
+             resguardante_licencia = ?, resguardante_vigencia_licencia = ?
          WHERE id = ?`,
-        [oficinaId, rubroId, claveBien, descripcion, marcaModelo, seriePlacas, cantidad, estadoFisico, estatusUso, observaciones, origenAdquisicion, observacionesControl, detallesJson, id]
+        [
+          oficinaId, rubroId, claveBienNorm, descripcion, marcaModelo, seriePlacas, cantidad, nuevaDisponible, nuevoPrestado, esBodegaVal, estadoFisico, estatusUso, observaciones, origenAdquisicion, observacionesControl, detallesJson,
+          resgFields.resguardante_nombre || null,
+          resgFields.resguardante_rfc || null,
+          resgFields.resguardante_puesto || null,
+          resgFields.resguardante_adscripcion || null,
+          resgFields.resguardante_programa || null,
+          resgFields.resguardante_licencia || null,
+          resgFields.resguardante_vigencia_licencia || null,
+          id
+        ]
       );
     } else {
       await poolOps.query(
         `UPDATE inventario_oficina
          SET oficina_id = ?, rubro_id = ?, clave_bien = ?, descripcion = ?,
              marca_modelo = ?, numero_serie_placas = ?, cantidad_propia = ?,
+             cantidad_disponible = ?, cantidad_prestada_enviada = ?, es_bodega_delegacion = ?,
              estado_fisico = ?, estatus_uso = ?, observaciones = ?,
              origen_adquisicion = ?, observaciones_control = ?
          WHERE id = ?`,
-        [oficinaId, rubroId, claveBien, descripcion, marcaModelo, seriePlacas, cantidad, estadoFisico, estatusUso, observaciones, origenAdquisicion, observacionesControl, id]
+        [oficinaId, rubroId, claveBienNorm, descripcion, marcaModelo, seriePlacas, cantidad, nuevaDisponible, nuevoPrestado, esBodegaVal, estadoFisico, estatusUso, observaciones, origenAdquisicion, observacionesControl, id]
       );
     }
 
@@ -6405,7 +9172,7 @@ app.put("/api/inventario-regional/:id", authRequired, async (req, res) => {
         `UPDATE almacen_dregcivil
          SET CLAVE = ?, DESCRIPCION = ?, UNIDAD = ?, STOCK = ?, origen_adquisicion = ?, observaciones_control = ?
          WHERE CLAVE = ?`,
-        [claveBien, descripcion, b.unidad || 'PIEZA', cantidad, origenAdquisicion, observacionesControl, claveBien]
+        [claveBienNorm, descripcion, b.unidad || 'PIEZA', cantidad, origenAdquisicion, observacionesControl, String(existingAsset.clave_bien || claveBienNorm)]
       ).catch(() => {});
     }
 
@@ -6415,20 +9182,551 @@ app.put("/api/inventario-regional/:id", authRequired, async (req, res) => {
   }
 });
 
-// Punto 5: Transferencia de inventario entre oficinas regionales
-app.post("/api/inventario-regional/:id/transferir", authRequired, async (req, res) => {
+// ============================================================================
+// v52: ELIMINACIÓN DE ACTIVO DEL INVENTARIO REGIONAL (EXCLUSIVO ADMINISTRADOR)
+// ============================================================================
+app.delete("/api/inventario-regional/:id", authRequired, async (req, res) => {
+  try {
+    const rolNorm = String(req.user?.rol || "").trim().toLowerCase();
+    const isUserAdmin = isAdmin(req) || rolNorm === "admin" || String(req.user?.username || "").toLowerCase() === "admin";
+    if (!isUserAdmin) {
+      return httpError(res, 403, "Acceso denegado: solo el Administrador puede eliminar activos del inventario regional.");
+    }
+
+    const id = Number(req.params.id || 0);
+    if (!Number.isInteger(id) || id <= 0) {
+      return httpError(res, 400, "ID de activo inválido.");
+    }
+
+    const [[existing]] = await poolRead.query(
+      `SELECT id, clave_bien, descripcion, oficina_id FROM inventario_oficina WHERE id = ? LIMIT 1`,
+      [id]
+    );
+
+    if (!existing) {
+      return httpError(res, 404, "El activo que intentas eliminar no existe.");
+    }
+
+    // Desvincular referencias en vales_prestamo_detalle si existen
+    await poolOps.query(
+      `UPDATE vales_prestamo_detalle SET articulo_id = NULL WHERE articulo_id = ?`,
+      [id]
+    ).catch(() => {});
+    await poolOps.query(
+      `UPDATE vales_prestamo_detalle SET inventario_id = NULL WHERE inventario_id = ?`,
+      [id]
+    ).catch(() => {});
+
+    await poolOps.query(`DELETE FROM inventario_oficina WHERE id = ?`, [id]);
+
+    await registrarBitacora(
+      req,
+      "REGIONAL",
+      "ELIMINAR_REGIONAL",
+      `Se eliminó el artículo. Clave: ${existing.clave_bien || "S/C"} - ${existing.descripcion || "Sin descripción"} (ID interno BD: ${id})`
+    );
+
+    return res.json({
+      ok: true,
+      message: `Activo con ID ${id} eliminado exitosamente del inventario regional.`,
+      id
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al eliminar activo regional");
+  }
+});
+
+// Forzar Retorno (God Mode Admin): restaura cantidad_disponible = cantidad_propia, limpia préstamos retenidos y pone estatus ACTIVO
+async function handleForzarRetornoInventarioRegional(req, res) {
+  try {
+    const isAdminEditor = isAdmin(req) || String(req.user?.rol || "").trim().toLowerCase() === "admin";
+    if (!isAdminEditor) {
+      return httpError(res, 403, "Solo el Administrador tiene permisos para forzar el retorno de stock.");
+    }
+    const id = Number(req.params.id || 0);
+    if (!Number.isInteger(id) || id <= 0) {
+      return httpError(res, 400, "ID de activo inválido");
+    }
+
+    const [[existingAsset]] = await poolRead.query(
+      `SELECT * FROM inventario_oficina WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    if (!existingAsset) {
+      return httpError(res, 404, "Activo no encontrado en inventario_oficina");
+    }
+
+    const colKeys = new Set(Object.keys(existingAsset).map((k) => k.toLowerCase()));
+    const setParts = [
+      "cantidad_disponible = cantidad_propia",
+      "cantidad_prestada_enviada = 0",
+      "estatus_uso = 'ACTIVO'"
+    ];
+    if (colKeys.has("estatus")) {
+      setParts.push("estatus = 'Activo'");
+    }
+    if (colKeys.has("resguardante_provisional")) {
+      setParts.push("resguardante_provisional = NULL");
+    }
+    if (colKeys.has("fecha_prestamo")) {
+      setParts.push("fecha_prestamo = NULL");
+    }
+
+    await poolOps.query(
+      `UPDATE inventario_oficina
+       SET ${setParts.join(", ")}
+       WHERE id = ?`,
+      [id]
+    );
+
+    // v53: Actualizar registros abiertos/pendientes de este activo en vales_prestamo_detalle y encabezados
+    const [affectedVales] = await poolRead.query(
+      `SELECT DISTINCT vale_id
+       FROM vales_prestamo_detalle
+       WHERE (articulo_id = ? OR inventario_id = ?)
+         AND COALESCE(estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')`,
+      [id, id]
+    ).catch(() => [[]]);
+
+    // Marcar los ítems pendientes de este activo como devueltos
+    await poolOps.query(
+      `UPDATE vales_prestamo_detalle
+       SET estado_devolucion = 'DEVUELTO',
+           devuelto = 1,
+           cantidad_devuelta = cantidad,
+           fecha_devolucion = NOW(),
+           observaciones = CONCAT(COALESCE(observaciones, ''), ' [Retorno Forzado por Admin]')
+       WHERE (articulo_id = ? OR inventario_id = ?)
+         AND COALESCE(estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')`,
+      [id, id]
+    ).catch(async () => {
+      await poolOps.query(
+        `UPDATE vales_prestamo_detalle
+         SET estado_devolucion = 'DEVUELTO'
+         WHERE (articulo_id = ? OR inventario_id = ?)
+           AND COALESCE(estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')`,
+        [id, id]
+      ).catch(() => {});
+    });
+
+    // Para cada vale afectado, si todos sus ítems ya están devueltos, actualizar encabezado en vales_prestamo
+    if (affectedVales && affectedVales.length > 0) {
+      for (const row of affectedVales) {
+        const vId = row.vale_id;
+        if (!vId) continue;
+        const [[pendingCount]] = await poolRead.query(
+          `SELECT COUNT(*) AS n
+           FROM vales_prestamo_detalle
+           WHERE vale_id = ?
+             AND COALESCE(estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')`,
+          [vId]
+        ).catch(() => [[{ n: 0 }]]);
+
+        if (Number(pendingCount?.n || 0) === 0) {
+          await poolOps.query(
+            `UPDATE vales_prestamo
+             SET estado = 'DEVUELTO',
+                 fecha_devolucion_real = NOW()
+             WHERE id = ?`,
+            [vId]
+          ).catch(() => {});
+        }
+      }
+    }
+
+    const cantPropia = Number(existingAsset.cantidad_propia ?? 0);
+    const cantDispAntes = Number(existingAsset.cantidad_disponible ?? 0);
+    const cantPrestAntes = Number(existingAsset.cantidad_prestada_enviada ?? 0);
+
+    await registrarBitacora(
+      req,
+      "REGIONAL",
+      "FORZAR_RETORNO",
+      `Forzar Retorno aplicado a [${existingAsset.clave_bien}] ${existingAsset.descripcion} (ID ${id}): disponible ${cantDispAntes} -> ${cantPropia}, prestado ${cantPrestAntes} -> 0, estatus -> ACTIVO. Préstamos en vales cerrados como DEVUELTO.`
+    );
+
+    return res.json({
+      ok: true,
+      id,
+      clave_bien: existingAsset.clave_bien,
+      cantidad_propia: cantPropia,
+      cantidad_disponible: cantPropia,
+      cantidad_prestada_enviada: 0,
+      estatus_uso: "ACTIVO",
+      message: `Stock restaurado exitosamente para ${existingAsset.clave_bien || `#${id}`} (${cantPropia} disponible(s)). Préstamos en vales regularizados.`
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al forzar retorno del activo");
+  }
+}
+
+app.put("/api/inventario-regional/:id/forzar-retorno", authRequired, handleForzarRetornoInventarioRegional);
+app.post("/api/inventario-regional/:id/forzar-retorno", authRequired, handleForzarRetornoInventarioRegional);
+
+// ============================================================================
+// v47: LEMATIZACIÓN UNIVERSAL, HOMOLOGACIÓN CON RM — LA PAZ Y FUSIÓN AUTOMÁTICA
+// ============================================================================
+const STOPWORDS_HOMOLOGACION = new Set([
+  "de", "del", "la", "las", "el", "los", "en", "con", "para", "por", "un", "una",
+  "unos", "unas", "y", "e", "o", "u", "al", "a", "su", "sus", "color", "tipo",
+  "marca", "modelo", "pieza", "piezas", "pza", "pzas", "unidad", "unidades"
+]);
+
+function normalizeTextBasic(str) {
+  return String(str || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getCanonicalTokenStem(word) {
+  const w = normalizeTextBasic(word);
+  if (!w) return "";
+  if (/^\d+$/.test(w)) return w;
+  const rawRoots = getSearchTokenRoots(w);
+  const flatRoots = Array.isArray(rawRoots) ? rawRoots.flat() : [];
+  let shortest = w;
+  for (const r of flatRoots) {
+    if (typeof r === "string" && r.length >= 2 && r.length < shortest.length) {
+      shortest = r;
+    }
+  }
+  // Normalizar género en adjetivos/sustantivos comunes (ej. blanca/blanco -> blanc, negra/negro -> negr, ejecutiva/ejecutivo -> ejecutiv, metalica/metalico -> metalic)
+  if (shortest.length >= 4 && /[oa]$/.test(shortest)) {
+    return shortest.slice(0, -1);
+  }
+  return shortest;
+}
+
+function getTokenRootSetForWord(word) {
+  const w = normalizeTextBasic(word);
+  if (!w) return new Set();
+  const rawRoots = getSearchTokenRoots(w);
+  const flatRoots = Array.isArray(rawRoots) ? rawRoots.flat() : [];
+  const roots = new Set(flatRoots.filter((r) => typeof r === "string" && r.length > 0));
+  roots.add(w);
+  const stem = getCanonicalTokenStem(w);
+  if (stem) roots.add(stem);
+  if (w.endsWith("ces") && w.length > 4) roots.add(w.slice(0, -3) + "z");
+  return roots;
+}
+
+function extractMeaningfulTokenGroups(desc) {
+  const norm = normalizeTextBasic(desc);
+  if (!norm) return [];
+  const rawTokens = norm.split(" ").filter((t) => t && !STOPWORDS_HOMOLOGACION.has(t));
+  return rawTokens.map((t) => ({
+    raw: t,
+    stem: getCanonicalTokenStem(t),
+    roots: getTokenRootSetForWord(t),
+  }));
+}
+
+function tokensShareRoot(groupA, groupB) {
+  if (!groupA || !groupB) return false;
+  if (groupA.raw === groupB.raw || (groupA.stem && groupA.stem === groupB.stem)) return true;
+  for (const r of groupA.roots) {
+    if (r.length >= 3 && groupB.roots.has(r)) return true;
+  }
+  return false;
+}
+
+function areDescriptionsLemmatizedMatch(descA, descB) {
+  const normA = normalizeTextBasic(descA);
+  const normB = normalizeTextBasic(descB);
+  if (!normA || !normB) return false;
+  if (normA === normB) return true;
+
+  const groupsA = extractMeaningfulTokenGroups(descA);
+  const groupsB = extractMeaningfulTokenGroups(descB);
+  if (!groupsA.length || !groupsB.length) return false;
+
+  // El sustantivo principal (primer token significativo, ej. silla, escritorio, archivero, mesa, librero, estante) debe compartir raíz
+  if (!tokensShareRoot(groupsA[0], groupsB[0])) return false;
+
+  // Verificar que todos los tokens de A tengan equivalente en B y todos los de B tengan equivalente en A
+  const allAMatchedInB = groupsA.every((ga) => groupsB.some((gb) => tokensShareRoot(ga, gb)));
+  const allBMatchedInA = groupsB.every((gb) => groupsA.some((ga) => tokensShareRoot(gb, ga)));
+  if (allAMatchedInB && allBMatchedInA) return true;
+
+  // Si uno es subconjunto estricto del otro (ej. "Escritorio de madera" vs "Escritorio de madera grande")
+  // permitir coincidencia solo si no hay números ni colores contradictorios y comparten al menos 2 raíces o el 100% del catálogo
+  const COLOR_MODIFIERS = new Set(["gris", "negr", "blanc", "azul", "roj", "verd", "caf", "mader", "metal", " metalic", "plastic", "cromad", "vinil", "piel", "tela"]);
+  const numsA = groupsA.filter((g) => /^\d+$/.test(g.raw)).map((g) => g.raw);
+  const numsB = groupsB.filter((g) => /^\d+$/.test(g.raw)).map((g) => g.raw);
+  if (numsA.length && numsB.length && numsA.join(",") !== numsB.join(",")) return false;
+
+  const colorsA = groupsA.filter((g) => COLOR_MODIFIERS.has(g.stem)).map((g) => g.stem);
+  const colorsB = groupsB.filter((g) => COLOR_MODIFIERS.has(g.stem)).map((g) => g.stem);
+  if (colorsA.length && colorsB.length) {
+    const colorOverlap = colorsA.some((c) => colorsB.includes(c));
+    if (!colorOverlap) return false;
+  }
+
+  const matchedCountA = groupsA.filter((ga) => groupsB.some((gb) => tokensShareRoot(ga, gb))).length;
+  const matchedCountB = groupsB.filter((gb) => groupsA.some((ga) => tokensShareRoot(gb, ga))).length;
+  const minLen = Math.min(groupsA.length, groupsB.length);
+  const maxLen = Math.max(groupsA.length, groupsB.length);
+
+  if (minLen >= 2 && (allAMatchedInB || allBMatchedInA) && (matchedCountA >= minLen && matchedCountB >= minLen) && minLen / maxLen >= 0.66) {
+    return true;
+  }
+
+  return false;
+}
+
+function hasUniqueSerialNumber(serieVal) {
+  const s = String(serieVal ?? "").trim().toUpperCase();
+  if (!s) return false;
+  const nonSerialValues = new Set([
+    "-", "--", "---", "S/N", "SN", "S/N.", "N/A", "NA", "SIN SERIE",
+    "SIN NUMERO", "SIN NÚMERO", "SIN NUMERO DE SERIE", "SIN NÚMERO DE SERIE",
+    "NINGUNO", "NINGUNA", "LOTE", "NO APLICA", "NULL", "0"
+  ]);
+  return !nonSerialValues.has(s);
+}
+
+function findBestCatalogMatchInLaPaz(item, catalogRows) {
+  if (!item || !Array.isArray(catalogRows) || !catalogRows.length) return null;
+  const itemClave = String(item.clave_bien || "").trim().toUpperCase();
+  const itemDesc = String(item.descripcion || "").trim();
+  const itemRubro = Number(item.rubro_id || 0);
+
+  // Filtrar candidatos del mismo rubro cuando esté definido
+  const sameRubro = itemRubro
+    ? catalogRows.filter((c) => !c.rubro_id || Number(c.rubro_id) === itemRubro)
+    : catalogRows;
+  const pool = sameRubro.length ? sameRubro : catalogRows;
+
+  // 1. Coincidencia por descripción exacta o lematizada (priorizando coincidencia 100% de tokens)
+  const normItemDesc = normalizeTextBasic(itemDesc);
+  if (normItemDesc) {
+    const exactDescMatch = pool.find((c) => normalizeTextBasic(c.descripcion) === normItemDesc);
+    if (exactDescMatch) return exactDescMatch;
+
+    const itemGroups = extractMeaningfulTokenGroups(itemDesc);
+    let bestCandidate = null;
+    let bestScore = -1;
+
+    for (const cand of pool) {
+      if (!areDescriptionsLemmatizedMatch(itemDesc, cand.descripcion)) continue;
+      const candGroups = extractMeaningfulTokenGroups(cand.descripcion);
+      const bothDirections =
+        itemGroups.every((ga) => candGroups.some((gb) => tokensShareRoot(ga, gb))) &&
+        candGroups.every((gb) => itemGroups.some((ga) => tokensShareRoot(gb, ga)));
+      const score = (bothDirections ? 100 : 50) - Math.abs(itemGroups.length - candGroups.length);
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandidate = cand;
+      }
+    }
+    if (bestCandidate) return bestCandidate;
+  }
+
+  // 2. Coincidencia por clave base (ej. MOB-001-LC -> MOB-001 o clave exacta)
+  if (itemClave) {
+    const exactKeyMatch = pool.find((c) => String(c.clave_bien || "").trim().toUpperCase() === itemClave);
+    if (exactKeyMatch) return exactKeyMatch;
+
+    const baseMobMatch = itemClave.match(/^(MOB-\d{3})\b/i);
+    if (baseMobMatch) {
+      const baseMob = baseMobMatch[1].toUpperCase();
+      const byBaseMob = pool.find((c) => String(c.clave_bien || "").trim().toUpperCase() === baseMob);
+      if (byBaseMob) return byBaseMob;
+    }
+  }
+
+  return null;
+}
+
+// Endpoint de Homologación Universal de Claves y Nombres con RM — La Paz (Exclusivo Admin)
+async function handleHomologarClavesInventarioRegional(req, res) {
+  try {
+    if (!isAdmin(req)) {
+      return httpError(res, 403, "Acceso denegado: solo el Administrador puede homologar claves y nombres con La Paz.");
+    }
+
+    const conn = await poolOps.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // 1. Identificar las oficinas de RM (Recursos Materiales) — La Paz
+      const [rmOficinas] = await conn.query(
+        `SELECT id, nombre, municipio FROM oficinas_regionales
+         WHERE LOWER(nombre) LIKE '%rm (recursos materiales)%'
+            OR LOWER(nombre) LIKE '%la paz/rm%'
+            OR LOWER(TRIM(nombre)) = 'rm'
+            OR LOWER(nombre) LIKE '%recursos materiales%'
+         ORDER BY id ASC`
+      );
+      const rmOficinaIds = rmOficinas.map((o) => Number(o.id)).filter((id) => id > 0);
+
+      // 2. Cargar el catálogo maestro actual en RM — La Paz ESTRICTAMENTE para Mobiliario (rubro_id = 3, Inventario de Jesús)
+      let rmRows = [];
+      if (rmOficinaIds.length > 0) {
+        const [rows] = await conn.query(
+          `SELECT id, oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas
+           FROM inventario_oficina
+           WHERE rubro_id = 3
+             AND (oficina_id IN (${rmOficinaIds.map(() => "?").join(",")}) OR es_bodega_delegacion = 1)
+           ORDER BY id ASC`,
+          rmOficinaIds
+        );
+        rmRows = rows || [];
+      } else {
+        const [rows] = await conn.query(
+          `SELECT id, oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas
+           FROM inventario_oficina
+           WHERE rubro_id = 3
+             AND es_bodega_delegacion = 1
+           ORDER BY id ASC`
+        );
+        rmRows = rows || [];
+      }
+
+      // Combinar con el catálogo oficial base de La Paz (CATALOGO_LAPAZ_JESUS) como respaldo
+      const masterCatalog = [];
+      const seenMasterKeys = new Set();
+      for (const r of rmRows) {
+        if (Number(r.rubro_id) !== 3) continue;
+        const c = String(r.clave_bien || "").trim().toUpperCase();
+        const d = String(r.descripcion || "").trim();
+        if (!c || !d) continue;
+        // Preferir la descripción oficial de CATALOGO_LAPAZ_JESUS si la clave es del catálogo base
+        const officialEntry = CATALOGO_LAPAZ_JESUS.find((cat) => cat.clave === c);
+        const finalDesc = officialEntry ? officialEntry.descripcion : d;
+        masterCatalog.push({
+          id: r.id,
+          rubro_id: 3,
+          clave_bien: c,
+          descripcion: finalDesc
+        });
+        seenMasterKeys.add(`3:${c}`);
+      }
+      for (const cat of CATALOGO_LAPAZ_JESUS) {
+        const k = `3:${cat.clave}`;
+        if (!seenMasterKeys.has(k)) {
+          masterCatalog.push({
+            id: null,
+            rubro_id: 3,
+            clave_bien: cat.clave,
+            descripcion: cat.descripcion
+          });
+          seenMasterKeys.add(k);
+        }
+      }
+
+      // 3. Consultar ESTRICTAMENTE los artículos del rubro de Mobiliario (rubro_id = 3) registrados en otras oficinas o en S/A
+      const [allOtherRows] = await conn.query(
+        `SELECT io.*, o.nombre AS oficina_nombre
+         FROM inventario_oficina io
+         LEFT JOIN oficinas_regionales o ON o.id = io.oficina_id
+         WHERE io.rubro_id = 3
+         ORDER BY io.id ASC FOR UPDATE`
+      );
+
+      const detalles = [];
+      const rmSet = new Set(rmOficinaIds);
+
+      for (const row of allOtherRows) {
+        if (Number(row.rubro_id) !== 3) continue;
+
+        // v50: Escudo de número de serie - Proteger claves consecutivas patrimoniales.
+        // Si el artículo SÍ TIENE un número de serie válido (no nulo, no vacío, no '-', 'S/N', 'N/A', etc.),
+        // se salta (continue) para no destruir sus claves patrimoniales consecutivas (ej. MOB-025, MOB-026).
+        // El homologador de claves y descripciones SOLO opera sobre artículos genéricos / por lote sin serie.
+        const serieRaw = row.numero_serie_placas || row.serie || row.numero_serie;
+        if (hasUniqueSerialNumber(serieRaw)) {
+          continue;
+        }
+
+        const isRowRM = rmSet.has(Number(row.oficina_id)) && Number(row.es_bodega_delegacion || 0) === 1;
+        // Aun si está en RM pero tiene clave/descripción desalineada con CATALOGO_LAPAZ_JESUS o está en otra oficina/S/A:
+        const matchedMaster = findBestCatalogMatchInLaPaz(row, masterCatalog);
+        if (!matchedMaster) continue;
+
+        const targetClave = String(matchedMaster.clave_bien || "").trim().toUpperCase();
+        const targetDesc = String(matchedMaster.descripcion || "").trim();
+        const currentClave = String(row.clave_bien || "").trim().toUpperCase();
+        const currentDesc = String(row.descripcion || "").trim();
+
+        if (isRowRM && currentClave === targetClave && currentDesc === targetDesc) {
+          continue;
+        }
+        if (currentClave === targetClave && currentDesc === targetDesc) {
+          continue;
+        }
+
+        await conn.query(
+          `UPDATE inventario_oficina
+           SET clave_bien = ?, descripcion = ?
+           WHERE id = ? AND rubro_id = 3`,
+          [targetClave, targetDesc, row.id]
+        );
+
+        detalles.push({
+          id: row.id,
+          oficina_id: row.oficina_id,
+          oficina_nombre: row.oficina_nombre || `Oficina #${row.oficina_id}`,
+          clave_anterior: row.clave_bien,
+          clave_nueva: targetClave,
+          descripcion_anterior: row.descripcion,
+          descripcion_nueva: targetDesc
+        });
+      }
+
+      await conn.commit();
+
+      const resumenHomologacion = detalles.length > 0
+        ? `Homologación ejecutada (${detalles.length} artículo(s)):\n` +
+          detalles.map((d) => `• ID ${d.id} (${d.oficina_nombre}): Clave "${d.clave_anterior}" -> "${d.clave_nueva}" | "${d.descripcion_anterior}" -> "${d.descripcion_nueva}"`).join("\n")
+        : "Homologación ejecutada: 0 artículos requerían cambio.";
+
+      await registrarBitacora(
+        req,
+        "REGIONAL",
+        "HOMOLOGAR_CLAVES",
+        resumenHomologacion
+      );
+
+      return res.json({
+        ok: true,
+        homologados: detalles.length,
+        detalles,
+        message: detalles.length > 0
+          ? `Se homologaron exitosamente ${detalles.length} artículo(s) con el catálogo maestro de RM — La Paz.`
+          : "Todos los artículos susceptibles ya se encuentran homologados con el catálogo de RM — La Paz."
+      });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al homologar claves con La Paz");
+  }
+}
+
+app.post("/api/inventario-regional/homologar-claves", authRequired, handleHomologarClavesInventarioRegional);
+
+// Transferencia y fusión automática entre oficinas regionales y RM (Recursos Materiales)
+async function handleTransferirInventarioRegional(req, res) {
   try {
     if (!canEditRegional(req)) {
       return httpError(res, 403, "Modo Solo Lectura: solo los encargados de rubro y administración pueden transferir activos regionales.");
     }
-    const assetId = Number(req.params.id || 0);
+    const assetId = Number(req.params.id || req.body?.origen_id || req.body?.id || 0);
     if (!Number.isInteger(assetId) || assetId <= 0) {
-      return httpError(res, 400, "ID de activo inválido.");
+      return httpError(res, 400, "ID de activo origen inválido.");
     }
 
     const { oficina_destino_id, motivo } = req.body || {};
     const destOfiId = Number(oficina_destino_id || 0);
-    const cantRaw = req.body?.cantidad_transferir !== undefined ? req.body.cantidad_transferir : req.body?.cantidad;
+    const cantRaw = req.body?.cantidad !== undefined ? req.body.cantidad : req.body?.cantidad_transferir;
     const cantTrans = Number(cantRaw || 0);
     const motivoClean = String(motivo || "").trim();
 
@@ -6440,29 +9738,6 @@ app.post("/api/inventario-regional/:id/transferir", authRequired, async (req, re
     }
 
     const assignedRubroId = getUserRubroId(req);
-
-    const [[asset]] = await poolRead.query(
-      `SELECT io.*, o.nombre AS oficina_origen_nombre, r.nombre AS region_origen_nombre
-       FROM inventario_oficina io
-       INNER JOIN oficinas_regionales o ON o.id = io.oficina_id
-       INNER JOIN regiones r ON r.id = o.region_id
-       WHERE io.id = ? LIMIT 1`,
-      [assetId]
-    );
-    if (!asset) return httpError(res, 404, "El activo que intentas transferir no existe.");
-
-    if (assignedRubroId && Number(asset.rubro_id) !== Number(assignedRubroId)) {
-      return httpError(res, 403, "Solo puedes transferir activos pertenecientes a tu rubro asignado.");
-    }
-
-    if (Number(asset.oficina_id) === destOfiId) {
-      return httpError(res, 400, "La oficina destino debe ser distinta a la oficina origen actual.");
-    }
-
-    const cantActual = Number(asset.cantidad_propia || 0);
-    if (cantTrans > cantActual) {
-      return httpError(res, 400, `Existencia insuficiente. Solo hay ${cantActual} unidades disponibles.`);
-    }
 
     const [[destOfi]] = await poolRead.query(
       `SELECT o.id, o.nombre, r.nombre AS region_nombre
@@ -6476,44 +9751,160 @@ app.post("/api/inventario-regional/:id/transferir", authRequired, async (req, re
     const conn = await poolOps.getConnection();
     try {
       await conn.beginTransaction();
+
+      const [[asset]] = await conn.query(
+        `SELECT io.*, o.nombre AS oficina_origen_nombre, r.nombre AS region_origen_nombre
+         FROM inventario_oficina io
+         INNER JOIN oficinas_regionales o ON o.id = io.oficina_id
+         INNER JOIN regiones r ON r.id = o.region_id
+         WHERE io.id = ? LIMIT 1 FOR UPDATE`,
+        [assetId]
+      );
+      if (!asset) {
+        await conn.rollback();
+        return httpError(res, 404, "El activo que intentas transferir no existe.");
+      }
+
+      if (assignedRubroId && Number(asset.rubro_id) !== Number(assignedRubroId)) {
+        await conn.rollback();
+        return httpError(res, 403, "Solo puedes transferir activos pertenecientes a tu rubro asignado.");
+      }
+
+      if (Number(asset.oficina_id) === destOfiId) {
+        await conn.rollback();
+        return httpError(res, 400, "La oficina destino debe ser distinta a la oficina origen actual.");
+      }
+
+      const cantPropiaOrigen = Number(asset.cantidad_propia || 0);
+      const dispOrigen = Number(asset.cantidad_disponible ?? cantPropiaOrigen);
+      const maxTransferible = Math.min(cantPropiaOrigen, dispOrigen);
+
+      if (cantTrans > maxTransferible) {
+        await conn.rollback();
+        return httpError(res, 400, `Existencia disponible insuficiente. Solo hay ${maxTransferible} unidad(es) disponible(s) para transferir.`);
+      }
+
+      const origIsRM =
+        /rm\b|recursos materiales/i.test(String(asset.oficina_origen_nombre || "")) ||
+        Number(asset.es_bodega_delegacion || 0) === 1;
+      const destIsRM = /rm\b|recursos materiales/i.test(String(destOfi.nombre || ""));
+      const destEsBodega = destIsRM || destOfiId === 1 ? 1 : 0;
+
       const fechaStr = new Date().toLocaleDateString("es-MX", { timeZone: "America/Mazatlan" });
       const userStr = req.user?.username || "admin";
+      const notaOrigen = `[Transferidas ${cantTrans} u. a ${destOfi.nombre} (${fechaStr}, ${userStr})${motivoClean ? ` - ${motivoClean}` : ""}]`;
+      const notaDestino = `[Recibidas ${cantTrans} u. desde ${asset.oficina_origen_nombre} (${fechaStr}, ${userStr})${motivoClean ? ` - ${motivoClean}` : ""}]`;
 
-      if (cantTrans === cantActual) {
-        const notaTrans = `[Transferido de ${asset.oficina_origen_nombre} a ${destOfi.nombre} (${fechaStr}, ${userStr})${motivoClean ? ` - ${motivoClean}` : ""}]`;
+      const baseClave = String(asset.clave_bien || "").trim().toUpperCase();
+      const assetHasUniqueSerial = hasUniqueSerialNumber(asset.numero_serie_placas);
+
+      // Buscar en oficina_destino_id todos los artículos del mismo rubro para evaluar coincidencia por clave_bien o descripción lematizada
+      const [destCandidates] = await conn.query(
+        `SELECT * FROM inventario_oficina
+         WHERE oficina_id = ? AND rubro_id = ? AND id <> ?
+         FOR UPDATE`,
+        [destOfiId, asset.rubro_id, assetId]
+      );
+
+      // v47: Buscar coincidencia en destino por clave_bien exacta O por descripción lematizada
+      const matchedCatalogInDest =
+        destCandidates.find((r) => String(r.clave_bien || "").trim().toUpperCase() === baseClave) ||
+        findBestCatalogMatchInLaPaz(asset, destCandidates) ||
+        null;
+
+      // Si el destino es RM — La Paz y existe catálogo base, obtener también la clave y descripción oficial
+      const fallbackOfficial = destIsRM ? findBestCatalogMatchInLaPaz(asset, CATALOGO_LAPAZ_JESUS.map((c) => ({
+        rubro_id: 3,
+        clave_bien: c.clave,
+        descripcion: c.descripcion
+      }))) : null;
+
+      const officialClave = matchedCatalogInDest
+        ? String(matchedCatalogInDest.clave_bien || "").trim().toUpperCase()
+        : (fallbackOfficial ? String(fallbackOfficial.clave_bien || "").trim().toUpperCase() : baseClave);
+      const officialDescripcion = matchedCatalogInDest
+        ? String(matchedCatalogInDest.descripcion || "").trim()
+        : (fallbackOfficial ? String(fallbackOfficial.descripcion || "").trim() : String(asset.descripcion || "").trim());
+
+      // Caso A: Artículo por lote / sin número de serie único -> se fusiona con el lote existente en destino (que tampoco tenga serie única distinta)
+      // Caso B: Artículo con Número de Serie Único -> conserva su fila individual y su serie intacta, pero actualiza clave_bien y descripcion a las oficiales
+      const destExistingForMerge = !assetHasUniqueSerial
+        ? (
+            destCandidates.find((r) => !hasUniqueSerialNumber(r.numero_serie_placas) && String(r.clave_bien || "").trim().toUpperCase() === officialClave) ||
+            (matchedCatalogInDest && !hasUniqueSerialNumber(matchedCatalogInDest.numero_serie_placas) ? matchedCatalogInDest : null)
+          )
+        : null;
+
+      const nuevaPropiaOrigen = Math.max(0, cantPropiaOrigen - cantTrans);
+      const nuevaDispOrigen = Math.max(0, dispOrigen - cantTrans);
+      let wasMerged = false;
+
+      if (destExistingForMerge) {
+        // CASO A: FUSIONAR CANTIDADES en el registro maestro existente en destino
+        wasMerged = true;
         await conn.query(
           `UPDATE inventario_oficina
-           SET oficina_id = ?,
+           SET cantidad_propia = cantidad_propia + ?,
+               cantidad_disponible = COALESCE(cantidad_disponible, cantidad_propia) + ?,
+               es_bodega_delegacion = ?,
+               estatus_uso = 'ACTIVO',
                observaciones = CONCAT_WS(' | ', NULLIF(observaciones, ''), ?)
            WHERE id = ?`,
-          [destOfiId, notaTrans, assetId]
-        );
-      } else {
-        const notaOrigen = `[Transferidas ${cantTrans} u. a ${destOfi.nombre} (${fechaStr}, ${userStr})${motivoClean ? ` - ${motivoClean}` : ""}]`;
-        await conn.query(
-          `UPDATE inventario_oficina
-           SET cantidad_propia = cantidad_propia - ?,
-               observaciones = CONCAT_WS(' | ', NULLIF(observaciones, ''), ?)
-           WHERE id = ?`,
-          [cantTrans, notaOrigen, assetId]
+          [cantTrans, cantTrans, destEsBodega, notaDestino, destExistingForMerge.id]
         );
 
-        const [destExisting] = await conn.query(
-          `SELECT id, cantidad_propia FROM inventario_oficina
-           WHERE oficina_id = ? AND rubro_id = ? AND clave_bien = ? AND descripcion = ? LIMIT 1`,
-          [destOfiId, asset.rubro_id, asset.clave_bien, asset.descripcion]
-        );
-        const notaDestino = `[Recibidas ${cantTrans} u. desde ${asset.oficina_origen_nombre} (${fechaStr}, ${userStr})${motivoClean ? ` - ${motivoClean}` : ""}]`;
-
-        if (destExisting.length) {
+        if (nuevaPropiaOrigen <= 0 && !origIsRM) {
+          // Reasignar cualquier referencia en vales_prestamo_detalle antes de eliminar la fila origen en cero
+          await conn.query(
+            `UPDATE vales_prestamo_detalle SET articulo_id = ? WHERE articulo_id = ?`,
+            [destExistingForMerge.id, assetId]
+          );
+          await conn.query(
+            `UPDATE vales_prestamo_detalle SET inventario_id = ? WHERE inventario_id = ?`,
+            [destExistingForMerge.id, assetId]
+          ).catch(() => {});
+          await conn.query(`DELETE FROM inventario_oficina WHERE id = ?`, [assetId]);
+        } else {
           await conn.query(
             `UPDATE inventario_oficina
-             SET cantidad_propia = cantidad_propia + ?,
+             SET cantidad_propia = ?,
+                 cantidad_disponible = ?,
                  observaciones = CONCAT_WS(' | ', NULLIF(observaciones, ''), ?)
              WHERE id = ?`,
-            [cantTrans, notaDestino, destExisting[0].id]
+            [nuevaPropiaOrigen, nuevaDispOrigen, notaOrigen, assetId]
+          );
+        }
+      } else {
+        // CASO B (con número de serie único) o lote nuevo que aún no existe en destino:
+        // Conserva su fila/serie y actualiza clave_bien y descripcion a las oficiales si hubo coincidencia con RM — La Paz
+        const cleanDestClave = officialClave || asset.clave_bien;
+        const cleanDestDesc = officialDescripcion || asset.descripcion;
+
+        if (nuevaPropiaOrigen <= 0 && !origIsRM) {
+          // Mover el registro directamente a la oficina destino
+          await conn.query(
+            `UPDATE inventario_oficina
+             SET oficina_id = ?,
+                 clave_bien = ?,
+                 descripcion = ?,
+                 cantidad_propia = ?,
+                 cantidad_disponible = ?,
+                 es_bodega_delegacion = ?,
+                 observaciones = CONCAT_WS(' | ', NULLIF(observaciones, ''), ?)
+             WHERE id = ?`,
+            [destOfiId, cleanDestClave, cleanDestDesc, cantTrans, cantTrans, destEsBodega, notaDestino, assetId]
           );
         } else {
+          // Restar en origen e insertar nuevo registro en destino
+          await conn.query(
+            `UPDATE inventario_oficina
+             SET cantidad_propia = ?,
+                 cantidad_disponible = ?,
+                 observaciones = CONCAT_WS(' | ', NULLIF(observaciones, ''), ?)
+             WHERE id = ?`,
+            [nuevaPropiaOrigen, nuevaDispOrigen, notaOrigen, assetId]
+          );
+
           const hasDetCol = await ensureDetallesVehiculoCol();
           const detallesJson = asset.detalles_vehiculo
             ? (typeof asset.detalles_vehiculo === "string" ? asset.detalles_vehiculo : JSON.stringify(asset.detalles_vehiculo))
@@ -6522,12 +9913,13 @@ app.post("/api/inventario-regional/:id/transferir", authRequired, async (req, re
             await conn.query(
               `INSERT INTO inventario_oficina
                  (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas,
-                  cantidad_propia, estado_fisico, estatus_uso, observaciones,
+                  unidad, cantidad_propia, cantidad_disponible, es_bodega_delegacion, estado_fisico, estatus_uso, observaciones,
                   origen_adquisicion, observaciones_control, detalles_vehiculo)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
-                destOfiId, asset.rubro_id, asset.clave_bien, asset.descripcion,
-                asset.marca_modelo, asset.numero_serie_placas, cantTrans,
+                destOfiId, asset.rubro_id, cleanDestClave, cleanDestDesc,
+                asset.marca_modelo, asset.numero_serie_placas, asset.unidad || "PIEZA",
+                cantTrans, cantTrans, destEsBodega,
                 asset.estado_fisico || "BUENO", asset.estatus_uso || "ACTIVO",
                 notaDestino, asset.origen_adquisicion || "COMPRA_DELEGACION",
                 asset.observaciones_control || null, detallesJson
@@ -6537,12 +9929,13 @@ app.post("/api/inventario-regional/:id/transferir", authRequired, async (req, re
             await conn.query(
               `INSERT INTO inventario_oficina
                  (oficina_id, rubro_id, clave_bien, descripcion, marca_modelo, numero_serie_placas,
-                  cantidad_propia, estado_fisico, estatus_uso, observaciones,
+                  unidad, cantidad_propia, cantidad_disponible, es_bodega_delegacion, estado_fisico, estatus_uso, observaciones,
                   origen_adquisicion, observaciones_control)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
-                destOfiId, asset.rubro_id, asset.clave_bien, asset.descripcion,
-                asset.marca_modelo, asset.numero_serie_placas, cantTrans,
+                destOfiId, asset.rubro_id, cleanDestClave, cleanDestDesc,
+                asset.marca_modelo, asset.numero_serie_placas, asset.unidad || "PIEZA",
+                cantTrans, cantTrans, destEsBodega,
                 asset.estado_fisico || "BUENO", asset.estatus_uso || "ACTIVO",
                 notaDestino, asset.origen_adquisicion || "COMPRA_DELEGACION",
                 asset.observaciones_control || null
@@ -6553,9 +9946,22 @@ app.post("/api/inventario-regional/:id/transferir", authRequired, async (req, re
       }
 
       await conn.commit();
+
+      await registrarBitacora(
+        req,
+        "REGIONAL",
+        wasMerged ? "TRANSFERENCIA_FUSION" : "TRANSFERENCIA",
+        `Transferencia de ${cantTrans} u. de [${asset.clave_bien} -> ${officialClave}] "${officialDescripcion}" (Serie: ${asset.numero_serie_placas || "S/N"}) desde ${asset.oficina_origen_nombre} hacia ${destOfi.nombre}${wasMerged ? ` (fusionado en ID ${destExistingForMerge.id})` : ""}.`
+      );
+
       return res.json({
         ok: true,
-        message: `Se transfirieron ${cantTrans} unidad(es) hacia ${destOfi.nombre} exitosamente.`
+        merged: wasMerged,
+        clave_homologada: officialClave,
+        descripcion_homologada: officialDescripcion,
+        message: wasMerged
+          ? `Se transfirieron y fusionaron ${cantTrans} unidad(es) en el registro maestro [${officialClave}] ${officialDescripcion} de ${destOfi.nombre}.`
+          : `Se transfirieron ${cantTrans} unidad(es) hacia ${destOfi.nombre} exitosamente (${officialClave} — ${officialDescripcion}).`
       });
     } catch (err) {
       await conn.rollback();
@@ -6566,7 +9972,10 @@ app.post("/api/inventario-regional/:id/transferir", authRequired, async (req, re
   } catch (e) {
     return httpError(res, 500, e.message);
   }
-});
+}
+
+app.post("/api/inventario-regional/transferir", authRequired, handleTransferirInventarioRegional);
+app.post("/api/inventario-regional/:id/transferir", authRequired, handleTransferirInventarioRegional);
 
 async function handleInventarioRegionalFormatos(req, res) {
   try {
@@ -6598,8 +10007,9 @@ async function handleInventarioRegionalFormatos(req, res) {
 
     // Si se solicitó un activo específico (ej. botón "Resguardo PDF" de un vehículo), recuperar su oficina/región/rubro
     if (activoId) {
+      await ensureDetallesVehiculoCol();
       const [actRows] = await poolRead.query(
-        `SELECT oficina_id, rubro_id FROM inventario_oficina WHERE id = ? LIMIT 1`,
+        `SELECT * FROM inventario_oficina WHERE id = ? LIMIT 1`,
         [activoId]
       );
       if (actRows.length) {
@@ -6608,6 +10018,51 @@ async function handleInventarioRegionalFormatos(req, res) {
         }
         if (!oficinaId) oficinaId = Number(actRows[0].oficina_id) || null;
         if (!rubroId) rubroId = Number(actRows[0].rubro_id) || null;
+
+        // Si en la petición de PDF se enviaron datos de resguardante, guardarlos en el registro del vehículo
+        const sentDetObj = parseDetallesVehiculo(body.detalles_vehiculo);
+        const hasResgInBody = [
+          "resguardante_nombre", "resguardante_rfc", "resguardante_puesto",
+          "resguardante_adscripcion", "resguardante_programa",
+          "resguardante_licencia", "resguardante_vigencia_licencia"
+        ].some((k) => body[k] !== undefined) || Boolean(sentDetObj && sentDetObj.resguardante);
+
+        if (hasResgInBody && canEditRegional(req)) {
+          const mergedResg = extractResguardanteFields(body, sentDetObj, actRows[0]);
+          const currentDet = sentDetObj || parseDetallesVehiculo(actRows[0].detalles_vehiculo) || {};
+          currentDet.resguardante = {
+            nombre_completo: mergedResg.resguardante_nombre,
+            rfc: mergedResg.resguardante_rfc,
+            puesto: mergedResg.resguardante_puesto,
+            adscripcion: mergedResg.resguardante_adscripcion,
+            programa: mergedResg.resguardante_programa,
+            licencia_no: mergedResg.resguardante_licencia,
+            vigencia_licencia: mergedResg.resguardante_vigencia_licencia,
+          };
+          await poolOps.query(
+            `UPDATE inventario_oficina
+             SET detalles_vehiculo = ?,
+                 resguardante_nombre = ?,
+                 resguardante_rfc = ?,
+                 resguardante_puesto = ?,
+                 resguardante_adscripcion = ?,
+                 resguardante_programa = ?,
+                 resguardante_licencia = ?,
+                 resguardante_vigencia_licencia = ?
+             WHERE id = ?`,
+            [
+              JSON.stringify(currentDet),
+              mergedResg.resguardante_nombre || null,
+              mergedResg.resguardante_rfc || null,
+              mergedResg.resguardante_puesto || null,
+              mergedResg.resguardante_adscripcion || null,
+              mergedResg.resguardante_programa || null,
+              mergedResg.resguardante_licencia || null,
+              mergedResg.resguardante_vigencia_licencia || null,
+              activoId,
+            ]
+          ).catch(() => {});
+        }
       }
     }
 
@@ -6648,11 +10103,13 @@ async function handleInventarioRegionalFormatos(req, res) {
     }
 
     // 4. Obtener los registros del inventario según el filtro actual
+    const isSelectedOfiRM = Boolean(oficinaRow && /rm\b|recursos materiales/i.test(String(oficinaRow.nombre || "")));
     const { grouped, rows: items } = await queryRegionalInventory({
       region_id: regionId,
       oficina_id: oficinaId,
       rubro_id: rubroId,
       activo_id: activoId,
+      includeBodega: Boolean(isSelectedOfiRM || activoId),
     });
 
     // Determinar si el formato corresponde a PARQUE_VEHICULAR
@@ -6704,46 +10161,86 @@ async function handleInventarioRegionalFormatos(req, res) {
 
     // 5. Resolver los 4 bloques de firma dinámicos en orden:
     // 1.- Entrega | 2.- Valida | 3.- Recibe | 4.- Autoriza
-    let firmaEncargadoNombre = rubroRow?.encargado_nombre || items[0]?.encargado_nombre || "TODOS LOS RUBROS / POR DEFINIR";
-    let firmaEncargadoCargo = rubroRow?.encargado_cargo || items[0]?.encargado_cargo || "Encargado de Rubro de Inventario";
 
+    // 1.- Entrega: Dinámicamente desde rubros_inventario o tabla usuario
+    let firmaEncargadoNombre = (rubroRow?.encargado_nombre || items[0]?.encargado_nombre || "").trim();
+    let firmaEncargadoCargo = (rubroRow?.encargado_cargo || items[0]?.encargado_cargo || "").trim();
+    if (!firmaEncargadoNombre && dbRubroId) {
+      const [rubroUserRows] = await poolRead.query(
+        `SELECT TRIM(CONCAT_WS(' ', NULLIF(nombre, ''), NULLIF(PRIMER_APELLIDO, ''), NULLIF(SEGUNDO_APELLIDO, ''))) AS nc, cargo
+         FROM usuario WHERE rubro_id = ? AND ACTIVO = 1 LIMIT 1`,
+        [dbRubroId]
+      ).catch(() => [[]]);
+      if (rubroUserRows.length && rubroUserRows[0].nc) {
+        firmaEncargadoNombre = rubroUserRows[0].nc;
+        if (rubroUserRows[0].cargo) firmaEncargadoCargo = rubroUserRows[0].cargo;
+      }
+    }
+    if (!firmaEncargadoNombre) {
+      firmaEncargadoNombre = "TODOS LOS RUBROS / POR DEFINIR";
+      firmaEncargadoCargo = firmaEncargadoCargo || "Encargado de Rubro de Inventario";
+    }
+
+    // 2.- Valida: Dinámicamente desde usuario (Recursos Materiales)
     let firmaApruebaNombre = "Jorge Luis Patrón Murillo";
     let firmaApruebaCargo = "Coordinador Operativo de Recursos Materiales";
+    const [rmValidaRows] = await poolRead.query(
+      `SELECT TRIM(CONCAT_WS(' ', NULLIF(nombre, ''), NULLIF(PRIMER_APELLIDO, ''), NULLIF(SEGUNDO_APELLIDO, ''))) AS nc, cargo
+       FROM usuario
+       WHERE (username IN ('jorge', 'jorgepatron') OR departamento LIKE '%Recursos Materiales%' OR cargo LIKE '%Recursos Materiales%') AND ACTIVO = 1
+       ORDER BY (username = 'jorge') DESC LIMIT 1`
+    ).catch(() => [[]]);
+    if (rmValidaRows.length && rmValidaRows[0].nc) {
+      firmaApruebaNombre = rmValidaRows[0].nc;
+      if (rmValidaRows[0].cargo) firmaApruebaCargo = rmValidaRows[0].cargo;
+    }
 
-    const defaultRecibeNombre = regionRow?.responsable_regional || items[0]?.responsable_regional || "POR CONFIRMAR";
-    const defaultRecibeCargo = regionRow
-      ? `Responsable Regional (${regionRow.nombre})`
-      : "Responsable Regional / Resguardante";
+    // 3.- Recibe: Dinámicamente desde usuario (Director Regional de la región) o regiones.responsable_regional
+    let firmaRecibeNombre = "";
+    let firmaRecibeCargo = "Director Regional";
+    if (dbRegionId) {
+      const [regUserRows] = await poolRead.query(
+        `SELECT TRIM(CONCAT_WS(' ', NULLIF(nombre, ''), NULLIF(PRIMER_APELLIDO, ''), NULLIF(SEGUNDO_APELLIDO, ''))) AS nc, cargo
+         FROM usuario
+         WHERE region_id = ? AND (rol = 'regional' OR cargo LIKE '%Director Regional%' OR departamento LIKE '%Enlace Regional%') AND ACTIVO = 1
+         ORDER BY id ASC LIMIT 1`,
+        [dbRegionId]
+      ).catch(() => [[]]);
+      if (regUserRows.length && regUserRows[0].nc) {
+        firmaRecibeNombre = regUserRows[0].nc;
+        if (regUserRows[0].cargo) firmaRecibeCargo = regUserRows[0].cargo;
+      }
+    }
+    if (!firmaRecibeNombre && regionRow?.responsable_regional) {
+      firmaRecibeNombre = regionRow.responsable_regional;
+    }
 
-    let firmaRecibeNombre = defaultRecibeNombre;
-    let firmaRecibeCargo = defaultRecibeCargo;
-
+    // 4.- Autoriza: Titular de la Delegación
     let firmaDelegadaNombre = "Diphna Yanssen Weichselbaum Calderón";
-    let firmaDelegadaCargo = "Delegada de Programas para el Desarrollo en BCS";
+    let firmaDelegadaCargo = "Delegada de Programas para el Bienestar en BCS";
 
     if (isParqueVehicularRM) {
       // 13 Vehículos RM de Evelia Contreras
-      firmaEncargadoNombre = "Evelia Contreras Godínez";
-      firmaEncargadoCargo = "Encargada de Parque Vehicular / Recursos Materiales";
-      firmaApruebaNombre = "Diphna Yanssen Weichselbaum Calderón";
-      firmaApruebaCargo = "Delegada de Programas para el Bienestar en BCS";
-      firmaRecibeNombre = "Jorge Luis Patrón Murillo";
-      firmaRecibeCargo = "Encargado de Recursos Materiales";
-      firmaDelegadaNombre = "Diphna Yanssen Weichselbaum Calderón";
-      firmaDelegadaCargo = "Delegada de Programas para el Bienestar en BCS";
+      if (!firmaEncargadoNombre || firmaEncargadoNombre === "TODOS LOS RUBROS / POR DEFINIR") {
+        firmaEncargadoNombre = "Evelia Contreras Godínez";
+        firmaEncargadoCargo = "Encargada de Parque Vehicular / Recursos Materiales";
+      }
+      firmaApruebaNombre = firmaDelegadaNombre;
+      firmaApruebaCargo = firmaDelegadaCargo;
+      firmaRecibeNombre = rmValidaRows.length && rmValidaRows[0].nc ? rmValidaRows[0].nc : "Jorge Luis Patrón Murillo";
+      firmaRecibeCargo = rmValidaRows.length && rmValidaRows[0].cargo ? rmValidaRows[0].cargo : "Coordinador Operativo de Recursos Materiales";
     } else if (isMobiliarioLaPaz) {
-      // Mobiliario La Paz de Jesús Salvador Palacios (Coordinación Regional La Paz)
-      firmaEncargadoNombre = "JESÚS SALVADOR PALACIOS MARTÍNEZ";
-      firmaEncargadoCargo = "ENCARGADO DE MOBILIARIO / RECURSOS MATERIALES";
-      firmaApruebaNombre = "JORGE LUIS PATRÓN MURILLO";
-      firmaApruebaCargo = "ENCARGADO DE RECURSOS MATERIALES";
-      firmaRecibeNombre = "SANDRA GPE. SALVATIERRA AMADOR";
-      firmaRecibeCargo = "DIRECTORA REGIONAL DE LA PAZ";
-      firmaDelegadaNombre = "DIPHNA YANSSEN WEICHSELBAUM CALDERÓN";
-      firmaDelegadaCargo = "DELEGADA DE PROGRAMAS PARA EL BIENESTAR EN BCS";
+      if (!firmaRecibeNombre) {
+        firmaRecibeNombre = "Sandra Guadalupe Salvatierra Amador";
+      }
     } else if (isMulegeRegion) {
-      firmaRecibeNombre = "Diana Ramirez Hernandez";
-      firmaRecibeCargo = "Responsable Regional (Mulegé)";
+      if (!firmaRecibeNombre) {
+        firmaRecibeNombre = "Diana Ramírez Hernández";
+      }
+    }
+
+    if (!firmaRecibeNombre) {
+      firmaRecibeNombre = "POR CONFIRMAR";
     }
 
     // Generar o resolver marcas de tiempo y folio ANTES de usarlos en snapshot y encabezados
@@ -6823,7 +10320,7 @@ async function handleInventarioRegionalFormatos(req, res) {
       : `formato_inventario_regional_${folio}.pdf`;
     res.setHeader("Content-Disposition", `inline; filename="${pdfFilename}"`);
 
-    const doc = new PDFDocument({ size: "LETTER", margin: 32 });
+    const doc = new PDFDocument({ size: "LETTER", margins: { top: 20, bottom: 18, left: 32, right: 32 } });
     doc.pipe(res);
 
     // DRP: Respaldo automático del resguardo vehicular o regional
@@ -6858,15 +10355,55 @@ async function handleInventarioRegionalFormatos(req, res) {
 
     const fechaTexto = `${pad2(now.getDate())}/${pad2(now.getMonth() + 1)}/${now.getFullYear()}`;
 
-    // Función auxiliar para dibujar los 4 bloques de firma en el orden institucional:
-    // 1.- ENTREGA | 2.- VALIDA | 3.- RECIBE | 4.- AUTORIZA
-    function drawFourSignatures(signBoxY, signBoxH = 82, customRecibeNombre = null, customRecibeCargo = null, customFolio = null) {
+    // Función auxiliar para dibujar el DOBLE BLOQUE DE 4 FIRMAS (4 de Entrega + 4 de Retorno) en 1 sola hoja:
+    // Fila 1 (1. FIRMAS DE ENTREGA / RECEPCIÓN): 1) ENTREGA, 2) RECIBE, 3) VALIDA, 4) AUTORIZA
+    // Fila 2 (2. FIRMAS DE RETORNO / DEVOLUCIÓN): 1) ENTREGA / DEVUELVE, 2) RECIBE DE CONFORMIDAD, 3) VALIDA RETORNO, 4) AUTORIZA
+    function drawDoubleFourSignatures(startY, signBoxH = 50, customRecibeNombre = null, customRecibeCargo = null, customFolio = null) {
       const gap = 8;
       const boxW = (tableWidth - gap * 3) / 4; // 129 pt cada caja
-      const lineY = signBoxY + signBoxH - 30;
       const activeFolio = String(customFolio || folio || "S/N");
+      const resolvedRecibeNombre = customRecibeNombre || firmaRecibeNombre;
+      const rawRecibeCargo = String(customRecibeCargo || firmaRecibeCargo || "Director Regional").trim() || "Director Regional";
+      const resolvedRecibeCargo = normalizeRegionalCargo(rawRecibeCargo)
+        .replace(/Coordinadora?\s+Regionall?/gi, "Director Regional") || "Director Regional";
+      const secHeaderH = 10.5;
+      const boxTitleH = 11;
 
-      const boxes = [
+      const drawSignatureRow = (rowTopY, sectionTitle, boxesConfig) => {
+        // Barra de título de bloque de firmas
+        doc.save();
+        doc.rect(leftX, rowTopY, tableWidth, secHeaderH).fillAndStroke(COLOR_PRIMARY, COLOR_SECONDARY);
+        doc.restore();
+        doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(6.5)
+          .text(sectionTitle, leftX + 6, rowTopY + 2.2, { width: tableWidth - 12, align: "left", lineBreak: false });
+
+        const boxesY = rowTopY + secHeaderH;
+        const lineY = boxesY + signBoxH - 19;
+
+        doc.save();
+        doc.lineWidth(0.6).strokeColor(COLOR_PRIMARY);
+        boxesConfig.forEach((b) => {
+          doc.rect(b.x, boxesY, boxW, signBoxH).stroke();
+          doc.rect(b.x, boxesY, boxW, boxTitleH).fillAndStroke(COLOR_SOFT_BG, COLOR_PRIMARY);
+          doc.strokeColor("#000000").moveTo(b.x + 6, lineY).lineTo(b.x + boxW - 6, lineY).stroke();
+          doc.strokeColor(COLOR_PRIMARY);
+        });
+        doc.restore();
+
+        boxesConfig.forEach((b) => {
+          doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(6.4)
+            .text(b.titulo, b.x + 2, boxesY + 2.2, { width: boxW - 4, align: "center", lineBreak: false });
+          doc.fillColor("#000000").font("Helvetica").fontSize(5.6)
+            .text(b.cargo, b.x + 3, boxesY + boxTitleH + 1.5, { width: boxW - 6, align: "center" });
+          doc.font("Helvetica-Bold").fontSize(6.0)
+            .text(b.nombre, b.x + 3, lineY + 2.5, { width: boxW - 6, align: "center" });
+        });
+
+        return boxesY + signBoxH;
+      };
+
+      // Fila 1: 1. FIRMAS DE ENTREGA / RECEPCIÓN
+      const row1Boxes = [
         {
           x: leftX,
           titulo: "ENTREGA:",
@@ -6875,15 +10412,15 @@ async function handleInventarioRegionalFormatos(req, res) {
         },
         {
           x: leftX + (boxW + gap) * 1,
-          titulo: "VALIDA:",
-          cargo: firmaApruebaCargo,
-          nombre: firmaApruebaNombre,
+          titulo: "RECIBE:",
+          cargo: resolvedRecibeCargo,
+          nombre: resolvedRecibeNombre,
         },
         {
           x: leftX + (boxW + gap) * 2,
-          titulo: "RECIBE:",
-          cargo: customRecibeCargo || firmaRecibeCargo,
-          nombre: customRecibeNombre || firmaRecibeNombre,
+          titulo: "VALIDA:",
+          cargo: firmaApruebaCargo,
+          nombre: firmaApruebaNombre,
         },
         {
           x: leftX + (boxW + gap) * 3,
@@ -6893,27 +10430,40 @@ async function handleInventarioRegionalFormatos(req, res) {
         },
       ];
 
-      doc.save();
-      doc.lineWidth(0.7).strokeColor(COLOR_PRIMARY);
-      boxes.forEach((b) => {
-        doc.rect(b.x, signBoxY, boxW, signBoxH).stroke();
-        doc.rect(b.x, signBoxY, boxW, 13).fillAndStroke(COLOR_SOFT_BG, COLOR_PRIMARY);
-        doc.strokeColor("#000000").moveTo(b.x + 8, lineY).lineTo(b.x + boxW - 8, lineY).stroke();
-        doc.strokeColor(COLOR_PRIMARY);
-      });
-      doc.restore();
+      const afterRow1Y = drawSignatureRow(startY, "1. FIRMAS DE ENTREGA / RECEPCIÓN", row1Boxes);
 
-      boxes.forEach((b) => {
-        doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.4)
-          .text(b.titulo, b.x + 4, signBoxY + 3, { width: boxW - 8, align: "center" });
-        doc.fillColor("#000000").font("Helvetica").fontSize(6.3)
-          .text(b.cargo, b.x + 4, signBoxY + 15, { width: boxW - 8, align: "center" });
-        doc.font("Helvetica-Bold").fontSize(6.6)
-          .text(b.nombre, b.x + 4, lineY + 4, { width: boxW - 8, align: "center" });
-      });
+      // Fila 2: 2. FIRMAS DE RETORNO / DEVOLUCIÓN
+      const row2Boxes = [
+        {
+          x: leftX,
+          titulo: "ENTREGA / DEVUELVE:",
+          cargo: resolvedRecibeCargo,
+          nombre: resolvedRecibeNombre,
+        },
+        {
+          x: leftX + (boxW + gap) * 1,
+          titulo: "RECIBE DE CONFORMIDAD:",
+          cargo: firmaEncargadoCargo,
+          nombre: firmaEncargadoNombre,
+        },
+        {
+          x: leftX + (boxW + gap) * 2,
+          titulo: "VALIDA RETORNO:",
+          cargo: firmaApruebaCargo,
+          nombre: firmaApruebaNombre,
+        },
+        {
+          x: leftX + (boxW + gap) * 3,
+          titulo: "AUTORIZA:",
+          cargo: firmaDelegadaCargo,
+          nombre: firmaDelegadaNombre,
+        },
+      ];
 
-      const footerY = signBoxY + signBoxH + 6;
-      doc.font("Helvetica").fontSize(7).fillColor("#333333");
+      const afterRow2Y = drawSignatureRow(afterRow1Y + 5, "2. FIRMAS DE RETORNO / DEVOLUCIÓN", row2Boxes);
+
+      const footerY = afterRow2Y + 4;
+      doc.font("Helvetica").fontSize(6.5).fillColor("#333333");
       doc.text(`Folio Formato: ${activeFolio}`, leftX, footerY, { width: 210, align: "left", lineBreak: false });
       doc.text("Delegación Baja California Sur - Control de Inventario Regional", leftX, footerY, { width: tableWidth, align: "right", lineBreak: false });
     }
@@ -6923,7 +10473,6 @@ async function handleInventarioRegionalFormatos(req, res) {
     // =========================================================================
     if (isParqueVehicular) {
       const vehiclesToRender = items.length > 0 ? items : [null];
-      const logoPath = path.join(__dirname, "public", "logo.png");
 
       vehiclesToRender.forEach((veh, idx) => {
         if (idx > 0) doc.addPage();
@@ -6934,6 +10483,7 @@ async function handleInventarioRegionalFormatos(req, res) {
         const unidad = det.unidad && typeof det.unidad === "object" ? det.unidad : {};
         const estGen = det.estado_general && typeof det.estado_general === "object" ? det.estado_general : {};
         const chk = det.checklist && typeof det.checklist === "object" ? det.checklist : {};
+        const resg = extractResguardanteFields(body, det, veh || {});
 
         const vRegion = veh?.region_nombre || regionLabel || "";
         const vOficina = veh?.oficina_nombre
@@ -6945,95 +10495,140 @@ async function handleInventarioRegionalFormatos(req, res) {
         // 1. Encabezado Institucional con logos oficiales discretos
         if (logoGobPath && fs.existsSync(logoGobPath)) {
           try {
-            doc.image(logoGobPath, leftX, 16, { fit: [95, 30], align: "left", valign: "top" });
+            doc.image(logoGobPath, leftX, 14, { fit: [90, 26], align: "left", valign: "top" });
           } catch {}
         }
         if (logoBienPath && fs.existsSync(logoBienPath)) {
           try {
-            doc.image(logoBienPath, rightLimit - 85, 16, { fit: [85, 30], align: "right", valign: "top" });
+            doc.image(logoBienPath, rightLimit - 82, 14, { fit: [82, 26], align: "right", valign: "top" });
           } catch {}
         }
 
-        doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(10.5)
-          .text("SECRETARÍA DE BIENESTAR", leftX, 18, { width: tableWidth, align: "center" });
-        doc.fillColor("#000000").font("Helvetica-Bold").fontSize(9.5)
-          .text("DELEGACIÓN BAJA CALIFORNIA SUR", leftX, 31, { width: tableWidth, align: "center" });
-        doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(9.5)
-          .text("FORMATO DE RESGUARDO E INVENTARIO DE PARQUE VEHICULAR", leftX, 44, { width: tableWidth, align: "center" });
+        doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(10)
+          .text("SECRETARÍA DE BIENESTAR", leftX, 15, { width: tableWidth, align: "center" });
+        doc.fillColor("#000000").font("Helvetica-Bold").fontSize(9)
+          .text("DELEGACIÓN BAJA CALIFORNIA SUR", leftX, 26.5, { width: tableWidth, align: "center" });
+        doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(9)
+          .text("FORMATO DE RESGUARDO E INVENTARIO DE PARQUE VEHICULAR", leftX, 38, { width: tableWidth, align: "center" });
 
         doc.save();
-        doc.moveTo(leftX + 110, 56).lineTo(rightLimit - 110, 56).lineWidth(1).strokeColor(COLOR_ACCENT).stroke();
+        doc.moveTo(leftX + 110, 49).lineTo(rightLimit - 110, 49).lineWidth(0.9).strokeColor(COLOR_ACCENT).stroke();
         doc.restore();
 
         // Barra compacta de metadatos del resguardo
-        let curY = 61;
-        doc.fillColor("#000000").font("Helvetica-Bold").fontSize(7.5).text("REGIÓN:", leftX, curY);
-        doc.font("Helvetica").fontSize(7.5).text(vRegion, leftX + 38, curY, { width: 115, lineBreak: false });
-        doc.moveTo(leftX + 36, curY + 9).lineTo(leftX + 152, curY + 9).lineWidth(0.5).strokeColor("#000000").stroke();
+        let curY = 53;
+        doc.fillColor("#000000").font("Helvetica-Bold").fontSize(7.2).text("REGIÓN:", leftX, curY);
+        doc.font("Helvetica").fontSize(7.2).text(vRegion, leftX + 38, curY, { width: 115, lineBreak: false });
+        doc.moveTo(leftX + 36, curY + 8.5).lineTo(leftX + 152, curY + 8.5).lineWidth(0.5).strokeColor("#000000").stroke();
 
-        doc.font("Helvetica-Bold").fontSize(7.5).text("OFICINA:", leftX + 158, curY);
-        doc.font("Helvetica").fontSize(7.5).text(vOficina, leftX + 196, curY, { width: 145, lineBreak: false });
-        doc.moveTo(leftX + 194, curY + 9).lineTo(leftX + 340, curY + 9).lineWidth(0.5).strokeColor("#000000").stroke();
+        doc.font("Helvetica-Bold").fontSize(7.2).text("OFICINA:", leftX + 158, curY);
+        doc.font("Helvetica").fontSize(7.2).text(vOficina, leftX + 196, curY, { width: 145, lineBreak: false });
+        doc.moveTo(leftX + 194, curY + 8.5).lineTo(leftX + 340, curY + 8.5).lineWidth(0.5).strokeColor("#000000").stroke();
 
-        doc.font("Helvetica-Bold").fontSize(7.5).text("CLAVE:", leftX + 346, curY);
-        doc.font("Helvetica-Bold").fontSize(7.5).text(vClave || "____________", leftX + 378, curY, { width: 72, lineBreak: false });
+        doc.font("Helvetica-Bold").fontSize(7.2).text("CLAVE:", leftX + 346, curY);
+        doc.font("Helvetica-Bold").fontSize(7.2).text(vClave || "____________", leftX + 378, curY, { width: 72, lineBreak: false });
 
-        doc.font("Helvetica-Bold").fontSize(7.5).text("FECHA:", leftX + 452, curY);
-        doc.font("Helvetica").fontSize(7.5).text(fechaTexto, leftX + 485, curY, { width: 55, align: "right", lineBreak: false });
+        doc.font("Helvetica-Bold").fontSize(7.2).text("FECHA:", leftX + 452, curY);
+        doc.font("Helvetica").fontSize(7.2).text(fechaTexto, leftX + 485, curY, { width: 55, align: "right", lineBreak: false });
 
-        curY = 77;
+        curY = 66;
+        if (isAssetInSiniestro(veh)) {
+          doc.save();
+          doc.rect(leftX, curY, tableWidth, 12).fillAndStroke("#fff1f2", "#9f1239");
+          doc.restore();
+          doc.fillColor("#9f1239").font("Helvetica-Bold").fontSize(7.2)
+            .text("ESTADO DE LA UNIDAD: NO DISPONIBLE (SINIESTRO / ASEGURADORA)", leftX, curY + 2.5, { width: tableWidth, align: "center", lineBreak: false });
+          curY += 13.5;
+        }
 
         // Helper para barra de sección guinda
         const drawSectionBar = (y, title) => {
-          const barH = 13;
+          const barH = 11.5;
           doc.save();
           doc.rect(leftX, y, tableWidth, barH).fillAndStroke(COLOR_PRIMARY, COLOR_SECONDARY);
-          doc.moveTo(leftX, y + barH).lineTo(rightLimit, y + barH).lineWidth(0.8).strokeColor(COLOR_ACCENT).stroke();
+          doc.moveTo(leftX, y + barH).lineTo(rightLimit, y + barH).lineWidth(0.7).strokeColor(COLOR_ACCENT).stroke();
           doc.restore();
-          doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(7.5)
-            .text(title, leftX + 6, y + 3, { width: tableWidth - 12, align: "left", lineBreak: false });
+          doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(7.0)
+            .text(title, leftX + 6, y + 2.3, { width: tableWidth - 12, align: "left", lineBreak: false });
           return y + barH;
         };
 
         // =====================================================================
-        // SECCIÓN A: DATOS DEL RESGUARDANTE (En blanco para llenado manual)
+        // SECCIÓN A: 1. DATOS DEL RESGUARDANTE (Impresos desde el sistema o línea limpia)
         // =====================================================================
-        curY = drawSectionBar(curY, "1. DATOS DEL RESGUARDANTE (PARA LLENADO MANUAL EN PAPEL)");
-        const resgH = 54;
+        curY = drawSectionBar(curY, "1. DATOS DEL RESGUARDANTE");
+        const resgH = 48;
         doc.save();
         doc.lineWidth(0.6).strokeColor("#000000");
         doc.rect(leftX, curY, tableWidth, resgH).stroke();
         doc.restore();
 
-        const rRow1 = curY + 6;
-        const rRow2 = curY + 18;
-        const rRow3 = curY + 30;
-        const rRow4 = curY + 42;
+        const rRow1 = curY + 4.5;
+        const rRow2 = curY + 15.5;
+        const rRow3 = curY + 26.5;
+        const rRow4 = curY + 37.5;
 
-        doc.fillColor("#000000").font("Helvetica-Bold").fontSize(7.5);
+        const rNombreVal = String(resg.resguardante_nombre || "").trim();
+        const rRfcVal = String(resg.resguardante_rfc || "").trim().toUpperCase();
+        const rPuestoVal = normalizeRegionalCargo(String(resg.resguardante_puesto || "").trim())
+          .replace(/Coordinadora?\s+Regionall?/gi, "Director Regional");
+        const rAdscripcionVal = String(resg.resguardante_adscripcion || vOficina || vRegion || "").trim();
+        const rProgramaVal = String(resg.resguardante_programa || "").trim();
+        const rLicenciaVal = String(resg.resguardante_licencia || "").trim().toUpperCase();
+        const rVigenciaVal = String(resg.resguardante_vigencia_licencia || "").trim();
+
+        doc.fillColor("#000000").font("Helvetica-Bold").fontSize(7.2);
         // Fila 1: Nombre Completo
         doc.text("Nombre Completo:", leftX + 6, rRow1);
         doc.moveTo(leftX + 80, rRow1 + 8).lineTo(rightLimit - 8, rRow1 + 8).lineWidth(0.5).strokeColor("#333333").stroke();
+        if (rNombreVal) {
+          doc.font("Helvetica").fontSize(7.2).fillColor("#000000")
+            .text(rNombreVal, leftX + 83, rRow1, { width: rightLimit - leftX - 94, lineBreak: false });
+        }
 
         // Fila 2: RFC y Puesto
-        doc.text("RFC:", leftX + 6, rRow2);
+        doc.font("Helvetica-Bold").fontSize(7.2).text("RFC:", leftX + 6, rRow2);
         doc.moveTo(leftX + 28, rRow2 + 8).lineTo(leftX + 255, rRow2 + 8).lineWidth(0.5).strokeColor("#333333").stroke();
-        doc.text("Puesto:", leftX + 268, rRow2);
+        if (rRfcVal) {
+          doc.font("Helvetica").fontSize(7.2).fillColor("#000000")
+            .text(rRfcVal, leftX + 31, rRow2, { width: 220, lineBreak: false });
+        }
+        doc.font("Helvetica-Bold").fontSize(7.2).text("Puesto:", leftX + 268, rRow2);
         doc.moveTo(leftX + 300, rRow2 + 8).lineTo(rightLimit - 8, rRow2 + 8).lineWidth(0.5).strokeColor("#333333").stroke();
+        if (rPuestoVal) {
+          doc.font("Helvetica").fontSize(7.2).fillColor("#000000")
+            .text(rPuestoVal, leftX + 303, rRow2, { width: rightLimit - leftX - 314, lineBreak: false });
+        }
 
         // Fila 3: Adscripción / Región y Programa / Operativo
-        doc.text("Adscripción / Región:", leftX + 6, rRow3);
+        doc.font("Helvetica-Bold").fontSize(7.2).text("Adscripción / Región:", leftX + 6, rRow3);
         doc.moveTo(leftX + 90, rRow3 + 8).lineTo(leftX + 255, rRow3 + 8).lineWidth(0.5).strokeColor("#333333").stroke();
-        doc.text("Programa / Operativo:", leftX + 268, rRow3);
+        if (rAdscripcionVal) {
+          doc.font("Helvetica").fontSize(7.0).fillColor("#000000")
+            .text(rAdscripcionVal, leftX + 92, rRow3, { width: 161, lineBreak: false });
+        }
+        doc.font("Helvetica-Bold").fontSize(7.2).text("Programa / Operativo:", leftX + 268, rRow3);
         doc.moveTo(leftX + 354, rRow3 + 8).lineTo(rightLimit - 8, rRow3 + 8).lineWidth(0.5).strokeColor("#333333").stroke();
+        if (rProgramaVal) {
+          doc.font("Helvetica").fontSize(7.0).fillColor("#000000")
+            .text(rProgramaVal, leftX + 356, rRow3, { width: rightLimit - leftX - 366, lineBreak: false });
+        }
 
         // Fila 4: Licencia No. y Vigencia de Licencia
-        doc.text("Licencia No.:", leftX + 6, rRow4);
+        doc.font("Helvetica-Bold").fontSize(7.2).text("Licencia No.:", leftX + 6, rRow4);
         doc.moveTo(leftX + 58, rRow4 + 8).lineTo(leftX + 255, rRow4 + 8).lineWidth(0.5).strokeColor("#333333").stroke();
-        doc.text("Vigencia de Licencia:", leftX + 268, rRow4);
+        if (rLicenciaVal) {
+          doc.font("Helvetica").fontSize(7.2).fillColor("#000000")
+            .text(rLicenciaVal, leftX + 61, rRow4, { width: 190, lineBreak: false });
+        }
+        doc.font("Helvetica-Bold").fontSize(7.2).text("Vigencia de Licencia:", leftX + 268, rRow4);
         doc.moveTo(leftX + 352, rRow4 + 8).lineTo(rightLimit - 8, rRow4 + 8).lineWidth(0.5).strokeColor("#333333").stroke();
+        if (rVigenciaVal) {
+          doc.font("Helvetica").fontSize(7.2).fillColor("#000000")
+            .text(rVigenciaVal, leftX + 355, rRow4, { width: rightLimit - leftX - 365, lineBreak: false });
+        }
 
-        curY += resgH + 4;
+        curY += resgH + 3;
 
         // =====================================================================
         // SECCIÓN B1: DATOS DE LA UNIDAD (Capturados en el sistema)
@@ -7051,7 +10646,7 @@ async function handleInventarioRegionalFormatos(req, res) {
         const uOdometro = String(unidad.odometro_km || "").trim();
         const uGasolina = String(unidad.nivel_gasolina || "").trim();
 
-        const drawDataRow = (y, cells, rowH = 18) => {
+        const drawDataRow = (y, cells, rowH = 15.5) => {
           let x = leftX;
           cells.forEach((cell) => {
             doc.save();
@@ -7060,10 +10655,10 @@ async function handleInventarioRegionalFormatos(req, res) {
             doc.rect(x, y, cell.labelW, rowH).fillAndStroke(COLOR_SOFT_BG, "#000000");
             doc.restore();
 
-            doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(6.8)
-              .text(cell.label, x + 3, y + 5, { width: cell.labelW - 6, lineBreak: false });
-            doc.fillColor("#000000").font("Helvetica").fontSize(7.4)
-              .text(cell.val || "-", x + cell.labelW + 4, y + 5, { width: cell.w - cell.labelW - 8, lineBreak: false });
+            doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(6.6)
+              .text(cell.label, x + 3, y + 4.2, { width: cell.labelW - 6, lineBreak: false });
+            doc.fillColor("#000000").font("Helvetica").fontSize(7.1)
+              .text(cell.val || "-", x + cell.labelW + 4, y + 4.2, { width: cell.w - cell.labelW - 8, lineBreak: false });
             x += cell.w;
           });
           return y + rowH;
@@ -7094,15 +10689,15 @@ async function handleInventarioRegionalFormatos(req, res) {
           { label: "GASOLINA:", labelW: 48, w: 240, val: uGasolina ? gasDisplay : "Vacío [ ] 1/4 [ ] 1/2 [ ] 3/4 [ ] Lleno [ ]" },
         ]);
 
-        curY += 4;
+        curY += 3;
 
         // =====================================================================
         // SECCIÓN B2: ESTADO GENERAL (B / R / M)
         // =====================================================================
         curY = drawSectionBar(curY, "3. ESTADO GENERAL DEL VEHÍCULO (B = Bueno | R = Regular | M = Malo)");
         const estColW = tableWidth / VEHICULO_ESTADO_ITEMS.length; // 67.5 pt cada una
-        const estHeaderH = 12;
-        const estValH = 13;
+        const estHeaderH = 11;
+        const estValH = 12;
 
         VEHICULO_ESTADO_ITEMS.forEach((item, i) => {
           const cx = leftX + i * estColW;
@@ -7113,17 +10708,17 @@ async function handleInventarioRegionalFormatos(req, res) {
           doc.rect(cx, curY + estHeaderH, estColW, estValH).stroke();
           doc.restore();
 
-          doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(6.2)
-            .text(item.label, cx + 2, curY + 3, { width: estColW - 4, align: "center", lineBreak: false });
+          doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(6.0)
+            .text(item.label, cx + 2, curY + 2.5, { width: estColW - 4, align: "center", lineBreak: false });
 
           const bMark = val === "B" || val === "BUENO" ? "[X]B" : "[ ]B";
           const rMark = val === "R" || val === "REGULAR" ? "[X]R" : "[ ]R";
           const mMark = val === "M" || val === "MALO" ? "[X]M" : "[ ]M";
-          doc.fillColor("#000000").font("Helvetica-Bold").fontSize(6.3)
-            .text(`${bMark}  ${rMark}  ${mMark}`, cx + 1, curY + estHeaderH + 3.5, { width: estColW - 2, align: "center", lineBreak: false });
+          doc.fillColor("#000000").font("Helvetica-Bold").fontSize(6.1)
+            .text(`${bMark}  ${rMark}  ${mMark}`, cx + 1, curY + estHeaderH + 3, { width: estColW - 2, align: "center", lineBreak: false });
         });
 
-        curY += estHeaderH + estValH + 4;
+        curY += estHeaderH + estValH + 3;
 
         // =====================================================================
         // SECCIÓN B3: TABLA CHECKLIST DE ACCESORIOS, HERRAMIENTA Y DOCUMENTACIÓN
@@ -7134,9 +10729,9 @@ async function handleInventarioRegionalFormatos(req, res) {
         const colGroupW = tableWidth / numCols; // 180 pt por bloque
         const optW = 24; // 2 opciones (SÍ, NO) * 24 = 48 pt
         const itemLabelW = colGroupW - optW * 2; // 180 - 48 = 132 pt
-        const chkHeaderH = 11;
+        const chkHeaderH = 10.5;
         const numRows = Math.ceil(VEHICULO_CHECKLIST_ITEMS.length / numCols); // 14 filas
-        const chkRowH = 13.5;
+        const chkRowH = 12.0;
 
         // Dibujar encabezados de las 3 columnas: únicamente CONCEPTO, SÍ, NO (sin N/A)
         for (let c = 0; c < numCols; c++) {
@@ -7148,10 +10743,10 @@ async function handleInventarioRegionalFormatos(req, res) {
           doc.rect(gx + itemLabelW + optW, curY, optW, chkHeaderH).fillAndStroke(COLOR_SOFT_BG, "#000000");
           doc.restore();
 
-          doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(6.2);
-          doc.text("CONCEPTO", gx + 3, curY + 2.5, { width: itemLabelW - 6, align: "left", lineBreak: false });
-          doc.text("SÍ", gx + itemLabelW, curY + 2.5, { width: optW, align: "center", lineBreak: false });
-          doc.text("NO", gx + itemLabelW + optW, curY + 2.5, { width: optW, align: "center", lineBreak: false });
+          doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(6.0);
+          doc.text("CONCEPTO", gx + 3, curY + 2.2, { width: itemLabelW - 6, align: "left", lineBreak: false });
+          doc.text("SÍ", gx + itemLabelW, curY + 2.2, { width: optW, align: "center", lineBreak: false });
+          doc.text("NO", gx + itemLabelW + optW, curY + 2.2, { width: optW, align: "center", lineBreak: false });
         }
         curY += chkHeaderH;
 
@@ -7178,48 +10773,50 @@ async function handleInventarioRegionalFormatos(req, res) {
               const isSi = rawVal === "SI" || rawVal === "SÍ" || rawVal === "YES" || rawVal === "1";
               const isNo = rawVal === "NO" || rawVal === "0";
 
-              // Si es SÍ -> [X] SÍ y [ ] NO
-              // Si es NO -> [ ] SÍ y [X] NO
-              // Si es N/A o vacío -> [ ] SÍ y [ ] NO (para llenado manual)
               const siBox = isSi ? "[X]" : "[ ]";
               const noBox = isNo ? "[X]" : "[ ]";
 
-              doc.fillColor("#000000").font("Helvetica").fontSize(6.5)
-                .text(chkItem.label, gx + 3, ry + 3.2, { width: itemLabelW - 5, lineBreak: false });
+              doc.fillColor("#000000").font("Helvetica").fontSize(6.3)
+                .text(chkItem.label, gx + 3, ry + 2.6, { width: itemLabelW - 5, lineBreak: false });
 
-              doc.font("Helvetica-Bold").fontSize(6.6).fillColor(isSi ? COLOR_PRIMARY : "#333333");
-              doc.text(siBox, gx + itemLabelW, ry + 3, { width: optW, align: "center", lineBreak: false });
+              doc.font("Helvetica-Bold").fontSize(6.3).fillColor(isSi ? COLOR_PRIMARY : "#333333");
+              doc.text(siBox, gx + itemLabelW, ry + 2.5, { width: optW, align: "center", lineBreak: false });
 
-              doc.font("Helvetica-Bold").fontSize(6.6).fillColor(isNo ? COLOR_PRIMARY : "#333333");
-              doc.text(noBox, gx + itemLabelW + optW, ry + 3, { width: optW, align: "center", lineBreak: false });
+              doc.font("Helvetica-Bold").fontSize(6.3).fillColor(isNo ? COLOR_PRIMARY : "#333333");
+              doc.text(noBox, gx + itemLabelW + optW, ry + 2.5, { width: optW, align: "center", lineBreak: false });
             }
           }
         }
-        curY += numRows * chkRowH + 4;
+        curY += numRows * chkRowH + 3;
 
         // =====================================================================
-        // SECCIÓN B4: OBSERVACIONES GENERALES DE LA UNIDAD (Llenado a mano)
+        // SECCIÓN B4: OBSERVACIONES GENERALES DE LA UNIDAD (2 líneas compactas)
         // =====================================================================
-        curY = drawSectionBar(curY, "5. OBSERVACIONES GENERALES DE LA UNIDAD (NOTAS MANUALES)");
-        const obsH = 34;
+        curY = drawSectionBar(curY, "5. OBSERVACIONES GENERALES DE LA UNIDAD");
+        const obsH = 22;
         doc.save();
         doc.lineWidth(0.5).strokeColor("#000000");
         doc.rect(leftX, curY, tableWidth, obsH).stroke();
 
-        // 3 líneas guía en blanco para que el encargado escriba apuntes específicos a mano
+        // 2 líneas guía para notas manuales o impresas
         doc.lineWidth(0.4).strokeColor("#AAAAAA");
-        const lineSpacing = obsH / 4;
-        for (let l = 1; l <= 3; l++) {
-          const ly = curY + l * lineSpacing;
+        const lineSpacing = obsH / 2.6;
+        for (let l = 1; l <= 2; l++) {
+          const ly = curY + l * lineSpacing + 1;
           doc.moveTo(leftX + 8, ly).lineTo(rightLimit - 8, ly).stroke();
         }
         doc.restore();
-        curY += obsH + 4;
+        const vehObsTexto = String(veh?.observaciones || "").trim();
+        if (vehObsTexto) {
+          doc.fillColor("#000000").font("Helvetica").fontSize(6.6)
+            .text(vehObsTexto, leftX + 10, curY + 2.5, { width: tableWidth - 20, height: obsH - 4 });
+        }
+        curY += obsH + 3;
 
         // =====================================================================
-        // SECCIÓN C: CLÁUSULA LEGAL AL PIE DEL PDF (Antes de las 4 firmas)
+        // SECCIÓN C: CLÁUSULA LEGAL AL PIE DEL PDF (Antes del doble bloque de firmas)
         // =====================================================================
-        const legalH = 54;
+        const legalH = 44;
         doc.save();
         doc.lineWidth(0.6).strokeColor(COLOR_PRIMARY);
         doc.rect(leftX, curY, tableWidth, legalH).fillAndStroke(COLOR_SOFT_BG, COLOR_PRIMARY);
@@ -7229,17 +10826,17 @@ async function handleInventarioRegionalFormatos(req, res) {
         const clausulaTexto =
           "CLÁUSULA DE RESPONSABILIDAD LEGAL: Con fundamento en los Artículos 78, 80 y 87 del Acuerdo por el que se Establecen las Disposiciones en Materia de Recursos Materiales y Servicios Generales, el servidor público resguardante recibe el vehículo descrito para uso exclusivamente oficial y se compromete a: (1) portar licencia de conducir vigente durante la operación de la unidad; (2) cubrir el pago del deducible de la póliza de seguro o la reparación total de los daños y perjuicios que resulten imputables por negligencia, uso indebido o siniestro bajo su custodia; (3) cubrir por su cuenta las multas e infracciones de tránsito que se generen durante el periodo de asignación; y (4) resguardar y concentrar el vehículo al término de la jornada laboral o comisión oficial en las instalaciones de la Secretaría de Bienestar en Baja California Sur.";
 
-        doc.fillColor("#111111").font("Helvetica").fontSize(6.5)
-          .text(clausulaTexto, leftX + 9, curY + 4.5, {
+        doc.fillColor("#111111").font("Helvetica").fontSize(6.0)
+          .text(clausulaTexto, leftX + 9, curY + 3.5, {
             width: tableWidth - 15,
             align: "justify",
-            lineGap: 1.1,
+            lineGap: 0.8,
           });
 
-        curY += legalH + 6;
+        curY += legalH + 4;
 
         // =====================================================================
-        // SECCIÓN D: 4 FIRMAS (1. ENTREGA, 2. VALIDA, 3. RECIBE, 4. AUTORIZA)
+        // SECCIÓN D: DOBLE BLOQUE DE 4 FIRMAS (4 DE ENTREGA + 4 DE RETORNO) EN 1 SOLA HOJA
         // =====================================================================
         const isVehMulege = Boolean(
           isMulegeRegion ||
@@ -7249,11 +10846,18 @@ async function handleInventarioRegionalFormatos(req, res) {
           /muleg[eé]|santa rosal[ií]a|guerrero negro|vizca[ií]no/i.test(String(veh?.municipio || ""))
         );
         const vehFolio = String(veh?.folio || (veh?.clave_bien ? `RES-${veh.clave_bien}` : folio));
-        drawFourSignatures(
+        const customRecibeNom = rNombreVal
+          ? rNombreVal
+          : (isVehMulege ? "DIANA RAMÍREZ HERNÁNDEZ" : (isParqueVehicularRM ? "Jorge Luis Patrón Murillo" : null));
+        const customRecibeCar = rNombreVal
+          ? (rPuestoVal || "Director Regional")
+          : (isVehMulege ? "Director Regional" : (isParqueVehicularRM ? "Coordinador Operativo de Recursos Materiales" : null));
+
+        drawDoubleFourSignatures(
           curY,
-          78,
-          isVehMulege ? "Diana Ramirez Hernandez" : (isParqueVehicularRM ? "Jorge Luis Patrón Murillo" : null),
-          isVehMulege ? "Responsable Regional (Mulegé)" : (isParqueVehicularRM ? "Encargado de Recursos Materiales" : null),
+          49,
+          customRecibeNom,
+          customRecibeCar,
           vehFolio
         );
       });
@@ -7355,12 +10959,13 @@ async function handleInventarioRegionalFormatos(req, res) {
     drawRegionalHeader();
     let currentY = drawRegionalTableHeader(98);
 
-    const minRows = 15;
+    const minRows = 12;
     const totalRows = Math.max(items.length, minRows);
-    const defaultRowH = 18;
+    const defaultRowH = 16.5;
 
     for (let i = 0; i < totalRows; i++) {
       const item = items[i] || null;
+      const itemSiniestro = item ? isAssetInSiniestro(item) : false;
       const cellText = {
         no: item ? String(i + 1) : "",
         clave: item ? String(item.clave_bien || "").trim() : "",
@@ -7368,19 +10973,19 @@ async function handleInventarioRegionalFormatos(req, res) {
         marca: item ? String(item.marca_modelo || "").trim() : "",
         serie: item ? String(item.numero_serie_placas || "").trim() : "",
         cant: item && item.cantidad_propia != null ? String(item.cantidad_propia) : "",
-        est: item ? String(item.estatus_uso || "").trim() : "",
+        est: item ? (itemSiniestro ? "NO DISPONIBLE (SINIESTRO / ASEGURADORA)" : String(item.estatus_uso || "").trim()) : "",
         obs: item ? String(item.observaciones || "").trim() : "",
       };
 
-      doc.font("Helvetica").fontSize(7.5);
-      let maxTextH = 10;
+      doc.font("Helvetica").fontSize(7.2);
+      let maxTextH = itemSiniestro ? 16 : 9.5;
       regionalCols.forEach((c) => {
         const t = cellText[c.key];
-        if (c.wrap && t) maxTextH = Math.max(maxTextH, doc.heightOfString(t, { width: c.w - 6 }));
+        if ((c.wrap || (itemSiniestro && c.key === "est")) && t) maxTextH = Math.max(maxTextH, doc.heightOfString(t, { width: c.w - 6 }));
       });
-      const rowH = Math.max(defaultRowH, maxTextH + 6);
+      const rowH = Math.max(defaultRowH, maxTextH + 5);
 
-      if (currentY + rowH > pageHeight - 120) {
+      if (currentY + rowH > pageHeight - 165) {
         doc.addPage();
         drawRegionalHeader();
         currentY = drawRegionalTableHeader(98);
@@ -7388,7 +10993,9 @@ async function handleInventarioRegionalFormatos(req, res) {
 
       doc.save();
       doc.lineWidth(0.5).strokeColor("#000000");
-      if (i % 2 === 1) {
+      if (itemSiniestro) {
+        doc.rect(leftX, currentY, tableWidth, rowH).fillAndStroke("#fff1f2", "#000000");
+      } else if (i % 2 === 1) {
         doc.rect(leftX, currentY, tableWidth, rowH).fillAndStroke(COLOR_SOFT_BG, "#000000");
       } else {
         doc.rect(leftX, currentY, tableWidth, rowH).stroke();
@@ -7399,9 +11006,15 @@ async function handleInventarioRegionalFormatos(req, res) {
       doc.restore();
 
       if (item) {
-        const textY = currentY + 4;
-        doc.fillColor("#000000").font("Helvetica").fontSize(7.5);
+        const textY = currentY + 3.5;
         regionalCols.forEach((c) => {
+          if (itemSiniestro && c.key === "est") {
+            doc.fillColor("#9f1239").font("Helvetica-Bold").fontSize(6.4);
+          } else if (itemSiniestro) {
+            doc.fillColor("#9f1239").font("Helvetica").fontSize(7.2);
+          } else {
+            doc.fillColor("#000000").font("Helvetica").fontSize(7.2);
+          }
           doc.text(cellText[c.key], c.x + 3, textY, { width: c.w - 6, align: c.align });
         });
       }
@@ -7409,13 +11022,13 @@ async function handleInventarioRegionalFormatos(req, res) {
       currentY += rowH;
     }
 
-    // 8. Dibujar los 4 bloques de firma fijos al pie en orden: 1. ENTREGA, 2. VALIDA, 3. RECIBE, 4. AUTORIZA
-    const signBoxY = Math.max(currentY + 16, pageHeight - 145);
-    drawFourSignatures(
+    // 8. Dibujar el doble bloque de 4 firmas (4 de Entrega + 4 de Retorno) en la misma hoja
+    const signBoxY = Math.max(currentY + 10, pageHeight - 160);
+    drawDoubleFourSignatures(
       signBoxY,
-      86,
-      isMulegeRegion ? "Diana Ramirez Hernandez" : null,
-      isMulegeRegion ? "Responsable Regional (Mulegé)" : null,
+      50,
+      isMulegeRegion ? "DIANA RAMÍREZ HERNÁNDEZ" : null,
+      isMulegeRegion ? "Director Regional" : null,
       folio
     );
 
@@ -7449,65 +11062,199 @@ app.post("/api/admin/seed-pruebas", authRequired, async (req, res) => {
 // ============================================================================
 
 // 1. Catálogo disponible para préstamo según el rubro
+// ---------------------------------------------------------------------------
+// v42: Resolución ESTRICTA de artículos para Vales de Préstamo.
+// Nunca se busca ni se actualiza stock por descripción: solo por ID primario
+// o por coincidencia exacta de clave (+ oficina en inventario_oficina).
+// ---------------------------------------------------------------------------
+async function resolveAlmacenRowStrict(conn, { articulo_id, id, clave, clave_bien } = {}) {
+  const artId = Number(articulo_id || id || 0) || null;
+  if (artId) {
+    const [ar] = await conn.query(
+      `SELECT ID, CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil WHERE ID = ? LIMIT 1 FOR UPDATE`,
+      [artId]
+    );
+    if (ar.length) return ar[0];
+  }
+  const claveNorm = String(clave || clave_bien || "").trim().toUpperCase();
+  if (claveNorm) {
+    const [ar] = await conn.query(
+      `SELECT ID, CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil
+       WHERE UPPER(TRIM(CLAVE)) = ? ORDER BY ID ASC LIMIT 1 FOR UPDATE`,
+      [claveNorm]
+    );
+    if (ar.length) return ar[0];
+  }
+  return null;
+}
+
+async function resolveInventarioOficinaRowStrict(conn, { articulo_id, id, clave, clave_bien, oficina_id } = {}, rubroId = null) {
+  const artId = Number(articulo_id || id || 0) || null;
+  if (artId) {
+    const [rows] = await conn.query(
+      `SELECT id, oficina_id, clave_bien, cantidad_propia, cantidad_disponible, cantidad_prestada_enviada, estatus_uso, descripcion
+       FROM inventario_oficina WHERE id = ? LIMIT 1 FOR UPDATE`,
+      [artId]
+    );
+    if (rows.length) return rows[0];
+  }
+  const claveNorm = String(clave_bien || clave || "").trim().toUpperCase();
+  const ofiId = Number(oficina_id || 0) || null;
+  if (claveNorm && ofiId) {
+    const [rows] = await conn.query(
+      `SELECT id, oficina_id, clave_bien, cantidad_propia, cantidad_disponible, cantidad_prestada_enviada, estatus_uso, descripcion
+       FROM inventario_oficina
+       WHERE UPPER(TRIM(clave_bien)) = ? AND oficina_id = ? ${rubroId ? "AND rubro_id = ?" : ""}
+       ORDER BY id ASC LIMIT 1 FOR UPDATE`,
+      rubroId ? [claveNorm, ofiId, rubroId] : [claveNorm, ofiId]
+    );
+    if (rows.length) return rows[0];
+  }
+  return null;
+}
+
 app.get("/api/vales-prestamo/catalogo", authRequired, async (req, res) => {
   try {
-    const rubroId = Number(req.query?.rubro_id || 1);
-    if (![1, 2, 3, 4].includes(rubroId)) {
-      return httpError(res, 400, "Rubro inválido (debe ser del 1 al 4)");
-    }
-
+    const rubroId = Number(req.query?.rubro_id || 2);
     if (rubroId === 1) {
-      // Gabriel Fiol: Almacén Central (almacen_dregcivil)
-      const [rows] = await poolRead.query(
-        `SELECT 
-           ID AS id,
-           CLAVE AS clave,
-           DESCRIPCION AS descripcion,
-           UNIDAD AS unidad,
-           STOCK AS stock,
-           STOCK AS cantidad_disponible,
-           (STOCK > 0) AS disponible,
-           STOCK AS existencia,
-           '' AS marca,
-           '' AS modelo,
-           '' AS serie,
-           '' AS color,
-           'BUEN ESTADO' AS estado_salida
-         FROM almacen_dregcivil
-         WHERE (ESTADO IS NULL OR ESTADO = 'ACTIVO') AND STOCK > 0
-         ORDER BY DESCRIPCION ASC`
-      );
-      return res.json({ ok: true, rubro_id: 1, rubro_nombre: "Archivo y Materiales", data: rows });
+      return httpError(res, 400, "El Rubro 1 (Archivo y Materiales - Gabriel Adán Fiol Collins) no utiliza Vales Provisionales; utiliza Solicitudes de Material.");
+    }
+    if (![2, 3, 4].includes(rubroId)) {
+      return httpError(res, 400, "Rubro inválido para Vales Provisionales (debe ser 2, 3 o 4)");
+    }
+    if (isLuisMayoralUser(req) && rubroId !== 4) {
+      return httpError(res, 403, "Luis Eduardo Mayoral Geraldo solo tiene acceso al catálogo del Rubro 4 (Tabletas Digitales).");
     }
 
-    // Rubros 2, 3, 4: Inventario Delegación La Paz (oficina_id = 1)
+    if (rubroId === 4) {
+      const [tabRows] = await poolRead.query(
+        `SELECT id, no_resguardo, imei, numero_serie, marca, modelo, descripcion, estatus_fisico, region, oficina_programa, observaciones
+         FROM inventario_tabletas
+         WHERE estado_asignacion = 'DISPONIBLE'
+           AND UPPER(TRIM(COALESCE(region, 'LA PAZ'))) = 'LA PAZ'
+         ORDER BY no_resguardo ASC`
+      );
+      const data = tabRows.map((t) => {
+        const marca = String(t.marca || "Compac").trim();
+        const modelo = String(t.modelo || "QTab LTE").trim();
+        const imei = String(t.imei || "").trim();
+        const numSerie = String(t.numero_serie || "").trim();
+        return {
+          id: t.id,
+          tableta_id: t.id,
+          articulo_id: t.id,
+          no_resguardo: Number(t.no_resguardo),
+          imei,
+          numero_serie: numSerie,
+          clave: `RESG-${t.no_resguardo}`,
+          clave_bien: `RESG-${t.no_resguardo}`,
+          descripcion: `Tablet Compac - No. de Resguardo #${t.no_resguardo}`,
+          unidad: "PIEZA",
+          stock: 1,
+          cantidad_disponible: 1,
+          cantidad_propia: 1,
+          disponible: true,
+          existencia: 1,
+          marca,
+          modelo,
+          serie: `IMEI: ${imei || "-"} | Serie: ${numSerie || "-"}`,
+          color: "",
+          estado_salida: String(t.estatus_fisico || "BUENO").trim() || "BUENO",
+          es_tableta: true,
+        };
+      });
+      return res.json({ ok: true, rubro_id: 4, rubro_nombre: "Tabletas Digitales (Luis Eduardo Mayoral Geraldo)", data });
+    }
+
+    // Rubros 2 y 3: Inventario de Bodega RM / Delegación La Paz
     const hasDetCol = await ensureDetallesVehiculoCol();
-    const [rows] = await poolRead.query(
+    const [rmRows] = await poolRead.query(
+      `SELECT id FROM oficinas_regionales
+       WHERE region_id = 1 AND (nombre = 'RM (Recursos Materiales)' OR nombre = 'RM' OR nombre LIKE '%Recursos Materiales%')
+       ORDER BY (nombre = 'RM (Recursos Materiales)') DESC, id ASC LIMIT 1`
+    ).catch(() => [[]]);
+    const rmOfiId = Number(rmRows[0]?.id || 0);
+
+    const whereBodegaClause = rubroId === 3
+      ? `(io.oficina_id = ? OR io.es_bodega_delegacion = 1) AND COALESCE(io.es_bodega_delegacion, 0) = 1`
+      : `(io.oficina_id = 1 OR io.oficina_id = ? OR io.es_bodega_delegacion = 1)`;
+
+    const [rawRows] = await poolRead.query(
       `SELECT 
          io.id,
+         io.oficina_id,
+         ofi.nombre AS oficina_nombre,
+         io.es_bodega_delegacion,
          io.clave_bien AS clave,
          io.descripcion,
          io.unidad,
-         io.cantidad_propia AS stock,
-         io.cantidad_disponible,
-         (io.cantidad_propia > 0) AS disponible,
-         io.cantidad_propia AS existencia,
+         COALESCE(io.cantidad_disponible, io.cantidad_propia) AS stock,
+         COALESCE(io.cantidad_disponible, io.cantidad_propia) AS cantidad_disponible,
+         io.cantidad_propia,
+         (COALESCE(io.cantidad_disponible, io.cantidad_propia) > 0) AS disponible,
+         COALESCE(io.cantidad_disponible, io.cantidad_propia) AS existencia,
          io.marca_modelo,
          io.numero_serie_placas AS serie,
          io.estado_fisico AS estado_salida,
+         io.estado_fisico,
+         io.estatus_uso,
+         io.observaciones,
+         io.observaciones_control,
          ${hasDetCol ? "io.detalles_vehiculo" : "NULL AS detalles_vehiculo"},
          r.nombre_rubro,
          r.encargado_nombre,
          r.encargado_cargo
        FROM inventario_oficina io
+       LEFT JOIN oficinas_regionales ofi ON ofi.id = io.oficina_id
        LEFT JOIN rubros_inventario r ON r.id = io.rubro_id
-       WHERE (io.oficina_id = 1 OR io.es_bodega_delegacion = 1) 
+       WHERE ${whereBodegaClause}
          AND io.rubro_id = ?
-         AND io.cantidad_propia > 0
-         AND io.estatus_uso <> 'BAJA'
+         AND COALESCE(io.cantidad_disponible, io.cantidad_propia) > 0
+         AND io.estatus_uso NOT IN ('BAJA', 'SINIESTRO / EN ASEGURADORA', 'NO DISPONIBLE (SINIESTRO)')
        ORDER BY io.descripcion ASC`,
-      [rubroId]
+      [rmOfiId, rubroId]
     );
+
+    // Excluir cualquier bien o vehículo reportado en Siniestro / Aseguradora / No Disponible
+    let rows = rawRows.filter((r) => !isAssetInSiniestro(r));
+
+    // v61: Para Rubro 2 (Parque Vehicular - Evelia), mostrar ÚNICAMENTE los vehículos asignados a Recursos Materiales (RM)
+    if (rubroId === 2) {
+      rows = rows.filter((r) => {
+        if (rmOfiId > 0 && Number(r.oficina_id) === rmOfiId) return true;
+        const ofiNom = String(r.oficina_nombre || "").toUpperCase();
+        if (ofiNom === "RM" || ofiNom.includes("RECURSOS MATERIALES")) return true;
+        let detStr = "";
+        if (r.detalles_vehiculo) {
+          detStr = typeof r.detalles_vehiculo === "object"
+            ? JSON.stringify(r.detalles_vehiculo)
+            : String(r.detalles_vehiculo);
+        }
+        const combined = [
+          r.oficina_nombre,
+          r.observaciones,
+          r.observaciones_control,
+          detStr,
+        ]
+          .join(" ")
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toUpperCase();
+        return (
+          combined.includes("RECURSOS MATERIALES") ||
+          /\bRM\b/.test(combined) ||
+          combined.includes("PATRON MURILLO")
+        );
+      });
+    } else if (rubroId === 3) {
+      const seenMobKeys = new Set();
+      rows = rows.filter((r) => {
+        const key = normalizeMobClave(r.clave, r.descripcion);
+        if (seenMobKeys.has(key)) return false;
+        seenMobKeys.add(key);
+        return true;
+      });
+    }
 
     const data = rows.map((r) => {
       let marca = "";
@@ -7528,12 +11275,18 @@ app.get("/api/vales-prestamo/catalogo", authRequired, async (req, res) => {
           serie = [v.unidad.placas, v.unidad.serie_vin].filter(Boolean).join(" / ") || serie;
         }
       }
+      const stockDisp = Number(r.cantidad_disponible ?? r.stock ?? r.cantidad_propia ?? 0);
       return {
         id: r.id,
+        articulo_id: r.id,
+        oficina_id: r.oficina_id,
         clave: r.clave,
+        clave_bien: r.clave,
         descripcion: r.descripcion,
         unidad: r.unidad || "PIEZA",
-        stock: r.stock,
+        stock: stockDisp,
+        cantidad_disponible: stockDisp,
+        cantidad_propia: Number(r.cantidad_propia ?? stockDisp),
         marca,
         modelo,
         serie,
@@ -7644,7 +11397,16 @@ app.get("/api/vales-prestamo/:id", authRequired, async (req, res) => {
     const vale = valeRows[0];
 
     const [detalles] = await poolRead.query(
-      `SELECT * FROM vales_prestamo_detalle WHERE vale_id = ? ORDER BY id ASC`,
+      `SELECT vpd.*,
+              t.no_resguardo AS tab_no_resguardo,
+              t.imei AS tab_imei,
+              t.numero_serie AS tab_numero_serie,
+              t.marca AS tab_marca,
+              t.modelo AS tab_modelo
+       FROM vales_prestamo_detalle vpd
+       LEFT JOIN inventario_tabletas t ON t.id = vpd.tableta_id
+       WHERE vpd.vale_id = ?
+       ORDER BY vpd.id ASC`,
       [id]
     );
 
@@ -7654,23 +11416,28 @@ app.get("/api/vales-prestamo/:id", authRequired, async (req, res) => {
   }
 });
 
-// 4. Crear nuevo Vale Provisional (Control de Stock Inmediato)
+// 4. Crear nuevo Vale Provisional (Control de Stock Inmediato, con soporte a Modo Prueba Grupal v61)
 app.post("/api/vales-prestamo", authRequired, async (req, res) => {
   try {
     const b = req.body || {};
     const rubroId = Number(b.rubro_id || 0);
-    if (![1, 2, 3, 4].includes(rubroId)) return httpError(res, 400, "Rubro inválido (1 a 4)");
+    if (rubroId === 1) {
+      return httpError(res, 400, "El Rubro 1 (Archivo y Materiales - Gabriel Adán Fiol Collins) no permite Vales Provisionales. Utiliza el módulo de Solicitudes de Material.");
+    }
+    if (![2, 3, 4].includes(rubroId)) return httpError(res, 400, "Rubro inválido para Vales Provisionales (2, 3 o 4)");
+    if (isLuisMayoralUser(req) && rubroId !== 4) {
+      return httpError(res, 403, "Luis Eduardo Mayoral Geraldo solo puede crear vales provisionales para el Rubro 4 (Tabletas Digitales).");
+    }
 
     let deptoId = Number(b.departamento_id || 0);
     let deptoNombre = String(b.departamento_nombre || "").trim();
 
-    // Regla de Negocio: no admin ni gabrielfiol no pueden seleccionar otros departamentos
+    // Regla de Negocio: solo admin puede seleccionar otros departamentos libremente
     const admin = isAdmin(req);
-    const isFiol = canManageAlmacen(req);
     const userDeptoId = Number(req.user?.id_oficialia || req.user?.oficialia_id || 0);
     const userDeptoNombre = String(req.user?.departamento || req.user?.oficialia_nombre || "").trim();
 
-    if (!admin && !isFiol) {
+    if (!admin) {
       deptoId = userDeptoId || deptoId;
       deptoNombre = userDeptoNombre || deptoNombre;
     }
@@ -7724,8 +11491,14 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
       esIndefinido = false;
     }
 
-    const recibeNombre = String(b.recibe_nombre || "").trim() || solicitanteNombre;
-    const recibeCargo = String(b.recibe_cargo || "").trim() || solicitanteCargo;
+    let recibeNombre = String(b.recibe_nombre || b.nombre_recibe || "").trim();
+    let recibeCargo = String(b.recibe_cargo || b.cargo_recibe || "").trim();
+    if (tipoFirmas === 2 || !recibeNombre) {
+      recibeNombre = solicitanteNombre;
+    }
+    if (tipoFirmas === 2 || !recibeCargo) {
+      recibeCargo = String(b.solicitante_cargo || b.cargo_solicitante || "").trim() || deptoNombre || solicitanteCargo;
+    }
 
     const nowLocal = new Date();
     const todayLocalISO = `${nowLocal.getFullYear()}-${String(nowLocal.getMonth() + 1).padStart(2, "0")}-${String(nowLocal.getDate()).padStart(2, "0")}`;
@@ -7737,71 +11510,133 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
     if (!items.length) return httpError(res, 400, "Debe agregar al menos un bien o material al vale");
 
     const ENCARGADOS_FIRMA_MAP = {
-      1: { nombre: "GABRIEL ADÁN FIOL COLLINS", cargo: "ENCARGADO DE INVENTARIO / RECURSOS MATERIALES" },
+      1: { nombre: "GABRIEL ADÁN FIOL COLLINS", cargo: "ENCARGADO DE ARCHIVOS Y MATERIALES" },
       2: { nombre: "EVELIA CONTRERAS GODÍNEZ", cargo: "ENCARGADA DE PARQUE VEHICULAR / RECURSOS MATERIALES" },
       3: { nombre: "JESÚS SALVADOR PALACIOS MARTÍNEZ", cargo: "ENCARGADO DE MOBILIARIO / RECURSOS MATERIALES" },
-      4: { nombre: "LUIS EDUARDO MAYORAL GERALDO", cargo: "ENCARGADO DE TABLETS Y STARLINKS / RECURSOS MATERIALES" },
+      4: { nombre: "LUIS EDUARDO MAYORAL GERALDO", cargo: "ENCARGADO DE ALMACÉN" },
     };
-    const encargadoEntrega = ENCARGADOS_FIRMA_MAP[rubroId]?.nombre || req.user?.nombre_completo || req.user?.username;
+
+    let encargadoEntrega = "";
+    if (rubroId) {
+      const [rubroRowCheck] = await poolRead.query(
+        `SELECT encargado_nombre FROM rubros_inventario WHERE id = ? LIMIT 1`,
+        [rubroId]
+      ).catch(() => [[]]);
+      if (rubroRowCheck.length && rubroRowCheck[0].encargado_nombre) {
+        encargadoEntrega = rubroRowCheck[0].encargado_nombre;
+      } else {
+        const [usrRubroCheck] = await poolRead.query(
+          `SELECT TRIM(CONCAT_WS(' ', NULLIF(nombre, ''), NULLIF(PRIMER_APELLIDO, ''), NULLIF(SEGUNDO_APELLIDO, ''))) AS nc
+           FROM usuario WHERE rubro_id = ? AND ACTIVO = 1 LIMIT 1`,
+          [rubroId]
+        ).catch(() => [[]]);
+        if (usrRubroCheck.length && usrRubroCheck[0].nc) {
+          encargadoEntrega = usrRubroCheck[0].nc;
+        }
+      }
+    }
+    if (!encargadoEntrega) {
+      encargadoEntrega = req.user?.nombre_completo || req.user?.username || ENCARGADOS_FIRMA_MAP[rubroId]?.nombre || "ENCARGADO DE ÁREA";
+    }
 
     const conn = await poolOps.getConnection();
     try {
       await conn.beginTransaction();
+      const modoPruebaActivo = await isModoPruebaGrupalActivo(conn);
+      const esPruebaVal = modoPruebaActivo ? 1 : 0;
 
-      // Control de Stock: Validar y descontar inmediatamente las unidades prestadas
-      if (rubroId === 1) {
+      // Control de Stock: Validar y descontar unidades prestadas SOLO si NO está en Modo Prueba Grupal
+      const tabletasAuditList = [];
+      if (rubroId === 4) {
+        const seenTabIds = new Set();
+        const tempHolder = `PRÉSTAMO PROVISIONAL: ${solicitanteNombre}`.slice(0, 150);
         for (const it of items) {
-          const artId = it.articulo_id ? Number(it.articulo_id) : null;
-          const clave = String(it.clave || "").trim() || null;
-          const cant = Math.max(1, Number(it.cantidad) || 1);
-          let almRow = null;
-          if (artId) {
-            const [ar] = await conn.query(`SELECT ID, CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil WHERE ID = ? FOR UPDATE`, [artId]);
-            if (ar.length) almRow = ar[0];
+          let tabId = Number(it.tableta_id || it.articulo_id || it.id || 0);
+          let tabRow = null;
+          if (tabId > 0) {
+            const [tRows] = await conn.query(
+              `SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+              [tabId]
+            );
+            tabRow = tRows[0] || null;
+          } else if (it.no_resguardo) {
+            const [tRows] = await conn.query(
+              `SELECT * FROM inventario_tabletas WHERE no_resguardo = ? LIMIT 1 FOR UPDATE`,
+              [Number(it.no_resguardo)]
+            );
+            tabRow = tRows[0] || null;
           }
-          if (!almRow && clave) {
-            const [ar] = await conn.query(`SELECT ID, CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil WHERE CLAVE = ? FOR UPDATE`, [clave]);
-            if (ar.length) almRow = ar[0];
-          }
-          if (!almRow) {
+          if (!tabRow) {
             await conn.rollback();
-            return httpError(res, 400, `No se encontró en almacén el artículo: ${it.descripcion}`);
+            return httpError(res, 404, `No se encontró la tableta seleccionada en el padrón oficial.`);
           }
-          if (Number(almRow.STOCK || 0) < cant) {
+          if (seenTabIds.has(Number(tabRow.id))) {
             await conn.rollback();
-            return httpError(res, 400, `La cantidad solicitada para "${almRow.DESCRIPCION}" supera la disponibilidad actual.`);
+            return httpError(res, 400, `La tableta con Resguardo #${tabRow.no_resguardo} está duplicada en la solicitud.`);
           }
-          await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK - ? WHERE ID = ?`, [cant, almRow.ID]);
+          seenTabIds.add(Number(tabRow.id));
+
+          if (String(tabRow.estado_asignacion || "").toUpperCase() !== "DISPONIBLE") {
+            await conn.rollback();
+            return httpError(
+              res,
+              409,
+              `La tableta con No. de Resguardo #${tabRow.no_resguardo} (IMEI: ${tabRow.imei}) ya fue ocupada y no está DISPONIBLE (Estado: ${tabRow.estado_asignacion}).`
+            );
+          }
+
+          if (!modoPruebaActivo) {
+            await conn.query(
+              `UPDATE inventario_tabletas
+               SET estado_asignacion = 'EN_PRESTAMO_PROVISIONAL',
+                   nombre_resguardante = ?
+               WHERE id = ?`,
+              [tempHolder, tabRow.id]
+            );
+          }
+
+          it.tableta_id = tabRow.id;
+          it.articulo_id = null;
+          it.cantidad = 1;
+          it.clave = `RESG-${tabRow.no_resguardo}`;
+          it.descripcion = `Tablet Compac - No. de Resguardo #${tabRow.no_resguardo}`;
+          it.marca = tabRow.marca || "Compac";
+          it.modelo = tabRow.modelo || "QTab LTE";
+          it.serie = `IMEI: ${tabRow.imei || "-"} | Serie: ${tabRow.numero_serie || "-"}`;
+          it.estado_salida = it.estado_salida || tabRow.estatus_fisico || "BUENO";
+          tabletasAuditList.push(tabRow);
         }
       } else {
         for (const it of items) {
-          const artId = it.articulo_id ? Number(it.articulo_id) : null;
           const cant = Math.max(1, Number(it.cantidad) || 1);
-          if (!artId) continue;
-          const [invRows] = await conn.query(
-            `SELECT id, cantidad_propia, estatus_uso, descripcion FROM inventario_oficina WHERE id = ? AND (oficina_id = 1 OR es_bodega_delegacion = 1) FOR UPDATE`,
-            [artId]
-          );
-          if (!invRows.length) {
+          const inv = await resolveInventarioOficinaRowStrict(conn, it, rubroId);
+          if (!inv) {
             await conn.rollback();
-            return httpError(res, 400, `No se encontró en inventario el bien: ${it.descripcion}`);
+            return httpError(res, 400, `No se encontró en inventario el bien (ID/clave): ${it.descripcion || it.clave || it.articulo_id}`);
           }
-          const inv = invRows[0];
-          if (Number(inv.cantidad_propia || 0) < cant) {
+          if (isAssetInSiniestro(inv)) {
             await conn.rollback();
-            return httpError(res, 400, `La cantidad solicitada para "${inv.descripcion}" supera la disponibilidad actual.`);
+            return httpError(res, 409, `El bien "${inv.descripcion}" no está disponible para préstamo por encontrarse en SINIESTRO / ASEGURADORA.`);
           }
-          const nuevaCant = Number(inv.cantidad_propia) - cant;
-          const nuevoEstatus = nuevaCant === 0 ? "PRESTADO" : inv.estatus_uso;
-          await conn.query(
-            `UPDATE inventario_oficina
-             SET cantidad_propia = ?,
-                 cantidad_disponible = ?,
-                 cantidad_prestada_enviada = cantidad_prestada_enviada + ?,
-                 estatus_uso = ?
-             WHERE id = ?`,
-            [nuevaCant, nuevaCant, cant, nuevoEstatus, artId]
-          );
+          const dispActual = Number(inv.cantidad_disponible ?? inv.cantidad_propia ?? 0);
+          if (dispActual < cant) {
+            await conn.rollback();
+            return httpError(res, 400, `La cantidad solicitada (${cant}) para "${inv.descripcion}" supera la disponibilidad actual (${dispActual}).`);
+          }
+          if (!modoPruebaActivo) {
+            const nuevaDisp = Math.max(0, dispActual - cant);
+            const nuevoEstatus = nuevaDisp === 0 ? "PRESTADO" : inv.estatus_uso;
+            await conn.query(
+              `UPDATE inventario_oficina
+               SET cantidad_disponible = ?,
+                   cantidad_prestada_enviada = cantidad_prestada_enviada + ?,
+                   estatus_uso = ?
+               WHERE id = ?`,
+              [nuevaDisp, cant, nuevoEstatus, inv.id]
+            );
+          }
+          it.articulo_id = inv.id;
+          it.clave = inv.clave_bien || it.clave;
         }
       }
 
@@ -7815,8 +11650,8 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
            (folio, rubro_id, departamento_id, departamento_nombre, solicitante_nombre, solicitante_cargo,
             solicitante_telefono, operativo_nombre, lugar_comision, fecha_salida, fecha_devolucion_estimada,
             tipo_firmas, es_indefinido, recibe_nombre, recibe_cargo,
-            estado, encargado_entrega, usuario_id, observaciones_prestamo)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AUTORIZADO_EN_PRESTAMO', ?, ?, ?)`,
+            estado, encargado_entrega, usuario_id, observaciones_prestamo, es_prueba)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AUTORIZADO_EN_PRESTAMO', ?, ?, ?, ?)`,
         [
           folio,
           rubroId,
@@ -7836,16 +11671,18 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
           encargadoEntrega,
           req.user?.id || 1,
           String(b.observaciones_prestamo || "").trim() || null,
+          esPruebaVal,
         ]
       );
       const valeId = resIns.insertId;
 
       for (const it of items) {
         const artId = it.articulo_id ? Number(it.articulo_id) : null;
+        const tabId = it.tableta_id ? Number(it.tableta_id) : null;
         const clave = String(it.clave || "").trim() || null;
         const desc = String(it.descripcion || "").trim();
         if (!desc) continue;
-        const cant = Math.max(1, Number(it.cantidad) || 1);
+        const cant = rubroId === 4 ? 1 : Math.max(1, Number(it.cantidad) || 1);
         const serie = String(it.serie || "").trim() || null;
         const marca = String(it.marca || "").trim() || null;
         const modelo = String(it.modelo || "").trim() || null;
@@ -7855,30 +11692,38 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
 
         await conn.query(
           `INSERT INTO vales_prestamo_detalle
-             (vale_id, articulo_id, clave, descripcion, serie, marca, modelo, color, cantidad, estado_salida, estado_devolucion, observaciones)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDIENTE', ?)`,
-          [valeId, artId, clave, desc, serie, marca, modelo, color, cant, estSal, obs]
+             (vale_id, articulo_id, tableta_id, clave, descripcion, serie, marca, modelo, color, cantidad, estado_salida, estado_devolucion, observaciones)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDIENTE', ?)`,
+          [valeId, artId, tabId, clave, desc, serie, marca, modelo, color, cant, estSal, obs]
         );
+      }
 
-        if (rubroId === 1) {
-          await logMovimiento(conn, {
-            tipo: "SALIDA",
-            clave: clave,
-            cantidad: cant,
-            responsable: req.user?.username || "web",
-            destino: "VALE_PRESTAMO",
-            referencia: folio,
-            observaciones: `Préstamo operativo: ${operativoNombre}`,
-          });
+      if (!modoPruebaActivo && rubroId === 4 && tabletasAuditList.length) {
+        const actor = req?.user?.username || req?.user?.nombre || "SISTEMA";
+        for (const tabRow of tabletasAuditList) {
+          await conn.query(
+            `INSERT INTO bitacora_tabletas (tableta_id, no_resguardo, imei, numero_serie, usuario, accion, detalles)
+             VALUES (?, ?, ?, ?, ?, 'PRESTAMO_PROVISIONAL', ?)`,
+            [
+              tabRow.id,
+              tabRow.no_resguardo,
+              tabRow.imei || null,
+              tabRow.numero_serie || null,
+              String(actor).slice(0, 80),
+              `Vale Provisional ${folio} autorizado/entregado a "${solicitanteNombre}". Operativo: ${operativoNombre}.`,
+            ]
+          );
         }
       }
 
-      if (rubroId === 1) {
-        await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
-      }
-
       await conn.commit();
-      return res.json({ ok: true, id: valeId, folio, message: `Vale Provisional ${folio} generado exitosamente` });
+      return res.json({
+        ok: true,
+        id: valeId,
+        folio,
+        es_prueba: esPruebaVal,
+        message: `Vale Provisional ${folio} generado exitosamente${esPruebaVal ? " (Modo Prueba Grupal: sin afectación a inventario)" : ""}`,
+      });
     } catch (err) {
       await conn.rollback();
       throw err;
@@ -7890,8 +11735,8 @@ app.post("/api/vales-prestamo", authRequired, async (req, res) => {
   }
 });
 
-// 5. Autorizar entrega de préstamo
-app.post("/api/vales-prestamo/:id/autorizar", authRequired, async (req, res) => {
+// 5. Autorizar entrega de préstamo (soporta POST y PUT)
+async function handleAutorizarValePrestamo(req, res) {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return httpError(res, 400, "ID inválido");
@@ -7933,71 +11778,115 @@ app.post("/api/vales-prestamo/:id/autorizar", authRequired, async (req, res) => 
         [id]
       );
 
-      // Descontar inventario según el rubro correspondiente
-      if (vale.rubro_id === 1) {
-        for (const item of detalles) {
-          let artId = item.articulo_id;
-          let almRow = null;
-          if (artId) {
-            const [ar] = await conn.query(`SELECT ID, CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil WHERE ID = ? FOR UPDATE`, [artId]);
-            if (ar.length) almRow = ar[0];
+      const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
+      const esValePrueba = Number(vale.es_prueba || 0) === 1 || modoPruebaGlobal;
+
+      // Descontar inventario según el rubro correspondiente SOLO si NO es vale de prueba
+      if (!esValePrueba) {
+        if (vale.rubro_id === 1) {
+          for (const item of detalles) {
+            const almRow = await resolveAlmacenRowStrict(conn, { articulo_id: item.articulo_id, clave: item.clave });
+            if (!almRow) {
+              await conn.rollback();
+              return httpError(res, 400, `No se encontró en almacén el artículo: ${item.descripcion}`);
+            }
+            if (Number(almRow.STOCK || 0) < Number(item.cantidad)) {
+              await conn.rollback();
+              return httpError(res, 400, `La cantidad solicitada para "${item.descripcion}" supera la disponibilidad actual.`);
+            }
+            await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK - ? WHERE ID = ?`, [item.cantidad, almRow.ID]);
+            await logMovimiento(conn, {
+              tipo: "SALIDA",
+              clave: almRow.CLAVE,
+              cantidad: item.cantidad,
+              responsable: req.user?.username || "web",
+              destino: "VALE_PRESTAMO",
+              referencia: vale.folio,
+              observaciones: `Préstamo operativo: ${vale.operativo_nombre}`,
+            });
           }
-          if (!almRow && item.clave) {
-            const [ar] = await conn.query(`SELECT ID, CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil WHERE CLAVE = ? FOR UPDATE`, [item.clave]);
-            if (ar.length) almRow = ar[0];
+          await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
+        } else if (Number(vale.rubro_id) === 4) {
+          const tempHolder = `PRÉSTAMO PROVISIONAL: ${vale.solicitante_nombre || ""}`.slice(0, 150);
+          const actor = req?.user?.username || req?.user?.nombre || "SISTEMA";
+          for (const item of detalles) {
+            const tabId = Number(item.tableta_id || item.articulo_id || 0);
+            if (!tabId) continue;
+            const [tRows] = await conn.query(
+              `SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+              [tabId]
+            );
+            if (!tRows.length) {
+              await conn.rollback();
+              return httpError(res, 404, `No se encontró la tableta para el detalle: ${item.descripcion}`);
+            }
+            const tab = tRows[0];
+            if (String(tab.estado_asignacion || "").toUpperCase() !== "DISPONIBLE") {
+              await conn.rollback();
+              return httpError(res, 409, `La tableta #${tab.no_resguardo} (IMEI: ${tab.imei}) ya no está DISPONIBLE (Estado: ${tab.estado_asignacion}).`);
+            }
+            await conn.query(
+              `UPDATE inventario_tabletas
+               SET estado_asignacion = 'EN_PRESTAMO_PROVISIONAL',
+                   nombre_resguardante = ?
+               WHERE id = ?`,
+              [tempHolder, tab.id]
+            );
+            await conn.query(
+              `INSERT INTO bitacora_tabletas (tableta_id, no_resguardo, imei, numero_serie, usuario, accion, detalles)
+               VALUES (?, ?, ?, ?, ?, 'PRESTAMO_PROVISIONAL', ?)`,
+              [
+                tab.id,
+                tab.no_resguardo,
+                tab.imei || null,
+                tab.numero_serie || null,
+                String(actor).slice(0, 80),
+                `Vale Provisional ${vale.folio} autorizado a "${vale.solicitante_nombre}". Operativo: ${vale.operativo_nombre}.`,
+              ]
+            );
           }
-          if (!almRow) {
-            await conn.rollback();
-            return httpError(res, 400, `No se encontró en almacén el artículo: ${item.descripcion}`);
+        } else {
+          for (const item of detalles) {
+            if (!item.articulo_id) continue;
+            const [invRows] = await conn.query(
+              `SELECT id, cantidad_propia, cantidad_disponible, estatus_uso, estado_fisico, observaciones, descripcion
+               FROM inventario_oficina
+               WHERE id = ?
+               FOR UPDATE`,
+              [item.articulo_id]
+            );
+            if (!invRows.length) {
+              await conn.rollback();
+              return httpError(res, 400, `No se encontró en inventario el bien: ${item.descripcion}`);
+            }
+            const inv = invRows[0];
+            if (isAssetInSiniestro(inv)) {
+              await conn.rollback();
+              return httpError(res, 409, `El bien "${inv.descripcion}" no está disponible para préstamo por encontrarse en SINIESTRO / ASEGURADORA.`);
+            }
+            const dispActual = Number(inv.cantidad_disponible ?? inv.cantidad_propia ?? 0);
+            if (dispActual < Number(item.cantidad)) {
+              await conn.rollback();
+              return httpError(res, 400, `La cantidad solicitada (${item.cantidad}) para "${item.descripcion}" supera la disponibilidad actual (${dispActual}).`);
+            }
+            const nuevaDisp = Math.max(0, dispActual - Number(item.cantidad));
+            const nuevoEstatus = nuevaDisp === 0 ? "PRESTADO" : inv.estatus_uso;
+            await conn.query(
+              `UPDATE inventario_oficina
+               SET cantidad_disponible = ?,
+                   cantidad_prestada_enviada = cantidad_prestada_enviada + ?,
+                   estatus_uso = ?
+               WHERE id = ?`,
+              [nuevaDisp, item.cantidad, nuevoEstatus, item.articulo_id]
+            );
           }
-          if (Number(almRow.STOCK || 0) < Number(item.cantidad)) {
-            await conn.rollback();
-            return httpError(res, 400, `La cantidad solicitada para "${item.descripcion}" supera la disponibilidad actual.`);
-          }
-          await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK - ? WHERE ID = ?`, [item.cantidad, almRow.ID]);
-          await logMovimiento(conn, {
-            tipo: "SALIDA",
-            clave: almRow.CLAVE,
-            cantidad: item.cantidad,
-            responsable: req.user?.username || "web",
-            destino: "VALE_PRESTAMO",
-            referencia: vale.folio,
-            observaciones: `Préstamo operativo: ${vale.operativo_nombre}`,
-          });
-        }
-        await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
-      } else {
-        for (const item of detalles) {
-          if (!item.articulo_id) continue;
-          const [invRows] = await conn.query(
-            `SELECT id, cantidad_propia, estatus_uso, descripcion FROM inventario_oficina WHERE id = ? AND (oficina_id = 1 OR es_bodega_delegacion = 1) FOR UPDATE`,
-            [item.articulo_id]
-          );
-          if (!invRows.length) {
-            await conn.rollback();
-            return httpError(res, 400, `No se encontró en inventario el bien: ${item.descripcion}`);
-          }
-          const inv = invRows[0];
-          if (Number(inv.cantidad_propia || 0) < Number(item.cantidad)) {
-            await conn.rollback();
-            return httpError(res, 400, `La cantidad solicitada para "${item.descripcion}" supera la disponibilidad actual.`);
-          }
-          const nuevaCant = Number(inv.cantidad_propia) - Number(item.cantidad);
-          const nuevoEstatus = nuevaCant === 0 ? "PRESTADO" : inv.estatus_uso;
-          await conn.query(
-            `UPDATE inventario_oficina
-             SET cantidad_propia = ?,
-                 cantidad_disponible = ?,
-                 cantidad_prestada_enviada = cantidad_prestada_enviada + ?,
-                 estatus_uso = ?
-             WHERE id = ?`,
-            [nuevaCant, nuevaCant, item.cantidad, nuevoEstatus, item.articulo_id]
-          );
         }
       }
 
       const [[rubroInfo]] = await conn.query(`SELECT encargado_nombre FROM rubros_inventario WHERE id = ?`, [vale.rubro_id]);
-      const encargadoEntrega = rubroInfo?.encargado_nombre || req.user?.nombre_completo || req.user?.username;
+      const encargadoEntrega = Number(vale.rubro_id) === 4
+        ? "Luis Eduardo Mayoral Geraldo"
+        : (rubroInfo?.encargado_nombre || req.user?.nombre_completo || req.user?.username);
 
       await conn.query(
         `UPDATE vales_prestamo
@@ -8018,10 +11907,12 @@ app.post("/api/vales-prestamo/:id/autorizar", authRequired, async (req, res) => 
   } catch (e) {
     return httpError(res, 500, e.message);
   }
-});
+}
+app.post("/api/vales-prestamo/:id/autorizar", authRequired, handleAutorizarValePrestamo);
+app.put("/api/vales-prestamo/:id/autorizar", authRequired, handleAutorizarValePrestamo);
 
-// 6. Registrar devolución de préstamo (reincorpora stock)
-app.post("/api/vales-prestamo/:id/devolver", authRequired, async (req, res) => {
+// 6. Registrar devolución de préstamo (reincorpora stock / tabletas, soporta POST y PUT)
+async function handleDevolverValePrestamo(req, res) {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return httpError(res, 400, "ID inválido");
@@ -8066,7 +11957,10 @@ app.post("/api/vales-prestamo/:id/devolver", authRequired, async (req, res) => {
         [id]
       );
 
-      // Reincorporar stock según rubro
+      const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
+      const esValePrueba = Number(vale.es_prueba || 0) === 1 || modoPruebaGlobal;
+
+      // Reincorporar stock según rubro (si es vale de prueba, solo actualizar estado_devolucion en vales_prestamo_detalle sin tocar inventarios)
       if (vale.rubro_id === 1) {
         for (const item of detalles) {
           const ret = itemMap.get(Number(item.id)) || {};
@@ -8078,12 +11972,10 @@ app.post("/api/vales-prestamo/:id/devolver", authRequired, async (req, res) => {
             [estDev, obsDev, item.id]
           );
 
-          if (estDev !== "NO DEVUELTO" && estDev !== "FALTANTE") {
-            let artId = item.articulo_id;
-            if (artId) {
-              await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK + ? WHERE ID = ?`, [item.cantidad, artId]);
-            } else if (item.clave) {
-              await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK + ? WHERE CLAVE = ?`, [item.cantidad, item.clave]);
+          if (!esValePrueba && estDev !== "NO DEVUELTO" && estDev !== "FALTANTE") {
+            const almRowDev = await resolveAlmacenRowStrict(conn, { articulo_id: item.articulo_id, clave: item.clave });
+            if (almRowDev) {
+              await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK + ? WHERE ID = ?`, [item.cantidad, almRowDev.ID]);
             }
             await logMovimiento(conn, {
               tipo: "ENTRADA",
@@ -8096,7 +11988,65 @@ app.post("/api/vales-prestamo/:id/devolver", authRequired, async (req, res) => {
             });
           }
         }
-        await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
+        if (!esValePrueba) {
+          await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
+        }
+      } else if (Number(vale.rubro_id) === 4) {
+        const actor = req?.user?.username || req?.user?.nombre || "SISTEMA";
+        const obsGeneral = String(b.observaciones_devolucion || "").trim() || null;
+        for (const item of detalles) {
+          const ret = itemMap.get(Number(item.id)) || {};
+          const estDev = String(ret.estado_devolucion || item.estado_devolucion || "BUEN ESTADO").trim().toUpperCase();
+          const obsDev = ret.observaciones !== undefined ? (String(ret.observaciones || "").trim() || null) : item.observaciones;
+          const devFlag = (estDev !== "NO DEVUELTO" && estDev !== "FALTANTE") ? 1 : 0;
+
+          await conn.query(
+            `UPDATE vales_prestamo_detalle
+             SET estado_devolucion = ?, observaciones = ?, devuelto = ?, cantidad_devuelta = ?, fecha_devolucion = NOW()
+             WHERE id = ?`,
+            [estDev, obsDev, devFlag, devFlag ? Number(item.cantidad || 1) : 0, item.id]
+          );
+
+          const tabId = Number(item.tableta_id || item.articulo_id || 0);
+          if (!esValePrueba && tabId && devFlag) {
+            const [[tabRow]] = await conn.query(
+              `SELECT id, no_resguardo, imei, numero_serie, estatus_fisico, observaciones FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+              [tabId]
+            );
+            if (tabRow) {
+              let mappedFisico = null;
+              if (estDev === "CON DAÑOS" || estDev === "DAÑADO" || estDev === "MALO") mappedFisico = "DAÑADO";
+              else if (estDev === "INCOMPLETO") mappedFisico = "INCOMPLETO";
+              else if (estDev === "REGULAR") mappedFisico = "REGULAR";
+              else if (estDev === "BUEN ESTADO" || estDev === "BUENO") mappedFisico = "BUENO";
+
+              const obsTab = obsDev || obsGeneral || null;
+              await conn.query(
+                `UPDATE inventario_tabletas
+                 SET estado_asignacion = 'DISPONIBLE',
+                     region = 'LA PAZ',
+                     oficina_programa = 'Delegación La Paz',
+                     nombre_resguardante = '',
+                     estatus_fisico = COALESCE(?, estatus_fisico),
+                     observaciones = CASE WHEN ? IS NOT NULL AND TRIM(?) <> '' THEN ? ELSE observaciones END
+                 WHERE id = ?`,
+                [mappedFisico, obsTab, obsTab, obsTab, tabId]
+              );
+              await conn.query(
+                `INSERT INTO bitacora_tabletas (tableta_id, no_resguardo, imei, numero_serie, usuario, accion, detalles)
+                 VALUES (?, ?, ?, ?, ?, 'REINTEGRO_PROVISIONAL', ?)`,
+                [
+                  tabRow.id,
+                  tabRow.no_resguardo,
+                  tabRow.imei || null,
+                  tabRow.numero_serie || null,
+                  String(actor).slice(0, 80),
+                  `Devolución registrada en Vale Provisional ${vale.folio} (${estDev}). Reintegrada a DISPONIBLE.${obsTab ? ` Obs: ${obsTab}` : ""}`,
+                ]
+              );
+            }
+          }
+        }
       } else {
         for (const item of detalles) {
           const ret = itemMap.get(Number(item.id)) || {};
@@ -8108,9 +12058,16 @@ app.post("/api/vales-prestamo/:id/devolver", authRequired, async (req, res) => {
             [estDev, obsDev, item.id]
           );
 
-          if (item.articulo_id && estDev !== "NO DEVUELTO" && estDev !== "FALTANTE") {
-            const [invCur] = await conn.query(`SELECT cantidad_propia FROM inventario_oficina WHERE id = ? FOR UPDATE`, [item.articulo_id]);
-            const nuevaCantDev = Number(invCur[0]?.cantidad_propia || 0) + Number(item.cantidad || 0);
+          if (!esValePrueba && item.articulo_id && estDev !== "NO DEVUELTO" && estDev !== "FALTANTE") {
+            const [invCur] = await conn.query(
+              `SELECT cantidad_propia, cantidad_disponible, cantidad_prestada_enviada FROM inventario_oficina WHERE id = ? FOR UPDATE`,
+              [item.articulo_id]
+            );
+            const cantPropiaActual = Number(invCur[0]?.cantidad_propia || 0);
+            const dispActual = Number(invCur[0]?.cantidad_disponible ?? cantPropiaActual);
+            const cantDev = Number(item.cantidad || 0);
+            const nuevaPropia = cantPropiaActual;
+            const nuevaDisp = Math.min(cantPropiaActual, dispActual + cantDev);
             await conn.query(
               `UPDATE inventario_oficina
                SET cantidad_propia = ?,
@@ -8119,14 +12076,16 @@ app.post("/api/vales-prestamo/:id/devolver", authRequired, async (req, res) => {
                    estatus_uso = 'ACTIVO',
                    estado_fisico = CASE WHEN ? = 'BUEN ESTADO' THEN 'BUENO' WHEN ? = 'REGULAR' THEN 'REGULAR' WHEN ? = 'CON DAÑOS' THEN 'MALO' ELSE estado_fisico END
                WHERE id = ?`,
-              [nuevaCantDev, nuevaCantDev, item.cantidad, estDev, estDev, estDev, item.articulo_id]
+              [nuevaPropia, nuevaDisp, cantDev, estDev, estDev, estDev, item.articulo_id]
             );
           }
         }
       }
 
       const [[rubroInfo]] = await conn.query(`SELECT encargado_nombre FROM rubros_inventario WHERE id = ?`, [vale.rubro_id]);
-      const encargadoRecibe = rubroInfo?.encargado_nombre || req.user?.nombre_completo || req.user?.username;
+      const encargadoRecibe = Number(vale.rubro_id) === 4
+        ? "Luis Eduardo Mayoral Geraldo"
+        : (rubroInfo?.encargado_nombre || req.user?.nombre_completo || req.user?.username);
 
       const rawFechaDevReal = b.fecha_devolucion_real ? String(b.fecha_devolucion_real).slice(0, 10) : null;
       const fechaDevRealSQL = rawFechaDevReal ? `${rawFechaDevReal} 12:00:00` : null;
@@ -8175,7 +12134,9 @@ app.post("/api/vales-prestamo/:id/devolver", authRequired, async (req, res) => {
   } catch (e) {
     return httpError(res, 500, e.message);
   }
-});
+}
+app.post("/api/vales-prestamo/:id/devolver", authRequired, handleDevolverValePrestamo);
+app.put("/api/vales-prestamo/:id/devolver", authRequired, handleDevolverValePrestamo);
 
 // 6b. Subir o reemplazar PDF firmado de un Vale de Préstamo (ej. después de ser devuelto)
 app.post("/api/vales-prestamo/:id/subir-pdf-firmado", authRequired, async (req, res) => {
@@ -8249,8 +12210,8 @@ app.get("/api/vales-prestamo/:id/pdf-firmado", authRequired, async (req, res) =>
   }
 });
 
-// 7. Cancelar Vale Provisional
-app.post("/api/vales-prestamo/:id/cancelar", authRequired, async (req, res) => {
+// 7. Cancelar Vale Provisional (soporta POST y PUT)
+async function handleCancelarValePrestamo(req, res) {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return httpError(res, 400, "ID inválido");
@@ -8279,24 +12240,59 @@ app.post("/api/vales-prestamo/:id/cancelar", authRequired, async (req, res) => {
         return httpError(res, 403, "No tienes permisos para cancelar este vale");
       }
 
-      // Reintegrar stock al inventario si estaba en préstamo activo
-      if (vale.estado === "AUTORIZADO_EN_PRESTAMO") {
+      // Reintegrar stock al inventario si estaba en préstamo activo y NO es vale de prueba
+      const modoPruebaGlobal = await isModoPruebaGrupalActivo(conn);
+      const esValePrueba = Number(vale.es_prueba || 0) === 1 || modoPruebaGlobal;
+      if (vale.estado === "AUTORIZADO_EN_PRESTAMO" && !esValePrueba) {
         const [detalles] = await conn.query(`SELECT * FROM vales_prestamo_detalle WHERE vale_id = ?`, [id]);
         if (vale.rubro_id === 1) {
           for (const item of detalles) {
-            if (item.articulo_id) {
-              await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK + ? WHERE ID = ?`, [item.cantidad, item.articulo_id]);
-            } else if (item.clave) {
-              await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK + ? WHERE CLAVE = ?`, [item.cantidad, item.clave]);
+            const almRowCan = await resolveAlmacenRowStrict(conn, { articulo_id: item.articulo_id, clave: item.clave });
+            if (almRowCan) {
+              await conn.query(`UPDATE almacen_dregcivil SET STOCK = STOCK + ? WHERE ID = ?`, [item.cantidad, almRowCan.ID]);
             }
           }
           await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
+        } else if (Number(vale.rubro_id) === 4) {
+          const actor = req?.user?.username || req?.user?.nombre || "SISTEMA";
+          for (const item of detalles) {
+            const tabId = Number(item.tableta_id || item.articulo_id || 0);
+            if (!tabId) continue;
+            const [[tabRow]] = await conn.query(
+              `SELECT id, no_resguardo, imei, numero_serie FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+              [tabId]
+            );
+            if (tabRow) {
+              await conn.query(
+                `UPDATE inventario_tabletas
+                 SET estado_asignacion = 'DISPONIBLE',
+                     region = 'LA PAZ',
+                     oficina_programa = 'Delegación La Paz',
+                     nombre_resguardante = ''
+                 WHERE id = ?`,
+                [tabId]
+              );
+              await conn.query(
+                `INSERT INTO bitacora_tabletas (tableta_id, no_resguardo, imei, numero_serie, usuario, accion, detalles)
+                 VALUES (?, ?, ?, ?, ?, 'REINTEGRO_PROVISIONAL', ?)`,
+                [
+                  tabRow.id,
+                  tabRow.no_resguardo,
+                  tabRow.imei || null,
+                  tabRow.numero_serie || null,
+                  String(actor).slice(0, 80),
+                  `Vale Provisional ${vale.folio} cancelado. Tableta reintegrada automáticamente a DISPONIBLE.`,
+                ]
+              );
+            }
+          }
         } else {
           for (const item of detalles) {
             if (item.articulo_id) {
+              // v42: reintegrar a la disponibilidad del registro exacto (por ID), sin inflar la cantidad propia
               await conn.query(
                 `UPDATE inventario_oficina
-                 SET cantidad_propia = cantidad_propia + ?,
+                 SET cantidad_disponible = LEAST(cantidad_propia, COALESCE(cantidad_disponible, cantidad_propia) + ?),
                      cantidad_prestada_enviada = GREATEST(0, cantidad_prestada_enviada - ?),
                      estatus_uso = 'ACTIVO'
                  WHERE id = ?`,
@@ -8319,7 +12315,9 @@ app.post("/api/vales-prestamo/:id/cancelar", authRequired, async (req, res) => {
   } catch (e) {
     return httpError(res, 500, e.message);
   }
-});
+}
+app.post("/api/vales-prestamo/:id/cancelar", authRequired, handleCancelarValePrestamo);
+app.put("/api/vales-prestamo/:id/cancelar", authRequired, handleCancelarValePrestamo);
 
 // 8. Generar Vale Provisional Oficial en PDF (Exactamente 1 Hoja Carta Vertical)
 app.get("/api/vales-prestamo/:id/pdf", authRequired, async (req, res) => {
@@ -8344,7 +12342,16 @@ app.get("/api/vales-prestamo/:id/pdf", authRequired, async (req, res) => {
     const vale = valeRows[0];
 
     const [detalles] = await poolRead.query(
-      `SELECT * FROM vales_prestamo_detalle WHERE vale_id = ? ORDER BY id ASC`,
+      `SELECT vpd.*,
+              t.no_resguardo AS tab_no_resguardo,
+              t.imei AS tab_imei,
+              t.numero_serie AS tab_numero_serie,
+              t.marca AS tab_marca,
+              t.modelo AS tab_modelo
+       FROM vales_prestamo_detalle vpd
+       LEFT JOIN inventario_tabletas t ON t.id = vpd.tableta_id
+       WHERE vpd.vale_id = ?
+       ORDER BY vpd.id ASC`,
       [id]
     );
 
@@ -8507,13 +12514,14 @@ app.get("/api/vales-prestamo/:id/pdf", authRequired, async (req, res) => {
       leftX, pY, { width: tableWidth, align: "justify", lineGap: 1 }
     );
 
+    const isRubroTabletas = Number(vale.rubro_id) === 4;
     // 5. Tabla de Bienes Prestados (Ancho = 540 pt)
     const tTop = pY + 24;
     const colNoW = 28;
     const colCantW = 38;
-    const colDescW = 224;
-    const colMarcaW = 140;
-    const colEstW = 110;
+    const colDescW = isRubroTabletas ? 190 : 224;
+    const colMarcaW = isRubroTabletas ? 184 : 140;
+    const colEstW = isRubroTabletas ? 100 : 110;
 
     const xNo = leftX;
     const xCant = xNo + colNoW;
@@ -8542,7 +12550,7 @@ app.get("/api/vales-prestamo/:id/pdf", authRequired, async (req, res) => {
     let curY = tTop + thH;
     const minRows = isCuatroFirmas ? 5 : 3;
     const totalRows = Math.max(detalles.length, minRows);
-    const rowH = 15.5;
+    const rowH = isRubroTabletas ? 21 : 15.5;
 
     for (let i = 0; i < totalRows; i++) {
       const it = detalles[i] || null;
@@ -8563,19 +12571,34 @@ app.get("/api/vales-prestamo/:id/pdf", authRequired, async (req, res) => {
 
       if (it) {
         const textY = curY + 4;
-        doc.fillColor("#000000").font("Helvetica").fontSize(7.2);
+        doc.fillColor("#000000").font("Helvetica").fontSize(isRubroTabletas ? 6.6 : 7.2);
         doc.text(String(i + 1), xNo, textY, { width: colNoW, align: "center" });
-        doc.text(String(it.cantidad || 1), xCant, textY, { width: colCantW, align: "center" });
-        doc.text(String(it.descripcion || ""), xDesc + 4, textY, { width: colDescW - 8, lineBreak: false });
+        doc.text(String(isRubroTabletas ? 1 : (it.cantidad || 1)), xCant, textY, { width: colCantW, align: "center" });
 
-        const marcaModSer = [
-          [it.marca, it.modelo].filter(Boolean).join(" "),
-          it.serie ? `S/N: ${it.serie}` : "",
-          it.color ? `(${it.color})` : "",
-        ].filter(Boolean).join(" - ") || "N/A";
-        doc.text(marcaModSer, xMarca + 4, textY, { width: colMarcaW - 8, lineBreak: false });
+        if (isRubroTabletas) {
+          const descTab = it.tab_no_resguardo
+            ? `Tablet Compac - No. de Resguardo #${it.tab_no_resguardo}`
+            : String(it.descripcion || "Tablet Compac");
+          doc.text(descTab, xDesc + 4, textY, { width: colDescW - 8, height: rowH - 5, ellipsis: true });
 
-        doc.text(String(it.estado_salida || "BUEN ESTADO"), xEst, textY, { width: colEstW, align: "center" });
+          const tabMarcaMod = `${it.tab_marca || it.marca || "Compac"} ${it.tab_modelo || it.modelo || "QTab LTE"}`.trim();
+          const marcaModSerTab = (it.tab_imei || it.tab_numero_serie)
+            ? `${tabMarcaMod} | IMEI: ${it.tab_imei || "-"} | Serie: ${it.tab_numero_serie || "-"}`
+            : (it.serie || tabMarcaMod);
+          doc.fontSize(6.2).text(marcaModSerTab, xMarca + 4, curY + 3, { width: colMarcaW - 8, height: rowH - 4, ellipsis: true });
+          doc.fontSize(6.6).text(String(it.estado_salida || "BUENO"), xEst, textY, { width: colEstW, align: "center" });
+        } else {
+          doc.text(String(it.descripcion || ""), xDesc + 4, textY, { width: colDescW - 8, lineBreak: false });
+
+          const marcaModSer = [
+            [it.marca, it.modelo].filter(Boolean).join(" "),
+            it.serie ? `S/N: ${it.serie}` : "",
+            it.color ? `(${it.color})` : "",
+          ].filter(Boolean).join(" - ") || "N/A";
+          doc.text(marcaModSer, xMarca + 4, textY, { width: colMarcaW - 8, lineBreak: false });
+
+          doc.text(String(it.estado_salida || "BUEN ESTADO"), xEst, textY, { width: colEstW, align: "center" });
+        }
       }
 
       curY += rowH;
@@ -8605,18 +12628,39 @@ app.get("/api/vales-prestamo/:id/pdf", authRequired, async (req, res) => {
 
     // 7. Sección de Firmas (4 Firmas en 1 fila vs 4 Cuadros en 2x2 Salida/Regreso)
     const ENCARGADOS_FIRMA_MAP = {
-      1: { nombre: "GABRIEL ADÁN FIOL COLLINS", cargo: "ENCARGADO DE INVENTARIO / RECURSOS MATERIALES" },
+      1: { nombre: "GABRIEL ADÁN FIOL COLLINS", cargo: "ENCARGADO DE ARCHIVOS Y MATERIALES" },
       2: { nombre: "EVELIA CONTRERAS GODÍNEZ", cargo: "ENCARGADA DE PARQUE VEHICULAR / RECURSOS MATERIALES" },
       3: { nombre: "JESÚS SALVADOR PALACIOS MARTÍNEZ", cargo: "ENCARGADO DE MOBILIARIO / RECURSOS MATERIALES" },
-      4: { nombre: "LUIS EDUARDO MAYORAL GERALDO", cargo: "ENCARGADO DE TABLETS Y STARLINKS / RECURSOS MATERIALES" },
-    };
-    const encData = ENCARGADOS_FIRMA_MAP[Number(vale.rubro_id)] || {
-      nombre: (vale.encargado_rubro_nombre || vale.encargado_entrega || "ENCARGADO DE ÁREA").toUpperCase(),
-      cargo: (vale.encargado_rubro_cargo || "ENCARGADO DE RECURSOS MATERIALES").toUpperCase(),
+      4: { nombre: "LUIS EDUARDO MAYORAL GERALDO", cargo: "ENCARGADO DE ALMACÉN" },
     };
 
-    const validaNombre = "JORGE LUIS PATRÓN MURILLO";
-    const validaCargo = "ENCARGADO DE RECURSOS MATERIALES";
+    const fallbackEnc = ENCARGADOS_FIRMA_MAP[Number(vale.rubro_id)] || {
+      nombre: "ENCARGADO DE ÁREA",
+      cargo: "COORDINADOR OPERATIVO DE RECURSOS MATERIALES",
+    };
+
+    const encData = isRubroTabletas
+      ? {
+          nombre: "LUIS EDUARDO MAYORAL GERALDO",
+          cargo: "ENCARGADO DE ALMACÉN",
+        }
+      : {
+          nombre: String(vale.encargado_rubro_nombre || vale.encargado_entrega || fallbackEnc.nombre).toUpperCase(),
+          cargo: String(vale.encargado_rubro_cargo || fallbackEnc.cargo).toUpperCase(),
+        };
+
+    let validaNombre = "JORGE LUIS PATRÓN MURILLO";
+    let validaCargo = "COORDINADOR OPERATIVO DE RECURSOS MATERIALES";
+    const [validaUserRows] = await poolRead.query(
+      `SELECT TRIM(CONCAT_WS(' ', NULLIF(nombre, ''), NULLIF(PRIMER_APELLIDO, ''), NULLIF(SEGUNDO_APELLIDO, ''))) AS nc, cargo
+       FROM usuario
+       WHERE (username IN ('jorge', 'jorgepatron') OR departamento LIKE '%Recursos Materiales%' OR cargo LIKE '%Recursos Materiales%') AND ACTIVO = 1
+       ORDER BY (username = 'jorge') DESC LIMIT 1`
+    ).catch(() => [[]]);
+    if (validaUserRows.length && validaUserRows[0].nc) {
+      validaNombre = validaUserRows[0].nc.toUpperCase();
+      if (validaUserRows[0].cargo) validaCargo = validaUserRows[0].cargo.toUpperCase();
+    }
 
     const recibeNombre = String(vale.recibe_nombre || solNombre || "RESPONSABLE RECEPTOR").toUpperCase();
     const recibeCargo = String(vale.recibe_cargo || solCargo || deptoNombre || "RESPONSABLE / ENLACE RECEPTOR").toUpperCase();
@@ -9469,7 +13513,7 @@ app.post("/api/migracion/reset-vales-y-reestructurar-jesus", authRequired, async
       const totalValesEliminados = Number(countValesRow?.total || 0);
 
       const [valesActivos] = await conn.query(
-        `SELECT * FROM vales_prestamo WHERE estado NOT IN ('DEVUELTO', 'CANCELADO') FOR UPDATE`
+        `SELECT * FROM vales_prestamo WHERE estado NOT IN ('DEVUELTO', 'CANCELADO', 'RECHAZADO') FOR UPDATE`
       );
 
       let totalPiezasReintegradas = 0;
@@ -9703,6 +13747,8 @@ app.post("/api/migracion/reset-vales-y-reestructurar-jesus", authRequired, async
       await conn.query(`ALTER TABLE vales_prestamo_detalle AUTO_INCREMENT = 1`).catch(() => {});
       await conn.query(`ALTER TABLE vales_prestamo AUTO_INCREMENT = 1`).catch(() => {});
 
+      await consolidarBodegaRMJesus(poolOps, { forceResetQuantities: true }).catch(() => {});
+
       return res.json({
         ok: true,
         vales_eliminados: totalValesEliminados,
@@ -9723,6 +13769,29 @@ app.post("/api/migracion/reset-vales-y-reestructurar-jesus", authRequired, async
   } catch (e) {
     console.error("Error en POST /api/migracion/reset-vales-y-reestructurar-jesus:", e);
     return httpError(res, 500, e.message || "Error al ejecutar reset de vales y reestructuración de mobiliario");
+  }
+});
+
+// ============================================================================
+// MIGRACIÓN: CONSOLIDAR, DEDUPLICAR Y ASIGNAR BODEGA GENERAL DE JESÚS A RM
+// ============================================================================
+app.post("/api/migracion/consolidar-bodega-rm-jesus", authRequired, async (req, res) => {
+  try {
+    const uName = normalizeUser(req.user?.username);
+    if (!isAdmin(req) && !["jesus", "rodrigo", "jorge", "jorgepatron"].includes(uName)) {
+      return httpError(res, 403, "No tienes permisos para consolidar la bodega de Mobiliario RM.");
+    }
+    const result = await consolidarBodegaRMJesus(poolOps, { forceResetQuantities: true });
+    if (!result.ok) {
+      return httpError(res, 500, result.error || "Error al consolidar bodega RM de Jesús");
+    }
+    return res.json({
+      ...result,
+      message: `Bodega de Jesús consolidada en RM (Recursos Materiales): ${result.duplicados_eliminados} duplicados eliminados, ${result.referencias_vales_reasignadas} referencias de vales vinculadas. Sillas grises (MOB-001): ${result.sillas_grises_rm?.cantidad_propia ?? 181} propias / ${result.sillas_grises_rm?.cantidad_disponible ?? 171} disponibles.`,
+    });
+  } catch (e) {
+    console.error("Error en POST /api/migracion/consolidar-bodega-rm-jesus:", e);
+    return httpError(res, 500, e.message || "Error al consolidar bodega RM de Jesús");
   }
 });
 
@@ -10191,6 +14260,168 @@ app.post("/api/admin/respaldo-manual", authRequired, async (req, res) => {
 });
 
 // ============================================================================
+// v53: LISTADO Y DESCARGA DE RESPALDOS (EXCLUSIVO ADMINISTRADOR)
+// ============================================================================
+app.get("/api/admin/backups", authRequired, async (req, res) => {
+  try {
+    const rolNorm = String(req.user?.rol || "").trim().toLowerCase();
+    const isUserAdmin = isAdmin(req) || rolNorm === "admin" || String(req.user?.username || "").toLowerCase() === "admin";
+    if (!isUserAdmin) {
+      return httpError(res, 403, "Acceso exclusivo para el Administrador.");
+    }
+
+    const backupDir = path.join(__dirname, "respaldos_sistema");
+    const dbDir = path.join(backupDir, "base_de_datos");
+
+    const downloadFile = req.query.download || req.query.file;
+    if (downloadFile) {
+      const safeName = path.basename(String(downloadFile));
+      let targetPath = path.join(backupDir, safeName);
+      if (!fs.existsSync(targetPath)) {
+        targetPath = path.join(dbDir, safeName);
+      }
+      if (!fs.existsSync(targetPath)) {
+        return httpError(res, 404, "El archivo de respaldo solicitado no existe.");
+      }
+      return res.download(targetPath, safeName);
+    }
+
+    const fileList = [];
+    const scanDir = (dirPath, subfolder = "") => {
+      if (!fs.existsSync(dirPath)) return;
+      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      for (const ent of entries) {
+        if (ent.isFile() && (ent.name.endsWith(".json") || ent.name.endsWith(".sql"))) {
+          const fullPath = path.join(dirPath, ent.name);
+          const stat = fs.statSync(fullPath);
+          fileList.push({
+            nombre: ent.name,
+            subcarpeta: subfolder,
+            ruta_relativa: subfolder ? `${subfolder}/${ent.name}` : ent.name,
+            tamano_bytes: stat.size,
+            tamano_kb: (stat.size / 1024).toFixed(2),
+            fecha_modificacion: stat.mtime,
+            es_cambio_version: ent.name.startsWith("backup_v")
+          });
+        }
+      }
+    };
+
+    scanDir(backupDir, "");
+    scanDir(dbDir, "base_de_datos");
+
+    fileList.sort((a, b) => new Date(b.fecha_modificacion) - new Date(a.fecha_modificacion));
+
+    return res.json({
+      ok: true,
+      total: fileList.length,
+      backups: fileList
+    });
+  } catch (err) {
+    return httpError(res, 500, err?.message || "Error al listar respaldos");
+  }
+});
+
+// ============================================================================
+// v53: RESTAURACIÓN DE BASE DE DATOS DESDE RESPALDO JSON (EXCLUSIVO ADMINISTRADOR)
+// ============================================================================
+app.post("/api/admin/backups/restore", authRequired, async (req, res) => {
+  try {
+    const rolNorm = String(req.user?.rol || "").trim().toLowerCase();
+    const isUserAdmin = isAdmin(req) || rolNorm === "admin" || String(req.user?.username || "").toLowerCase() === "admin";
+    if (!isUserAdmin) {
+      return httpError(res, 403, "Acceso exclusivo para el Administrador.");
+    }
+
+    const body = req.body || {};
+    const filename = String(body.filename || body.archivo || "").trim();
+    if (!filename) {
+      return httpError(res, 400, "Nombre de archivo de respaldo requerido (filename).");
+    }
+
+    const safeName = path.basename(filename);
+    const backupDir = path.join(__dirname, "respaldos_sistema");
+    const dbDir = path.join(backupDir, "base_de_datos");
+    let targetPath = path.join(backupDir, safeName);
+    if (!fs.existsSync(targetPath)) {
+      targetPath = path.join(dbDir, safeName);
+    }
+    if (!fs.existsSync(targetPath) || !safeName.endsWith(".json")) {
+      return httpError(res, 404, "El archivo de respaldo JSON especificado no existe.");
+    }
+
+    const rawContent = fs.readFileSync(targetPath, "utf8");
+    let parsed;
+    try {
+      parsed = JSON.parse(rawContent);
+    } catch (parseErr) {
+      return httpError(res, 400, `El archivo de respaldo no es un JSON válido: ${parseErr.message}`);
+    }
+
+    const tables = parsed.tables || parsed.data || null;
+    if (!tables || typeof tables !== "object") {
+      return httpError(res, 400, "El formato del respaldo es inválido (no contiene el objeto 'tables').");
+    }
+
+    const [dbTables] = await poolRead.query(
+      `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?`,
+      [DB_NAME]
+    );
+    const existingTableSet = new Set(dbTables.map((t) => String(t.TABLE_NAME || "").toLowerCase()));
+
+    const conn = await poolOps.getConnection();
+    const restoredSummary = {};
+    try {
+      await conn.query("SET FOREIGN_KEY_CHECKS = 0;");
+
+      for (const [tbl, rows] of Object.entries(tables)) {
+        if (!existingTableSet.has(tbl.toLowerCase())) continue;
+        if (!Array.isArray(rows) || rows.length === 0) continue;
+
+        await conn.query(`DELETE FROM ${qi(tbl)}`);
+
+        const cols = Object.keys(rows[0]);
+        const placeholders = cols.map(() => "?").join(", ");
+        const insertSql = `INSERT INTO ${qi(tbl)} (${cols.map(qi).join(", ")}) VALUES (${placeholders})`;
+
+        for (const r of rows) {
+          const vals = cols.map((c) => {
+            const v = r[c];
+            if (v === null || v === undefined) return null;
+            if (typeof v === "object" && !(v instanceof Date) && !Buffer.isBuffer(v)) {
+              return JSON.stringify(v);
+            }
+            return v;
+          });
+          await conn.query(insertSql, vals);
+        }
+        restoredSummary[tbl] = rows.length;
+      }
+
+      await conn.query("SET FOREIGN_KEY_CHECKS = 1;");
+    } finally {
+      conn.release();
+    }
+
+    await registrarBitacora(
+      req,
+      "SISTEMA",
+      "RESTAURAR_RESPALDO",
+      `Restauración de emergencia ejecutada desde ${safeName}. Tablas restauradas: ${Object.keys(restoredSummary).join(", ")}.`
+    );
+
+    return res.json({
+      ok: true,
+      message: `Base de datos restaurada exitosamente desde ${safeName}.`,
+      archivo: safeName,
+      tablas_restauradas: restoredSummary
+    });
+  } catch (err) {
+    return httpError(res, 500, err?.message || "Error al restaurar respaldo");
+  }
+});
+
+// ============================================================================
 // PANEL DE INVENTARIO ESTATAL CONSOLIDADO (Exclusivo Rodrigo Molina, Jorge Patrón y Admin)
 // ============================================================================
 app.get("/api/inventario-estatal/consolidado", authRequired, async (req, res) => {
@@ -10222,12 +14453,22 @@ app.get("/api/inventario-estatal/consolidado", authRequired, async (req, res) =>
       FROM almacen_dregcivil
     `);
 
+    const [[kpiTabletas]] = await poolRead.query(`
+      SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN estado_asignacion IN ('EN_RESGUARDO', 'ASIGNADA') THEN 1 ELSE 0 END), 0) AS en_resguardo,
+        COALESCE(SUM(CASE WHEN estado_asignacion = 'DEVOLUCION_PENDIENTE' THEN 1 ELSE 0 END), 0) AS devolucion_pendiente,
+        COALESCE(SUM(CASE WHEN estado_asignacion = 'DISPONIBLE' THEN 1 ELSE 0 END), 0) AS disponibles,
+        COALESCE(SUM(CASE WHEN estado_asignacion = 'EN_PRESTAMO_PROVISIONAL' THEN 1 ELSE 0 END), 0) AS en_prestamo_provisional
+      FROM inventario_tabletas
+    `).catch(() => [[{ total: 0, en_resguardo: 0, devolucion_pendiente: 0, disponibles: 0, en_prestamo_provisional: 0 }]]);
+
     const [regionesDistribucion] = await poolRead.query(`
       SELECT 
         r.id AS region_id,
         r.nombre AS region_nombre,
         COUNT(DISTINCT o.id) AS total_oficinas,
-        COALESCE(SUM(io.cantidad_propia), 0) AS total_bienes
+        COALESCE(SUM(CASE WHEN io.rubro_id <> 4 THEN io.cantidad_propia ELSE 0 END), 0) AS total_bienes
       FROM regiones r
       LEFT JOIN oficinas_regionales o ON o.region_id = r.id
       LEFT JOIN inventario_oficina io ON io.oficina_id = o.id
@@ -10235,74 +14476,1562 @@ app.get("/api/inventario-estatal/consolidado", authRequired, async (req, res) =>
       ORDER BY r.id ASC
     `);
 
-    // 2. Consulta de Activos Consolidados con Filtros
-    let whereRegional = "WHERE 1=1";
-    const paramsRegional = [];
-    if (regId > 0) {
-      whereRegional += " AND o.region_id = ?";
-      paramsRegional.push(regId);
-    }
-    if (rubId > 0) {
-      whereRegional += " AND io.rubro_id = ?";
-      paramsRegional.push(rubId);
-    }
-    if (search) {
-      whereRegional += " AND (io.clave_bien LIKE ? OR io.descripcion LIKE ? OR io.marca_modelo LIKE ? OR io.numero_serie_placas LIKE ? OR o.nombre LIKE ? OR r.nombre LIKE ?)";
-      const lk = `%${search}%`;
-      paramsRegional.push(lk, lk, lk, lk, lk, lk);
+    const [tabletasRowsAll] = await poolRead.query(`
+      SELECT id, no_resguardo, imei, numero_serie, no_caja, marca, modelo, descripcion,
+             region, oficina_programa, nombre_resguardante, cargo_resguardante,
+             estatus_fisico, estado_asignacion, observaciones
+      FROM inventario_tabletas
+      ORDER BY no_resguardo ASC
+    `).catch(() => [[]]);
+
+    const normRegKey = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim();
+    const matchRegionForTableta = (regStr) => {
+      const k = normRegKey(regStr);
+      if (!k) return null;
+      return regionesDistribucion.find((rd) => {
+        const rn = normRegKey(rd.region_nombre);
+        if (!rn) return false;
+        if (rn.includes(k) || k.includes(rn)) return true;
+        if (k === "LORETO" && rn.includes("COMONDU")) return true;
+        return false;
+      }) || null;
+    };
+
+    for (const t of tabletasRowsAll) {
+      const mReg = matchRegionForTableta(t.region);
+      if (mReg) {
+        mReg.total_bienes = Number(mReg.total_bienes || 0) + 1;
+      }
     }
 
-    const hasDetCol = await ensureDetallesVehiculoCol();
-    const [activosRows] = await poolRead.query(`
-      SELECT 
-        io.id,
-        io.clave_bien,
-        io.descripcion,
-        io.marca_modelo,
-        io.numero_serie_placas,
-        io.unidad,
-        io.cantidad_propia,
-        io.estado_fisico,
-        io.estatus_uso,
-        io.observaciones,
-        io.origen_adquisicion,
-        ${hasDetCol ? "io.detalles_vehiculo" : "NULL AS detalles_vehiculo"},
-        r.id AS region_id,
-        r.nombre AS region_nombre,
-        o.id AS oficina_id,
-        o.nombre AS oficina_nombre,
-        o.municipio,
-        ru.id AS rubro_id,
-        ru.codigo AS rubro_codigo,
-        ru.nombre_rubro,
-        ru.encargado_nombre
-      FROM inventario_oficina io
-      INNER JOIN oficinas_regionales o ON o.id = io.oficina_id
-      INNER JOIN regiones r ON r.id = o.region_id
-      LEFT JOIN rubros_inventario ru ON ru.id = io.rubro_id
-      ${whereRegional}
-      ORDER BY r.id ASC, o.nombre ASC, io.clave_bien ASC
-    `, paramsRegional);
+    // 2. Consulta de Activos Consolidados con Filtros
+    let activosRows = [];
+    if (rubId !== 4) {
+      let whereRegional = "WHERE io.rubro_id <> 4";
+      const paramsRegional = [];
+      if (regId > 0) {
+        whereRegional += " AND o.region_id = ?";
+        paramsRegional.push(regId);
+      }
+      if (rubId > 0) {
+        whereRegional += " AND io.rubro_id = ?";
+        paramsRegional.push(rubId);
+      }
+      if (search) {
+        whereRegional += " AND (io.clave_bien LIKE ? OR io.descripcion LIKE ? OR io.marca_modelo LIKE ? OR io.numero_serie_placas LIKE ? OR o.nombre LIKE ? OR r.nombre LIKE ?)";
+        const lk = `%${search}%`;
+        paramsRegional.push(lk, lk, lk, lk, lk, lk);
+      }
+
+      const hasDetCol = await ensureDetallesVehiculoCol();
+      const [regRows] = await poolRead.query(`
+        SELECT 
+          io.id,
+          io.clave_bien,
+          io.descripcion,
+          io.marca_modelo,
+          io.numero_serie_placas,
+          io.unidad,
+          io.cantidad_propia,
+          io.estado_fisico,
+          io.estatus_uso,
+          io.observaciones,
+          io.origen_adquisicion,
+          ${hasDetCol ? "io.detalles_vehiculo" : "NULL AS detalles_vehiculo"},
+          r.id AS region_id,
+          r.nombre AS region_nombre,
+          o.id AS oficina_id,
+          o.nombre AS oficina_nombre,
+          o.municipio,
+          ru.id AS rubro_id,
+          ru.codigo AS rubro_codigo,
+          ru.nombre_rubro,
+          ru.encargado_nombre
+        FROM inventario_oficina io
+        INNER JOIN oficinas_regionales o ON o.id = io.oficina_id
+        INNER JOIN regiones r ON r.id = o.region_id
+        LEFT JOIN rubros_inventario ru ON ru.id = io.rubro_id
+        ${whereRegional}
+        ORDER BY r.id ASC, o.nombre ASC, io.clave_bien ASC
+      `, paramsRegional);
+      activosRows = regRows.map((r) => ({
+        ...r,
+        detalles_vehiculo: parseDetallesVehiculo(r.detalles_vehiculo)
+      }));
+    }
+
+    if (!rubId || rubId === 4) {
+      const searchLower = search.toLowerCase();
+      for (const t of tabletasRowsAll) {
+        const mReg = matchRegionForTableta(t.region);
+        const tabRegionId = mReg ? Number(mReg.region_id) : 0;
+        if (regId > 0 && tabRegionId !== regId) continue;
+
+        const mapped = {
+          id: `tab-${t.id}`,
+          tableta_id: t.id,
+          es_tableta: true,
+          clave_bien: `TAB-${String(t.no_resguardo).padStart(3, "0")}`,
+          no_resguardo: t.no_resguardo,
+          descripcion: `${t.descripcion || "Tablet Compac"} (Resguardo #${t.no_resguardo})${t.nombre_resguardante ? ` — ${t.nombre_resguardante}` : ""}`,
+          marca_modelo: `${t.marca || "Compac"} ${t.modelo || "QTab LTE"}`.trim(),
+          numero_serie_placas: `IMEI: ${t.imei || "-"} | Serie: ${t.numero_serie || "-"}`,
+          imei: t.imei || "",
+          numero_serie: t.numero_serie || "",
+          unidad: "PIEZA",
+          cantidad_propia: 1,
+          estado_fisico: t.estatus_fisico || "BUENO",
+          estatus_uso: t.estado_asignacion === "DISPONIBLE" ? "DISPONIBLE" : (t.estado_asignacion === "DEVOLUCION_PENDIENTE" ? "EN DEVOLUCIÓN" : "ASIGNADA"),
+          estado_asignacion: t.estado_asignacion || "ASIGNADA",
+          observaciones: t.observaciones || "",
+          origen_adquisicion: "PATRIMONIO TABLETAS",
+          detalles_vehiculo: null,
+          region_id: tabRegionId,
+          region_nombre: t.region || "SIN DEFINIR",
+          oficina_id: 0,
+          oficina_nombre: t.oficina_programa || "Sin definir",
+          municipio: t.region || "",
+          rubro_id: 4,
+          rubro_codigo: "TABLETAS",
+          nombre_rubro: "Tabletas Digitales (Luis Mayoral)",
+          encargado_nombre: "Luis Eduardo Mayoral Geraldo",
+          nombre_resguardante: t.nombre_resguardante || "Sin asignar"
+        };
+
+        if (searchLower) {
+          const hay = [
+            mapped.clave_bien,
+            mapped.no_resguardo,
+            mapped.descripcion,
+            mapped.marca_modelo,
+            mapped.numero_serie_placas,
+            mapped.imei,
+            mapped.numero_serie,
+            mapped.region_nombre,
+            mapped.oficina_nombre,
+            mapped.nombre_resguardante
+          ].join(" ").toLowerCase();
+          if (!hay.includes(searchLower)) continue;
+        }
+        activosRows.push(mapped);
+      }
+    }
+
+    const totalTablets = Number(kpiTabletas?.total || 0);
+    const totalBienesSinRubro4 = Number(kpiRegional?.total_bienes || 0) - Number(kpiRegional?.rubro_tablets || 0);
 
     return res.json({
       ok: true,
       kpis: {
-        total_bienes_estatales: Number(kpiRegional?.total_bienes || 0),
+        total_bienes_estatales: totalBienesSinRubro4 + totalTablets,
         total_vehicular: Number(kpiRegional?.rubro_vehicular || 0),
         total_mobiliario: Number(kpiRegional?.rubro_mobiliario || 0),
-        total_tablets: Number(kpiRegional?.rubro_tablets || 0),
+        total_tablets: totalTablets,
+        tabletas_resumen: {
+          total: totalTablets,
+          en_resguardo: Number(kpiTabletas?.en_resguardo || 0),
+          devolucion_pendiente: Number(kpiTabletas?.devolucion_pendiente || 0),
+          disponibles: Number(kpiTabletas?.disponibles || 0)
+        },
         total_archivo_materiales: Number(kpiRegional?.rubro_archivo || 0),
         almacen_general_stock: Number(kpiAlmacen?.total_stock_almacen || 0),
         almacen_general_articulos: Number(kpiAlmacen?.total_articulos_almacen || 0),
         distribucion_regiones: regionesDistribucion
       },
-      data: activosRows.map(r => ({
-        ...r,
-        detalles_vehiculo: parseDetallesVehiculo(r.detalles_vehiculo)
-      }))
+      data: activosRows
     });
   } catch (e) {
     return httpError(res, 500, e.message);
+  }
+});
+
+// ============================================================================
+// v56: MÓDULO DE TABLETAS DIGITALES (LUIS EDUARDO MAYORAL GERALDO)
+// Semilla automática (276 tabletas), Devolución, Resguardo Personal y PDFs
+// ============================================================================
+const RED_RESGUARDOS_TABLETAS = new Set([
+  253, 254, 255, 256, 257, 258, 259, 260, 264, 265, 266, 267, 268, 269, 270, 271, 274,
+]);
+
+function extractExcelCellText(v) {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "object") {
+    if (Array.isArray(v.richText)) {
+      return v.richText.map((t) => String(t?.text || "")).join("").trim();
+    }
+    if (v.result !== undefined && v.result !== null) return String(v.result).trim();
+    if (v.text !== undefined && v.text !== null) return String(v.text).trim();
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+  }
+  return String(v).trim();
+}
+
+function mapExcelRegionProgramaTableta(rawRegionProg) {
+  const key = String(rawRegionProg || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+  if (key === "DELEGACION") return { region: "LA PAZ", oficina_programa: "Delegación La Paz" };
+  if (key === "LA PAZ") return { region: "LA PAZ", oficina_programa: "Región La Paz" };
+  if (key === "PCD") return { region: "LA PAZ", oficina_programa: "PCD - Programa de Discapacidad" };
+  if (key === "PAM") return { region: "LA PAZ", oficina_programa: "PAM - Programa Adulto Mayor" };
+  if (key === "LOS CABOS") return { region: "LOS CABOS", oficina_programa: "Región Los Cabos" };
+  if (key === "COMONDU") return { region: "COMONDU", oficina_programa: "Región Comondú" };
+  if (key === "MULEGE") return { region: "MULEGE", oficina_programa: "Región Mulegé" };
+  return { region: "LA PAZ", oficina_programa: "Delegación La Paz" };
+}
+
+function normalizeTabletaRegionInput(rawRegion, rawOficina) {
+  const r = String(rawRegion || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+  const ofi = String(rawOficina || "").trim();
+  let region = "LA PAZ";
+  if (r.includes("CABOS")) region = "LOS CABOS";
+  else if (r.includes("COMONDU") || r.includes("LORETO")) region = "COMONDU";
+  else if (r.includes("MULEGE")) region = "MULEGE";
+  else if (r.includes("PAZ") || r === "DELEGACION" || r === "PCD" || r === "PAM") region = "LA PAZ";
+
+  let oficina_programa = ofi;
+  if (!oficina_programa) {
+    if (region === "LOS CABOS") oficina_programa = "Región Los Cabos";
+    else if (region === "COMONDU") oficina_programa = "Región Comondú";
+    else if (region === "MULEGE") oficina_programa = "Región Mulegé";
+    else oficina_programa = "Delegación La Paz";
+  }
+  return { region, oficina_programa };
+}
+
+async function seedInventarioTabletasIfEmpty() {
+  if (!poolOps || !poolRead) return;
+  const [[cntRow]] = await poolRead
+    .query(`SELECT COUNT(*) AS total FROM inventario_tabletas`)
+    .catch(() => [[{ total: 1 }]]);
+  if (Number(cntRow?.total || 0) > 0) return;
+
+  const candidatePaths = [
+    path.join(__dirname, "Registro_Tabletas_Bienestar (2).xlsx"),
+    path.join(__dirname, "Tabletas_inventario.xlsx"),
+    "C:/Users/danie/.gemini/antigravity/brain/e63b32a5-942f-4d30-9d7d-1182c0ddbc46/.user_uploaded/media_1794538721890_50f732e9.xlsx",
+  ];
+  const excelPath = candidatePaths.find((p) => fs.existsSync(p));
+  if (!excelPath) {
+    console.warn("[WARN] seedInventarioTabletasIfEmpty: No se encontró el archivo Excel fuente de tabletas.");
+    return;
+  }
+
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(excelPath);
+  const ws = wb.getWorksheet("BCS") || wb.worksheets[0];
+  if (!ws) return;
+
+  const parsedRows = [];
+  ws.eachRow((row, rowNumber) => {
+    if (rowNumber < 4) return;
+    const noResgRaw = extractExcelCellText(row.getCell(3).value);
+    const noResguardo = parseInt(noResgRaw, 10);
+    if (!Number.isInteger(noResguardo) || noResguardo <= 0) return;
+
+    const rawRegionProg = extractExcelCellText(row.getCell(2).value).toUpperCase();
+    const rawNombre = extractExcelCellText(row.getCell(4).value);
+    const noCaja = extractExcelCellText(row.getCell(5).value);
+    const modelo = extractExcelCellText(row.getCell(6).value) || "QTab LTE";
+    const descripcion = extractExcelCellText(row.getCell(7).value) || "Tablet Compac";
+    const rawMarca = extractExcelCellText(row.getCell(8).value) || "Compac";
+    const imei = extractExcelCellText(row.getCell(9).value);
+    const numeroSerie = extractExcelCellText(row.getCell(10).value);
+    const rawObs = extractExcelCellText(row.getCell(11).value);
+
+    let marca = rawMarca;
+    let estatusFisico = "BUENO";
+    let tieneCargador = 1;
+    let tieneCaja = 1;
+    let observaciones = rawObs;
+
+    if (/da[ñn]ad/i.test(rawMarca)) {
+      marca = "Compac";
+      estatusFisico = "DAÑADO";
+      if (!observaciones) observaciones = "DAÑADA";
+      else if (!/da[ñn]ad/i.test(observaciones)) observaciones = `${observaciones} — DAÑADA`;
+    }
+
+    const obsUp = observaciones.toUpperCase();
+    if (obsUp.includes("NO TIENE CAJA NI CARGADOR")) {
+      tieneCaja = 0;
+      tieneCargador = 0;
+      estatusFisico = "INCOMPLETO";
+    } else if (obsUp.includes("SIN CARGADOR") || obsUp.includes("NO CARGADOR")) {
+      tieneCargador = 0;
+      if (estatusFisico === "BUENO") estatusFisico = "INCOMPLETO";
+    }
+    if (
+      obsUp.includes("DAÑAD") ||
+      obsUp.includes("DANAD") ||
+      obsUp.includes("NO SIRVE") ||
+      obsUp.includes("ESTRELLAD") ||
+      obsUp.includes("NO FUNCIONA")
+    ) {
+      estatusFisico = "DAÑADO";
+    }
+
+    const isRedRow = RED_RESGUARDOS_TABLETAS.has(noResguardo);
+    let region = "LA PAZ";
+    let oficinaPrograma = "Delegación La Paz";
+    let nombreResguardante = rawNombre;
+    let sinResguardoPrevio = 0;
+    let estadoAsignacion = "EN_RESGUARDO";
+
+    if (isRedRow) {
+      estadoAsignacion = "DISPONIBLE";
+      sinResguardoPrevio = 1;
+      region = "LA PAZ";
+      oficinaPrograma = "Delegación La Paz";
+      nombreResguardante = "";
+      const refExcel = `Excel sin resguardo (${rawRegionProg || "N/D"}${rawNombre ? ` - ${rawNombre}` : ""})`;
+      observaciones = observaciones ? `${observaciones} | ${refExcel}` : refExcel;
+    } else {
+      const mapped = mapExcelRegionProgramaTableta(rawRegionProg);
+      region = mapped.region;
+      oficinaPrograma = mapped.oficina_programa;
+    }
+
+    parsedRows.push([
+      noResguardo,
+      imei || `SIN-IMEI-${noResguardo}`,
+      numeroSerie || `SIN-SERIE-${noResguardo}`,
+      noCaja || null,
+      marca,
+      modelo,
+      descripcion,
+      region,
+      oficinaPrograma,
+      nombreResguardante,
+      "Servidor de la nación",
+      estatusFisico,
+      tieneCargador,
+      tieneCaja,
+      observaciones || null,
+      sinResguardoPrevio,
+      estadoAsignacion,
+    ]);
+  });
+
+  if (!parsedRows.length) return;
+
+  const conn = await poolOps.getConnection();
+  try {
+    await conn.beginTransaction();
+    for (const r of parsedRows) {
+      await conn.query(
+        `INSERT INTO inventario_tabletas
+           (no_resguardo, imei, numero_serie, no_caja, marca, modelo, descripcion,
+            region, oficina_programa, nombre_resguardante, cargo_resguardante,
+            estatus_fisico, tiene_cargador, tiene_caja, observaciones,
+            sin_resguardo_previo, estado_asignacion)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE id = id`,
+        r
+      );
+    }
+    await conn.commit();
+    console.log(`[v56] Semilla inventario_tabletas completada: ${parsedRows.length} tabletas cargadas.`);
+  } catch (err) {
+    await conn.rollback().catch(() => {});
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+async function generateNextTabletaFolio(conn) {
+  const [[row]] = await conn.query(
+    `SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM movimientos_tabletas`
+  );
+  const nextNum = Number(row?.next_id || 1);
+  return String(nextNum).padStart(6, "0");
+}
+
+function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = "ASIGNACION" }) {
+  const isDevolucion = String(modo || "").toUpperCase() === "DEVOLUCION";
+  const folioRaw = movimiento?.folio
+    ? String(movimiento.folio).trim()
+    : String(tableta?.no_resguardo || 1).padStart(6, "0");
+  const folioStr = /^\d+$/.test(folioRaw) ? folioRaw.padStart(6, "0") : folioRaw;
+
+  const fechaSource = movimiento?.created_at || new Date();
+  const fmtDateMx = (dInput) => {
+    const d = dInput instanceof Date ? dInput : new Date(dInput);
+    if (isNaN(d.getTime())) {
+      const now = new Date();
+      return `${String(now.getDate()).padStart(2, "0")}/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()}`;
+    }
+    return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+  };
+  const fechaStr = fmtDateMx(fechaSource);
+
+  const regionVal = String(movimiento?.region || tableta?.region || "LA PAZ").trim();
+  const oficinaVal = String(movimiento?.oficina_programa || tableta?.oficina_programa || "Delegación La Paz").trim();
+  const nombrePersona = String(
+    movimiento?.nombre_persona || tableta?.nombre_resguardante || "SIN NOMBRE ASIGNADO"
+  ).trim();
+  const cargoPersona = String(
+    movimiento?.cargo_persona || tableta?.cargo_resguardante || "Servidor de la nación"
+  ).trim();
+
+  const tieneCargador = movimiento !== null
+    ? Number(movimiento.tiene_cargador ?? 1) === 1
+    : Number(tableta?.tiene_cargador ?? 1) === 1;
+  const tieneCaja = movimiento !== null
+    ? Number(movimiento.tiene_caja ?? 1) === 1
+    : Number(tableta?.tiene_caja ?? 1) === 1;
+  const estatusFisico = String(movimiento?.estatus_fisico || tableta?.estatus_fisico || "BUENO").trim();
+  const observaciones = String(movimiento?.observaciones ?? tableta?.observaciones ?? "").trim();
+
+  const doc = new PDFDocument({
+    size: "LETTER",
+    margins: { top: 24, left: 36, right: 36, bottom: 0 },
+    bufferPages: true,
+    info: {
+      Title: `${isDevolucion ? "Vale de Devolución" : "Resguardo Personal"} Tableta #${tableta.no_resguardo}`,
+      Author: "Delegación de Programas para el Desarrollo en Baja California Sur",
+    },
+  });
+
+  const chunks = [];
+  doc.on("data", (c) => chunks.push(c));
+  doc.on("end", () => {
+    const pdfBuf = Buffer.concat(chunks);
+    const filenameSafe = isDevolucion
+      ? `Vale_Devolucion_Tableta_${tableta.no_resguardo}_Folio_${folioStr}.pdf`
+      : `Resguardo_Tableta_${tableta.no_resguardo}_Folio_${folioStr}.pdf`;
+    savePdfBackup(pdfBuf, "vales_generados", filenameSafe);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${filenameSafe}"`);
+    res.send(pdfBuf);
+  });
+
+  const COLOR_PRIMARY = "#621132";
+  const COLOR_ACCENT = "#B38E5D";
+  const COLOR_SOFT_BG = "#F9F2F4";
+  const leftX = 36;
+  const rightLimit = 576;
+  const contentWidth = rightLimit - leftX; // 540 pt
+  const pageHeight = 792;
+
+  const logoGobPath = [
+    path.join(__dirname, "public", "LogoGobiernoMX.png"),
+    path.join(__dirname, "public", "logoGobiernoMx.png"),
+    path.join(__dirname, "public", "logoGobiernoMX.png"),
+  ].find((p) => fs.existsSync(p)) || null;
+
+  const logoBienPath = [
+    path.join(__dirname, "public", "logo.png"),
+    path.join(__dirname, "public", "logo.original.png"),
+  ].find((p) => fs.existsSync(p)) || null;
+
+  // 1. Encabezado institucional
+  if (logoGobPath) {
+    try {
+      doc.image(logoGobPath, leftX, 20, { fit: [100, 34], align: "left", valign: "top" });
+    } catch {}
+  }
+  if (logoBienPath) {
+    try {
+      doc.image(logoBienPath, rightLimit - 90, 20, { fit: [90, 34], align: "right", valign: "top" });
+    } catch {}
+  }
+
+  doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(10.5)
+    .text("SECRETARÍA DE BIENESTAR", leftX, 20, { width: contentWidth, align: "center", lineBreak: false });
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8.5)
+    .text("DELEGACIÓN DE PROGRAMAS PARA EL DESARROLLO EN BAJA CALIFORNIA SUR", leftX, 34, { width: contentWidth, align: "center", lineBreak: false });
+  doc.fillColor("#4B5563").font("Helvetica-Bold").fontSize(8)
+    .text("COORDINACIÓN DE RECURSOS MATERIALES", leftX, 46, { width: contentWidth, align: "center", lineBreak: false });
+
+  doc.save();
+  doc.moveTo(leftX, 60).lineTo(rightLimit, 60).lineWidth(1.5).strokeColor(COLOR_ACCENT).stroke();
+  doc.restore();
+
+  // Banner del título principal
+  const bannerY = 66;
+  const bannerTitle = isDevolucion
+    ? "VALE DE DEVOLUCIÓN Y ENTREGA DE EQUIPO MÓVIL (TABLETA)"
+    : "FORMATO DE RESGUARDO PERSONAL DE EQUIPO MÓVIL (TABLETA)";
+  doc.save();
+  doc.rect(leftX, bannerY, contentWidth, 20).fill(COLOR_PRIMARY);
+  doc.restore();
+  doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(9.5)
+    .text(bannerTitle, leftX, bannerY + 5, { width: contentWidth, align: "center", lineBreak: false });
+
+  // 2. Bloque de Datos Generales (Folio, Fecha, Región/Oficina, Persona, Cargo)
+  const metaY = 92;
+  const metaH = 54;
+  doc.save();
+  doc.rect(leftX, metaY, contentWidth, metaH).lineWidth(0.7).strokeColor(COLOR_PRIMARY).stroke();
+  doc.moveTo(leftX, metaY + 18).lineTo(rightLimit, metaY + 18).lineWidth(0.5).strokeColor("#D1D5DB").stroke();
+  doc.moveTo(leftX, metaY + 36).lineTo(rightLimit, metaY + 36).lineWidth(0.5).strokeColor("#D1D5DB").stroke();
+  doc.moveTo(leftX + 365, metaY).lineTo(leftX + 365, metaY + 18).lineWidth(0.5).strokeColor("#D1D5DB").stroke();
+  doc.moveTo(leftX + 365, metaY + 18).lineTo(leftX + 365, metaY + 36).lineWidth(0.5).strokeColor("#D1D5DB").stroke();
+  doc.restore();
+
+  // Fila 1 de metadatos: Región/Programa | FOLIO en rojo
+  doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+    .text("REGIÓN / OFICINA-PROGRAMA:", leftX + 6, metaY + 5, { lineBreak: false });
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8)
+    .text(`${regionVal} — ${oficinaVal}`, leftX + 132, metaY + 5, { width: 228, lineBreak: false });
+
+  doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(8)
+    .text("FOLIO:", leftX + 372, metaY + 5, { lineBreak: false });
+  doc.fillColor("#B91C1C").font("Helvetica-Bold").fontSize(10)
+    .text(folioStr, leftX + 412, metaY + 4, { width: 120, align: "right", lineBreak: false });
+
+  // Fila 2 de metadatos: Nombre de persona | Fecha
+  const personaLabel = isDevolucion ? "QUIEN ENTREGA / DEVUELVE:" : "USUARIO RESGUARDANTE:";
+  doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+    .text(personaLabel, leftX + 6, metaY + 23, { lineBreak: false });
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8.5)
+    .text(nombrePersona.toUpperCase(), leftX + 132, metaY + 23, { width: 228, lineBreak: false });
+
+  doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+    .text("FECHA:", leftX + 372, metaY + 23, { lineBreak: false });
+  doc.fillColor("#111827").font("Helvetica").fontSize(8.5)
+    .text(fechaStr, leftX + 412, metaY + 23, { width: 120, align: "right", lineBreak: false });
+
+  // Fila 3 de metadatos: Cargo y Caja
+  doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+    .text("CARGO / PUESTO:", leftX + 6, metaY + 41, { lineBreak: false });
+  doc.fillColor("#111827").font("Helvetica").fontSize(8)
+    .text(cargoPersona, leftX + 132, metaY + 41, { width: 240, lineBreak: false });
+  doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+    .text("NO. CAJA:", leftX + 372, metaY + 41, { lineBreak: false });
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8)
+    .text(String(tableta.no_caja || "S/N"), leftX + 425, metaY + 41, { width: 107, align: "right", lineBreak: false });
+
+  // 3. Tabla del Bien (6 columnas exactas)
+  const tblY = 154;
+  const cols = [
+    { label: "No. de Resguardo", w: 72, val: String(tableta.no_resguardo) },
+    { label: "MODELO", w: 72, val: String(tableta.modelo || "QTab LTE") },
+    { label: "DESCRIPCIÓN", w: 110, val: String(tableta.descripcion || "Tablet Compac") },
+    { label: "MARCA", w: 66, val: String(tableta.marca || "Compac") },
+    { label: "IMEI", w: 105, val: String(tableta.imei || "-") },
+    { label: "NUMERO DE SERIE", w: 115, val: String(tableta.numero_serie || "-") },
+  ];
+
+  const tblHdrH = 20;
+  const tblRowH = 24;
+  const tblSubH = 18;
+
+  doc.save();
+  doc.rect(leftX, tblY, contentWidth, tblHdrH).fill(COLOR_PRIMARY);
+  doc.restore();
+
+  let curX = leftX;
+  cols.forEach((c, idx) => {
+    doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(7)
+      .text(c.label, curX + 2, tblY + 6, { width: c.w - 4, align: "center", lineBreak: false });
+    if (idx > 0) {
+      doc.save();
+      doc.moveTo(curX, tblY).lineTo(curX, tblY + tblHdrH + tblRowH).lineWidth(0.5).strokeColor("#9CA3AF").stroke();
+      doc.restore();
+    }
+    curX += c.w;
+  });
+
+  doc.save();
+  doc.rect(leftX, tblY, contentWidth, tblHdrH + tblRowH).lineWidth(0.8).strokeColor(COLOR_PRIMARY).stroke();
+  doc.restore();
+
+  curX = leftX;
+  cols.forEach((c) => {
+    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(7.5)
+      .text(c.val, curX + 3, tblY + tblHdrH + 7, { width: c.w - 6, align: "center", lineBreak: false });
+    curX += c.w;
+  });
+
+  // Cintilla de accesorios y estado físico
+  const subBarY = tblY + tblHdrH + tblRowH;
+  doc.save();
+  doc.rect(leftX, subBarY, contentWidth, tblSubH).fillAndStroke(COLOR_SOFT_BG, COLOR_PRIMARY);
+  doc.restore();
+  doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.3)
+    .text(
+      `INCLUYE CARGADOR: ${tieneCargador ? "SÍ" : "NO"}      |      INCLUYE CAJA ORIGINAL: ${tieneCaja ? "SÍ" : "NO"}      |      ESTADO FÍSICO: ${estatusFisico.toUpperCase()}`,
+      leftX + 6,
+      subBarY + 5,
+      { width: contentWidth - 12, align: "center", lineBreak: false }
+    );
+
+  // 4. Cuerpo Central: Obligaciones (ASIGNACION) vs Estado de Devolución (DEVOLUCION)
+  const bodyY = subBarY + tblSubH + 10;
+  if (!isDevolucion) {
+    doc.save();
+    doc.rect(leftX, bodyY, contentWidth, 16).fill(COLOR_PRIMARY);
+    doc.restore();
+    doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(8)
+      .text("I. MANIFESTACIONES Y OBLIGACIONES", leftX + 8, bodyY + 4, { width: contentWidth - 16, lineBreak: false });
+
+    const clausulas = [
+      "a) Recibo de conformidad el equipo móvil (tableta) descrito en el presente resguardo, el cual es propiedad del Gobierno de México / Secretaría de Bienestar, asignado para el desempeño exclusivo de mis funciones oficiales.",
+      "b) Me comprometo a mantener el equipo en óptimas condiciones de funcionamiento, haciendo uso adecuado y responsable del mismo, así como de su cargador, caja y accesorios entregados.",
+      "c) Queda estrictamente prohibido instalar aplicaciones ajenas a la operación institucional, alterar el sistema operativo, retirar etiquetas o identificadores patrimoniales o prestar el equipo a terceros no autorizados.",
+      "d) En caso de robo, extravío o daño total o parcial ocasionado por negligencia o mal uso, me obligo a reportarlo de inmediato a la Coordinación Operativa de Recursos Materiales y a levantar el acta correspondiente ante la autoridad competente, asumiendo la responsabilidad administrativa o resarcitoria que proceda.",
+      "e) El equipo deberá presentarse para revisión física, inventario o actualización técnica cada vez que sea requerido por la Delegación Estatal, la Coordinación Operativa de Recursos Materiales o el Encargado de Almacén.",
+      "f) Me obligo a devolver el equipo móvil junto con su caja y accesorios en el momento en que concluya mi comisión, cambie de adscripción, cause baja o me sea solicitado formalmente.",
+      "g) Manifiesto haber verificado físicamente que el número de resguardo, marca, modelo, IMEI y número de serie coinciden fielmente con el equipo móvil que recibo en este acto.",
+    ];
+
+    const boxH = 290;
+    doc.save();
+    doc.rect(leftX, bodyY + 16, contentWidth, boxH).lineWidth(0.7).strokeColor(COLOR_PRIMARY).stroke();
+    doc.restore();
+
+    let textY = bodyY + 24;
+    clausulas.forEach((cl) => {
+      doc.fillColor("#1F2937").font("Helvetica").fontSize(7.6)
+        .text(cl, leftX + 10, textY, { width: contentWidth - 20, align: "justify", lineGap: 1.5 });
+      textY = doc.y + 7;
+    });
+
+    if (observaciones) {
+      const obsBoxY = bodyY + 16 + boxH + 6;
+      doc.save();
+      doc.rect(leftX, obsBoxY, contentWidth, 34).fillAndStroke("#FFFBEB", "#D97706");
+      doc.restore();
+      doc.fillColor("#92400E").font("Helvetica-Bold").fontSize(7.2)
+        .text("OBSERVACIONES DEL EQUIPO / RESGUARDO:", leftX + 8, obsBoxY + 5, { lineBreak: false });
+      doc.fillColor("#111827").font("Helvetica").fontSize(7.4)
+        .text(observaciones.slice(0, 240), leftX + 8, obsBoxY + 15, { width: contentWidth - 16, height: 16 });
+    }
+  } else {
+    doc.save();
+    doc.rect(leftX, bodyY, contentWidth, 16).fill(COLOR_PRIMARY);
+    doc.restore();
+    doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(8)
+      .text("ESTADO FÍSICO DE RECEPCIÓN Y VERIFICACIÓN DE ACCESORIOS", leftX + 8, bodyY + 4, { width: contentWidth - 16, lineBreak: false });
+
+    const devBoxH = 250;
+    doc.save();
+    doc.rect(leftX, bodyY + 16, contentWidth, devBoxH).lineWidth(0.7).strokeColor(COLOR_PRIMARY).stroke();
+    doc.restore();
+
+    let dy = bodyY + 28;
+    const checks = [
+      ["1. ¿Entrega el equipo con cargador original/funcional?:", tieneCargador ? "SÍ — COMPLETO" : "NO — FALTANTE DE CARGADOR"],
+      ["2. ¿Entrega el equipo con su caja original identificada?:", tieneCaja ? `SÍ — CAJA NO. ${tableta.no_caja || "S/N"}` : "NO — SIN CAJA"],
+      ["3. Estado físico general observado al momento de la devolución:", estatusFisico.toUpperCase()],
+      ["4. Origen / Región registrada del equipo devuelto:", `${regionVal} (${oficinaVal})`],
+    ];
+    checks.forEach(([qTxt, aTxt]) => {
+      doc.fillColor("#374151").font("Helvetica-Bold").fontSize(8.2).text(qTxt, leftX + 14, dy, { width: 310, lineBreak: false });
+      doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(8.5).text(aTxt, leftX + 330, dy, { width: 196, align: "right", lineBreak: false });
+      dy += 22;
+    });
+
+    dy += 6;
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(8)
+      .text("OBSERVACIONES / FALLAS O DETALLES REPORTADOS EN LA RECEPCIÓN:", leftX + 14, dy, { lineBreak: false });
+    dy += 14;
+    doc.save();
+    doc.rect(leftX + 14, dy, contentWidth - 28, 66).lineWidth(0.5).strokeColor("#9CA3AF").stroke();
+    doc.restore();
+    doc.fillColor("#111827").font("Helvetica").fontSize(8.2)
+      .text(observaciones || "Sin observaciones adicionales al momento de la devolución.", leftX + 20, dy + 8, {
+        width: contentWidth - 40,
+        height: 52,
+      });
+
+    dy += 78;
+    doc.fillColor("#1F2937").font("Helvetica").fontSize(8)
+      .text(
+        "Por medio del presente vale se hace constar la entrega-recepción del equipo móvil descrito arriba para su resguardo, revisión física e ingreso al almacén de la Delegación de Programas para el Desarrollo en Baja California Sur. Una vez validada la recepción física en sistema, el equipo pasará a estatus DISPONIBLE.",
+        leftX + 14,
+        dy,
+        { width: contentWidth - 28, align: "justify", lineGap: 2 }
+      );
+  }
+
+  // 5. Bloque de 4 Firmas Oficiales al fondo de la misma página
+  const topSigY = 588;
+  const topSigW = 240;
+  const topSigX = leftX + (contentWidth - topSigW) / 2;
+
+  const drawSigBox = ({ x, y, w, h, titulo, nombre, cargo }) => {
+    doc.save();
+    doc.rect(x, y, w, h).lineWidth(0.6).strokeColor(COLOR_PRIMARY).stroke();
+    doc.rect(x, y, w, 12).fillAndStroke(COLOR_SOFT_BG, COLOR_PRIMARY);
+    doc.moveTo(x + 10, y + h - 22).lineTo(x + w - 10, y + h - 22).lineWidth(0.5).strokeColor("#111827").stroke();
+    doc.restore();
+
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(6.8)
+      .text(titulo, x + 2, y + 3, { width: w - 4, align: "center", lineBreak: false });
+    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(6.6)
+      .text(nombre, x + 4, y + h - 19, { width: w - 8, align: "center", lineBreak: false });
+    doc.fillColor("#4B5563").font("Helvetica").fontSize(5.7)
+      .text(cargo, x + 4, y + h - 10, { width: w - 8, align: "center", lineBreak: false });
+  };
+
+  // Firma Superior Central (AUTORIZA)
+  drawSigBox({
+    x: topSigX,
+    y: topSigY,
+    w: topSigW,
+    h: 56,
+    titulo: "AUTORIZA",
+    nombre: "Diphna Yanssen Weichselbaum Calderón",
+    cargo: "Delegada de Programas para el Desarrollo en el Estado de BCS",
+  });
+
+  // Fila Inferior de 3 Columnas
+  const botSigY = 656;
+  const botGap = 12;
+  const botSigW = (contentWidth - botGap * 2) / 3; // 172 pt cada caja
+  const botSigH = 62;
+
+  drawSigBox({
+    x: leftX,
+    y: botSigY,
+    w: botSigW,
+    h: botSigH,
+    titulo: isDevolucion ? "ENTREGA / DEVUELVE" : "RECIBE DE CONFORMIDAD",
+    nombre: nombrePersona,
+    cargo: cargoPersona || "Servidor de la nación",
+  });
+
+  drawSigBox({
+    x: leftX + botSigW + botGap,
+    y: botSigY,
+    w: botSigW,
+    h: botSigH,
+    titulo: "VALIDA",
+    nombre: "Jorge Luis Patrón Murillo",
+    cargo: "Coordinador Operativo de Recursos Materiales",
+  });
+
+  drawSigBox({
+    x: leftX + (botSigW + botGap) * 2,
+    y: botSigY,
+    w: botSigW,
+    h: botSigH,
+    titulo: isDevolucion ? "RECIBE EN ALMACÉN" : "ENTREGA",
+    nombre: "Luis Eduardo Mayoral Geraldo",
+    cargo: "Encargado de Almacén",
+  });
+
+  // Pie de página único en 1 hoja (sin desbordamiento)
+  const pages = doc.bufferedPageRange();
+  for (let i = 0; i < pages.count; i++) {
+    doc.switchToPage(i);
+    doc.page.margins.bottom = 0;
+    doc.fillColor("#6B7280").font("Helvetica").fontSize(7)
+      .text(
+        `Folio: ${folioStr}   |   Hoja ${i + 1} de ${pages.count}   |   Delegación de Programas para el Desarrollo en Baja California Sur`,
+        leftX,
+        pageHeight - 28,
+        { width: contentWidth, align: "center", lineBreak: false }
+      );
+  }
+
+  doc.end();
+}
+
+// 1. GET /api/tabletas — Listado con filtros y KPIs globales
+app.get("/api/tabletas", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canAccessTabletas(req)) {
+      return httpError(res, 403, "Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales y Administración.");
+    }
+
+    const { estado_asignacion = "", region = "", oficina_programa = "", q = "", filtro_extra = "" } = req.query || {};
+
+    const [kpiRows] = await poolRead.query(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN estado_asignacion = 'EN_RESGUARDO' THEN 1 ELSE 0 END) AS en_resguardo,
+        SUM(CASE WHEN estado_asignacion = 'DEVOLUCION_PENDIENTE' THEN 1 ELSE 0 END) AS devolucion_pendiente,
+        SUM(CASE WHEN estado_asignacion = 'DISPONIBLE' THEN 1 ELSE 0 END) AS disponibles,
+        SUM(CASE WHEN estado_asignacion = 'EN_PRESTAMO_PROVISIONAL' THEN 1 ELSE 0 END) AS en_prestamo_provisional,
+        SUM(CASE WHEN estado_asignacion = 'EN_RESGUARDO' AND (TRIM(COALESCE(nombre_resguardante, '')) = '' OR UPPER(TRIM(nombre_resguardante)) = 'RESGUARDO FISICO') THEN 1 ELSE 0 END) AS sin_nombre
+      FROM inventario_tabletas
+    `);
+    const kpis = {
+      total: Number(kpiRows[0]?.total || 0),
+      en_resguardo: Number(kpiRows[0]?.en_resguardo || 0),
+      devolucion_pendiente: Number(kpiRows[0]?.devolucion_pendiente || 0),
+      disponibles: Number(kpiRows[0]?.disponibles || 0),
+      en_prestamo_provisional: Number(kpiRows[0]?.en_prestamo_provisional || 0),
+      sin_nombre: Number(kpiRows[0]?.sin_nombre || 0),
+    };
+
+    let where = "WHERE 1=1";
+    const params = [];
+
+    if (estado_asignacion && String(estado_asignacion).trim() !== "") {
+      where += " AND t.estado_asignacion = ?";
+      params.push(String(estado_asignacion).trim().toUpperCase());
+    }
+    if (region && String(region).trim() !== "") {
+      where += " AND t.region = ?";
+      params.push(String(region).trim().toUpperCase());
+    }
+    if (oficina_programa && String(oficina_programa).trim() !== "") {
+      where += " AND t.oficina_programa = ?";
+      params.push(String(oficina_programa).trim());
+    }
+    if (filtro_extra === "SIN_NOMBRE") {
+      where += " AND (TRIM(COALESCE(t.nombre_resguardante, '')) = '' OR UPPER(TRIM(t.nombre_resguardante)) IN ('RESGUARDO FISICO', 'NO TIENE TABLETA', 'DELEGACION'))";
+    } else if (filtro_extra === "CON_NOMBRE") {
+      where += " AND TRIM(COALESCE(t.nombre_resguardante, '')) <> '' AND UPPER(TRIM(t.nombre_resguardante)) NOT IN ('RESGUARDO FISICO', 'NO TIENE TABLETA', 'DELEGACION')";
+    } else if (filtro_extra === "DANADAS_INCOMPLETAS") {
+      where += " AND (t.estatus_fisico IN ('DAÑADO', 'INCOMPLETO') OR t.tiene_cargador = 0 OR t.tiene_caja = 0)";
+    }
+    if (q && String(q).trim() !== "") {
+      const lk = `%${String(q).trim()}%`;
+      where += ` AND (
+        CAST(t.no_resguardo AS CHAR) LIKE ? OR
+        t.imei LIKE ? OR
+        t.numero_serie LIKE ? OR
+        t.nombre_resguardante LIKE ? OR
+        t.no_caja LIKE ? OR
+        t.oficina_programa LIKE ? OR
+        t.observaciones LIKE ?
+      )`;
+      params.push(lk, lk, lk, lk, lk, lk, lk);
+    }
+
+    const [rows] = await poolRead.query(
+      `SELECT t.*,
+              mp.id AS devolucion_mov_id,
+              mp.folio AS devolucion_folio,
+              mp.nombre_persona AS devolucion_nombre_persona,
+              mp.cargo_persona AS devolucion_cargo_persona,
+              mp.created_at AS devolucion_fecha,
+              ma.id AS ultimo_asig_mov_id,
+              ma.folio AS ultimo_asig_folio
+       FROM inventario_tabletas t
+       LEFT JOIN movimientos_tabletas mp
+         ON mp.id = (
+           SELECT m1.id FROM movimientos_tabletas m1
+           WHERE m1.tableta_id = t.id AND m1.tipo = 'DEVOLUCION' AND m1.estado = 'EN_PROCESO'
+           ORDER BY m1.id DESC LIMIT 1
+         )
+       LEFT JOIN movimientos_tabletas ma
+         ON ma.id = (
+           SELECT m2.id FROM movimientos_tabletas m2
+           WHERE m2.tableta_id = t.id AND m2.tipo = 'ASIGNACION' AND m2.estado = 'CONFIRMADO'
+           ORDER BY m2.id DESC LIMIT 1
+         )
+       ${where}
+       ORDER BY t.no_resguardo ASC`,
+      params
+    );
+
+    return res.json({ ok: true, kpis, data: rows });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al listar inventario de tabletas");
+  }
+});
+
+// 1B. GET /api/tabletas/bitacora — Log de movimientos de tabletas (Exclusivo Admin)
+app.get("/api/tabletas/bitacora", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!isAdmin(req)) {
+      return httpError(res, 403, "Acceso exclusivo para el Administrador.");
+    }
+    const q = String(req.query?.q || "").trim();
+    const accion = String(req.query?.accion || "").trim().toUpperCase();
+    const usuario = String(req.query?.usuario || "").trim();
+    const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 200, 1), 1000);
+
+    let where = "WHERE 1=1";
+    const params = [];
+    if (accion) {
+      where += " AND accion = ?";
+      params.push(accion);
+    }
+    if (usuario) {
+      where += " AND usuario LIKE ?";
+      params.push(`%${usuario}%`);
+    }
+    if (q) {
+      where += " AND (CAST(no_resguardo AS CHAR) LIKE ? OR imei LIKE ? OR numero_serie LIKE ? OR usuario LIKE ? OR detalles LIKE ?)";
+      const lk = `%${q}%`;
+      params.push(lk, lk, lk, lk, lk);
+    }
+
+    const [rows] = await poolRead.query(
+      `SELECT id, tableta_id, no_resguardo, imei, numero_serie, usuario, accion, detalles, created_at
+       FROM bitacora_tabletas
+       ${where}
+       ORDER BY id DESC
+       LIMIT ?`,
+      [...params, limit]
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al consultar la bitácora de tabletas");
+  }
+});
+
+async function registrarBitacoraTableta(req, { tableta_id = null, no_resguardo = null, imei = null, numero_serie = null, accion, detalles = "" }) {
+  try {
+    const usuario = req?.user?.username || req?.user?.nombre || "SISTEMA";
+    let tabId = tableta_id ? Number(tableta_id) : null;
+    let resg = no_resguardo !== null && no_resguardo !== undefined ? Number(no_resguardo) : null;
+    let imeiVal = imei ? String(imei).trim() : null;
+    let serieVal = numero_serie ? String(numero_serie).trim() : null;
+
+    if (tabId && (!imeiVal || !serieVal || !resg)) {
+      const [[row]] = await poolRead.query(
+        `SELECT no_resguardo, imei, numero_serie FROM inventario_tabletas WHERE id = ? LIMIT 1`,
+        [tabId]
+      ).catch(() => [[]]);
+      if (row) {
+        if (!resg) resg = Number(row.no_resguardo || 0) || null;
+        if (!imeiVal) imeiVal = row.imei || null;
+        if (!serieVal) serieVal = row.numero_serie || null;
+      }
+    }
+
+    await poolOps.query(
+      `INSERT INTO bitacora_tabletas (tableta_id, no_resguardo, imei, numero_serie, usuario, accion, detalles)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [tabId, resg, imeiVal, serieVal, String(usuario).slice(0, 80), String(accion).slice(0, 50), String(detalles || "")]
+    );
+  } catch (err) {
+    console.warn("[WARN] registrarBitacoraTableta:", err?.message || err);
+  }
+}
+
+// 2. PUT /api/tabletas/:id — Edición de registro con validación de unicidad (409)
+app.put("/api/tabletas/:id", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para editar tabletas.");
+    }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return httpError(res, 400, "ID de tableta inválido.");
+
+    const [[existing]] = await poolRead.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1`, [id]);
+    if (!existing) return httpError(res, 404, "Tableta no encontrada.");
+
+    const b = req.body || {};
+    const adminUser = isAdmin(req);
+
+    // Solo el Administrador puede modificar no_resguardo, imei y numero_serie
+    const noResguardo = (adminUser && b.no_resguardo !== undefined) ? parseInt(b.no_resguardo, 10) : existing.no_resguardo;
+    if (!Number.isInteger(noResguardo) || noResguardo <= 0) {
+      return httpError(res, 400, "El No. de Resguardo debe ser un número entero positivo.");
+    }
+    const imei = (adminUser && b.imei !== undefined) ? String(b.imei).trim() : existing.imei;
+    const numeroSerie = (adminUser && b.numero_serie !== undefined) ? String(b.numero_serie).trim() : existing.numero_serie;
+    if (!imei || !numeroSerie) {
+      return httpError(res, 400, "IMEI y Número de Serie son obligatorios.");
+    }
+
+    // Validación estricta de duplicados (no_resguardo, imei, numero_serie)
+    const [dups] = await poolRead.query(
+      `SELECT id, no_resguardo, imei, numero_serie
+       FROM inventario_tabletas
+       WHERE id <> ? AND (no_resguardo = ? OR imei = ? OR numero_serie = ?)
+       LIMIT 1`,
+      [id, noResguardo, imei, numeroSerie]
+    );
+    if (dups.length) {
+      const d = dups[0];
+      if (Number(d.no_resguardo) === noResguardo) {
+        return httpError(res, 409, `⚠️ El No. de Resguardo ${noResguardo} ya pertenece a otra tableta.`);
+      }
+      if (String(d.imei).trim() === imei) {
+        return httpError(res, 409, `⚠️ El IMEI "${imei}" ya está registrado en otra tableta (#${d.no_resguardo}).`);
+      }
+      return httpError(res, 409, `⚠️ El Número de Serie "${numeroSerie}" ya está registrado en otra tableta (#${d.no_resguardo}).`);
+    }
+
+    const { region, oficina_programa } = normalizeTabletaRegionInput(
+      b.region !== undefined ? b.region : existing.region,
+      b.oficina_programa !== undefined ? b.oficina_programa : existing.oficina_programa
+    );
+    const noCaja = b.no_caja !== undefined ? (String(b.no_caja || "").trim() || null) : existing.no_caja;
+    const marca = b.marca !== undefined ? (String(b.marca || "Compac").trim() || "Compac") : existing.marca;
+    const modelo = b.modelo !== undefined ? (String(b.modelo || "QTab LTE").trim() || "QTab LTE") : existing.modelo;
+    const descripcion = b.descripcion !== undefined ? (String(b.descripcion || "Tablet Compac").trim() || "Tablet Compac") : existing.descripcion;
+    const nombreResg = b.nombre_resguardante !== undefined ? String(b.nombre_resguardante || "").trim() : existing.nombre_resguardante;
+    const cargoResg = b.cargo_resguardante !== undefined ? (String(b.cargo_resguardante || "Servidor de la nación").trim() || "Servidor de la nación") : existing.cargo_resguardante;
+    const estatusFisico = b.estatus_fisico !== undefined ? (String(b.estatus_fisico || "BUENO").trim().toUpperCase()) : existing.estatus_fisico;
+    const tieneCargador = b.tiene_cargador !== undefined ? (Number(b.tiene_cargador) ? 1 : 0) : existing.tiene_cargador;
+    const tieneCaja = b.tiene_caja !== undefined ? (Number(b.tiene_caja) ? 1 : 0) : existing.tiene_caja;
+    const observaciones = b.observaciones !== undefined ? (String(b.observaciones || "").trim() || null) : existing.observaciones;
+
+    await poolOps.query(
+      `UPDATE inventario_tabletas
+       SET no_resguardo = ?, imei = ?, numero_serie = ?, no_caja = ?,
+           marca = ?, modelo = ?, descripcion = ?,
+           region = ?, oficina_programa = ?,
+           nombre_resguardante = ?, cargo_resguardante = ?,
+           estatus_fisico = ?, tiene_cargador = ?, tiene_caja = ?, observaciones = ?
+       WHERE id = ?`,
+      [
+        noResguardo, imei, numeroSerie, noCaja,
+        marca, modelo, descripcion,
+        region, oficina_programa,
+        nombreResg, cargoResg,
+        estatusFisico, tieneCargador, tieneCaja, observaciones,
+        id,
+      ]
+    );
+
+    await registrarBitacora(
+      req,
+      "TABLETAS",
+      "EDITAR_TABLETA",
+      `Tableta #${noResguardo} (IMEI: ${imei}) actualizada. Resguardante: "${nombreResg || "Sin nombre"}", Región: ${region} (${oficina_programa}).`
+    );
+    await registrarBitacoraTableta(req, {
+      tableta_id: id,
+      no_resguardo: noResguardo,
+      imei,
+      numero_serie: numeroSerie,
+      accion: "EDITAR_TABLETA",
+      detalles: `Tableta #${noResguardo} actualizada. Resguardante: "${nombreResg || "Sin nombre"}", Región: ${region} (${oficina_programa}), Estatus: ${estatusFisico}.`
+    });
+
+    const [[updated]] = await poolRead.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1`, [id]);
+    return res.json({ ok: true, data: updated, message: `Tableta #${noResguardo} actualizada correctamente.` });
+  } catch (e) {
+    return httpError(res, e.statusCode || 500, e.message || "Error al actualizar tableta");
+  }
+});
+
+// 3. POST /api/tabletas/importar-nombres — Importar nombres desde archivo Excel (.xlsx)
+app.post("/api/tabletas/importar-nombres", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para importar nombres en tabletas.");
+    }
+
+    const ctype = String(req.headers["content-type"] || "").toLowerCase();
+    const candidates = []; // { no_resguardo, imei, nombre, cargo }
+
+    if (ctype.includes("multipart/form-data")) {
+      const fileData = await parseMultipartSingleFile(req);
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(fileData.buffer);
+      const ws = wb.getWorksheet("BCS") || wb.worksheets[0];
+      if (!ws) return httpError(res, 400, "El archivo Excel no contiene hojas válidas.");
+
+      // Detectar si tiene encabezados estándar en fila 1..3 o formato BCS (col 3=No. Resguardo, col 4=NOMBRE, col 9=IMEI)
+      let colResg = 3;
+      let colNombre = 4;
+      let colImei = 9;
+      let colCargo = 0;
+      let startRow = 4;
+
+      for (let rIdx = 1; rIdx <= Math.min(5, ws.rowCount); rIdx++) {
+        const row = ws.getRow(rIdx);
+        const vals = [];
+        for (let c = 1; c <= Math.min(15, ws.columnCount || 15); c++) {
+          vals.push({ c, txt: extractExcelCellText(row.getCell(c).value).toUpperCase() });
+        }
+        const fResg = vals.find((x) => x.txt.includes("RESGUARDO"));
+        const fNom = vals.find((x) => x.txt === "NOMBRE" || x.txt.includes("RESGUARDANTE"));
+        const fImei = vals.find((x) => x.txt.includes("IMEI"));
+        const fCargo = vals.find((x) => x.txt.includes("CARGO") || x.txt.includes("PUESTO"));
+        if (fNom && (fResg || fImei)) {
+          colResg = fResg ? fResg.c : 0;
+          colNombre = fNom.c;
+          colImei = fImei ? fImei.c : 0;
+          colCargo = fCargo ? fCargo.c : 0;
+          startRow = rIdx + 1;
+          break;
+        }
+      }
+
+      ws.eachRow((row, rn) => {
+        if (rn < startRow) return;
+        const noResgVal = colResg ? parseInt(extractExcelCellText(row.getCell(colResg).value), 10) : NaN;
+        const imeiVal = colImei ? extractExcelCellText(row.getCell(colImei).value) : "";
+        const nomVal = colNombre ? extractExcelCellText(row.getCell(colNombre).value) : "";
+        const cargoVal = colCargo ? extractExcelCellText(row.getCell(colCargo).value) : "";
+        if (!nomVal) return;
+        if (Number.isInteger(noResgVal) || imeiVal) {
+          candidates.push({
+            no_resguardo: Number.isInteger(noResgVal) ? noResgVal : null,
+            imei: imeiVal || null,
+            nombre: nomVal,
+            cargo: cargoVal || null,
+          });
+        }
+      });
+    } else if (req.body?.fileBase64) {
+      const b64 = String(req.body.fileBase64).replace(/^data:[^;]+;base64,/, "");
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(Buffer.from(b64, "base64"));
+      const ws = wb.getWorksheet("BCS") || wb.worksheets[0];
+      if (!ws) return httpError(res, 400, "Archivo Excel vacío.");
+      ws.eachRow((row, rn) => {
+        if (rn < 2) return;
+        const noResgVal = parseInt(extractExcelCellText(row.getCell(3).value), 10);
+        const nomVal = extractExcelCellText(row.getCell(4).value);
+        const imeiVal = extractExcelCellText(row.getCell(9).value);
+        if (nomVal && (Number.isInteger(noResgVal) || imeiVal)) {
+          candidates.push({ no_resguardo: Number.isInteger(noResgVal) ? noResgVal : null, imei: imeiVal || null, nombre: nomVal, cargo: null });
+        }
+      });
+    } else if (Array.isArray(req.body?.rows)) {
+      for (const r of req.body.rows) {
+        const nomVal = String(r.nombre || r.nombre_resguardante || "").trim();
+        if (!nomVal) continue;
+        const noResgVal = parseInt(r.no_resguardo, 10);
+        const imeiVal = String(r.imei || "").trim();
+        if (Number.isInteger(noResgVal) || imeiVal) {
+          candidates.push({
+            no_resguardo: Number.isInteger(noResgVal) ? noResgVal : null,
+            imei: imeiVal || null,
+            nombre: nomVal,
+            cargo: String(r.cargo || "").trim() || null,
+          });
+        }
+      }
+    } else {
+      return httpError(res, 400, "Envía un archivo Excel (.xlsx) o un arreglo de filas válido.");
+    }
+
+    if (!candidates.length) {
+      return httpError(res, 400, "No se encontraron filas válidas con No. de Resguardo/IMEI y Nombre en el archivo.");
+    }
+
+    let actualizados = 0;
+    const conn = await poolOps.getConnection();
+    try {
+      await conn.beginTransaction();
+      for (const c of candidates) {
+        let targetRows = [];
+        if (c.no_resguardo) {
+          const [r] = await conn.query(
+            `SELECT id, estado_asignacion FROM inventario_tabletas WHERE no_resguardo = ? LIMIT 1`,
+            [c.no_resguardo]
+          );
+          targetRows = r;
+        }
+        if (!targetRows.length && c.imei) {
+          const [r] = await conn.query(
+            `SELECT id, estado_asignacion FROM inventario_tabletas WHERE imei = ? LIMIT 1`,
+            [c.imei]
+          );
+          targetRows = r;
+        }
+        if (targetRows.length) {
+          const tId = targetRows[0].id;
+          if (c.cargo) {
+            await conn.query(
+              `UPDATE inventario_tabletas SET nombre_resguardante = ?, cargo_resguardante = ? WHERE id = ?`,
+              [c.nombre, c.cargo, tId]
+            );
+          } else {
+            await conn.query(
+              `UPDATE inventario_tabletas SET nombre_resguardante = ? WHERE id = ?`,
+              [c.nombre, tId]
+            );
+          }
+          actualizados++;
+        }
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    await registrarBitacora(
+      req,
+      "TABLETAS",
+      "IMPORTAR_NOMBRES",
+      `Importación masiva de nombres desde Excel: ${actualizados} de ${candidates.length} tabletas actualizadas.`
+    );
+    await registrarBitacoraTableta(req, {
+      accion: "IMPORTAR_NOMBRES",
+      detalles: `Importación masiva desde Excel: ${actualizados} de ${candidates.length} tabletas actualizadas.`
+    });
+
+    return res.json({
+      ok: true,
+      total_leidos: candidates.length,
+      actualizados,
+      message: `Importación completada: ${actualizados} tabletas actualizadas correctamente.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al importar nombres de Excel");
+  }
+});
+
+// 4. POST /api/tabletas/:id/generar-devolucion — Inicia devolución y genera Vale de Devolución
+app.post("/api/tabletas/:id/generar-devolucion", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para generar vales de devolución de tabletas.");
+    }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return httpError(res, 400, "ID de tableta inválido.");
+
+    const b = req.body || {};
+    const conn = await poolOps.getConnection();
+    let movId = null;
+    let folio = "";
+    try {
+      await conn.beginTransaction();
+      const [[tab]] = await conn.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`, [id]);
+      if (!tab) {
+        await conn.rollback();
+        return httpError(res, 404, "Tableta no encontrada.");
+      }
+      if (tab.estado_asignacion !== "EN_RESGUARDO") {
+        await conn.rollback();
+        return httpError(res, 409, `La tableta #${tab.no_resguardo} no está EN_RESGUARDO (estado actual: ${tab.estado_asignacion}).`);
+      }
+
+      const nombrePersona = String(b.nombre_persona || tab.nombre_resguardante || "").trim();
+      if (!nombrePersona) {
+        await conn.rollback();
+        return httpError(res, 400, "Indica el nombre de la persona que entrega/devuelve la tableta.");
+      }
+      const cargoPersona = String(b.cargo_persona || tab.cargo_resguardante || "Servidor de la nación").trim() || "Servidor de la nación";
+      const tieneCargador = b.tiene_cargador !== undefined ? (Number(b.tiene_cargador) ? 1 : 0) : Number(tab.tiene_cargador ?? 1);
+      const tieneCaja = b.tiene_caja !== undefined ? (Number(b.tiene_caja) ? 1 : 0) : Number(tab.tiene_caja ?? 1);
+      const estatusFisico = String(b.estatus_fisico || tab.estatus_fisico || "BUENO").trim().toUpperCase();
+      const observaciones = String(b.observaciones ?? tab.observaciones ?? "").trim() || null;
+
+      folio = await generateNextTabletaFolio(conn);
+      const [ins] = await conn.query(
+        `INSERT INTO movimientos_tabletas
+           (tipo, folio, tableta_id, no_resguardo, region, oficina_programa,
+            nombre_persona, cargo_persona, tiene_cargador, tiene_caja, estatus_fisico, observaciones, estado)
+         VALUES ('DEVOLUCION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EN_PROCESO')`,
+        [
+          folio,
+          tab.id,
+          tab.no_resguardo,
+          tab.region,
+          tab.oficina_programa,
+          nombrePersona,
+          cargoPersona,
+          tieneCargador,
+          tieneCaja,
+          estatusFisico,
+          observaciones,
+        ]
+      );
+      movId = ins.insertId;
+
+      await conn.query(
+        `UPDATE inventario_tabletas
+         SET estado_asignacion = 'DEVOLUCION_PENDIENTE',
+             tiene_cargador = ?,
+             tiene_caja = ?,
+             estatus_fisico = ?,
+             observaciones = ?
+         WHERE id = ?`,
+        [tieneCargador, tieneCaja, estatusFisico, observaciones, tab.id]
+      );
+
+      await conn.commit();
+      await registrarBitacora(
+        req,
+        "TABLETAS",
+        "GENERAR_DEVOLUCION",
+        `Vale de devolución Folio ${folio} generado para Tableta #${tab.no_resguardo} (Entrega: ${nombrePersona}). Estado: DEVOLUCION_PENDIENTE.`
+      );
+      await registrarBitacoraTableta(req, {
+        tableta_id: tab.id,
+        no_resguardo: tab.no_resguardo,
+        imei: tab.imei,
+        numero_serie: tab.numero_serie,
+        accion: "GENERAR_DEVOLUCION",
+        detalles: `Vale de devolución Folio ${folio} generado (Entrega: ${nombrePersona}). Estado: DEVOLUCION_PENDIENTE.`
+      });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    return res.json({
+      ok: true,
+      movimiento_id: movId,
+      folio,
+      pdf_url: `/api/tabletas/movimientos/${movId}/pdf`,
+      message: `Vale de devolución Folio ${folio} generado. La tableta está ahora en proceso de devolución.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al generar vale de devolución");
+  }
+});
+
+// 5. PUT /api/tabletas/movimientos/:movId/confirmar-devolucion — Confirma recepción física en almacén
+app.put("/api/tabletas/movimientos/:movId/confirmar-devolucion", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para confirmar devoluciones de tabletas.");
+    }
+    const movId = Number(req.params.movId);
+    if (!Number.isInteger(movId) || movId <= 0) return httpError(res, 400, "ID de movimiento inválido.");
+
+    const conn = await poolOps.getConnection();
+    let movRow = null;
+    try {
+      await conn.beginTransaction();
+      const [[mov]] = await conn.query(
+        `SELECT * FROM movimientos_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+        [movId]
+      );
+      if (!mov) {
+        await conn.rollback();
+        return httpError(res, 404, "Movimiento de devolución no encontrado.");
+      }
+      if (mov.tipo !== "DEVOLUCION") {
+        await conn.rollback();
+        return httpError(res, 400, "El movimiento especificado no corresponde a una devolución.");
+      }
+      if (mov.estado === "CONFIRMADO") {
+        await conn.rollback();
+        return httpError(res, 409, "Esta devolución ya fue confirmada previamente.");
+      }
+      movRow = mov;
+
+      await conn.query(
+        `UPDATE movimientos_tabletas SET estado = 'CONFIRMADO', confirmed_at = NOW() WHERE id = ?`,
+        [movId]
+      );
+
+      await conn.query(
+        `UPDATE inventario_tabletas
+         SET estado_asignacion = 'DISPONIBLE',
+             nombre_resguardante = '',
+             sin_resguardo_previo = 0
+         WHERE id = ?`,
+        [mov.tableta_id]
+      );
+
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    await registrarBitacora(
+      req,
+      "TABLETAS",
+      "CONFIRMAR_DEVOLUCION",
+      `Recepción física confirmada para Tableta #${movRow.no_resguardo} (Vale Folio ${movRow.folio}). Estado actual: DISPONIBLE.`
+    );
+    await registrarBitacoraTableta(req, {
+      tableta_id: movRow.tableta_id,
+      no_resguardo: movRow.no_resguardo,
+      accion: "CONFIRMAR_RECIBIDO",
+      detalles: `Recepción física confirmada (Vale Folio ${movRow.folio}). Estado actual: DISPONIBLE.`
+    });
+
+    return res.json({
+      ok: true,
+      message: `Recepción física confirmada para Tableta #${movRow.no_resguardo}. Ahora está Disponible en almacén.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al confirmar recepción de tableta");
+  }
+});
+
+// 6. POST /api/tabletas/:id/generar-resguardo — Asigna tableta disponible y genera Resguardo Personal
+app.post("/api/tabletas/:id/generar-resguardo", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para asignar tabletas y generar resguardos.");
+    }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return httpError(res, 400, "ID de tableta inválido.");
+
+    const b = req.body || {};
+    const nombreResg = String(b.nombre_resguardante || b.nombre_persona || "").trim();
+    if (!nombreResg) {
+      return httpError(res, 400, "El nombre completo del nuevo resguardante es obligatorio.");
+    }
+    const cargoResg = String(b.cargo_resguardante || b.cargo_persona || "Servidor de la nación").trim() || "Servidor de la nación";
+
+    const conn = await poolOps.getConnection();
+    let movId = null;
+    let folio = "";
+    let noResguardo = 0;
+    try {
+      await conn.beginTransaction();
+      const [[tab]] = await conn.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`, [id]);
+      if (!tab) {
+        await conn.rollback();
+        return httpError(res, 404, "Tableta no encontrada.");
+      }
+      if (tab.estado_asignacion !== "DISPONIBLE") {
+        await conn.rollback();
+        return httpError(res, 409, `La tableta #${tab.no_resguardo} no está DISPONIBLE para asignar (estado actual: ${tab.estado_asignacion}).`);
+      }
+
+      const { region, oficina_programa } = normalizeTabletaRegionInput(
+        b.region || tab.region,
+        b.oficina_programa || tab.oficina_programa
+      );
+      const tieneCargador = b.tiene_cargador !== undefined ? (Number(b.tiene_cargador) ? 1 : 0) : Number(tab.tiene_cargador ?? 1);
+      const tieneCaja = b.tiene_caja !== undefined ? (Number(b.tiene_caja) ? 1 : 0) : Number(tab.tiene_caja ?? 1);
+      const estatusFisico = String(b.estatus_fisico || tab.estatus_fisico || "BUENO").trim().toUpperCase();
+      const observaciones = b.observaciones !== undefined ? (String(b.observaciones || "").trim() || null) : tab.observaciones;
+
+      folio = await generateNextTabletaFolio(conn);
+      noResguardo = tab.no_resguardo;
+
+      const [ins] = await conn.query(
+        `INSERT INTO movimientos_tabletas
+           (tipo, folio, tableta_id, no_resguardo, region, oficina_programa,
+            nombre_persona, cargo_persona, tiene_cargador, tiene_caja, estatus_fisico, observaciones, estado, confirmed_at)
+         VALUES ('ASIGNACION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMADO', NOW())`,
+        [
+          folio,
+          tab.id,
+          tab.no_resguardo,
+          region,
+          oficina_programa,
+          nombreResg,
+          cargoResg,
+          tieneCargador,
+          tieneCaja,
+          estatusFisico,
+          observaciones,
+        ]
+      );
+      movId = ins.insertId;
+
+      await conn.query(
+        `UPDATE inventario_tabletas
+         SET estado_asignacion = 'EN_RESGUARDO',
+             nombre_resguardante = ?,
+             cargo_resguardante = ?,
+             region = ?,
+             oficina_programa = ?,
+             tiene_cargador = ?,
+             tiene_caja = ?,
+             estatus_fisico = ?,
+             observaciones = ?,
+             sin_resguardo_previo = 0
+         WHERE id = ?`,
+        [
+          nombreResg,
+          cargoResg,
+          region,
+          oficina_programa,
+          tieneCargador,
+          tieneCaja,
+          estatusFisico,
+          observaciones,
+          tab.id,
+        ]
+      );
+
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    await registrarBitacora(
+      req,
+      "TABLETAS",
+      "ASIGNAR_RESGUARDO",
+      `Resguardo personal Folio ${folio} generado para Tableta #${noResguardo} a favor de "${nombreResg}".`
+    );
+    await registrarBitacoraTableta(req, {
+      tableta_id: id,
+      no_resguardo: noResguardo,
+      accion: "ASIGNAR_RESGUARDO",
+      detalles: `Resguardo personal Folio ${folio} generado a favor de "${nombreResg}".`
+    });
+
+    return res.json({
+      ok: true,
+      movimiento_id: movId,
+      folio,
+      pdf_url: `/api/tabletas/movimientos/${movId}/pdf`,
+      message: `Resguardo personal Folio ${folio} asignado correctamente a ${nombreResg}.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al generar resguardo de tableta");
+  }
+});
+
+// 7. GET /api/tabletas/movimientos/:movId/pdf — PDF oficial de Resguardo Personal o Vale de Devolución
+app.get("/api/tabletas/movimientos/:movId/pdf", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canAccessTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para descargar formatos de tabletas.");
+    }
+    const movId = Number(req.params.movId);
+    if (!Number.isInteger(movId) || movId <= 0) return httpError(res, 400, "ID de movimiento inválido.");
+
+    const [[mov]] = await poolRead.query(`SELECT * FROM movimientos_tabletas WHERE id = ? LIMIT 1`, [movId]);
+    if (!mov) return httpError(res, 404, "Movimiento no encontrado.");
+
+    const [[tab]] = await poolRead.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1`, [mov.tableta_id]);
+    if (!tab) return httpError(res, 404, "Tableta asociada no encontrada.");
+
+    return renderTabletaFormatoPdf(req, res, {
+      tableta: tab,
+      movimiento: mov,
+      modo: mov.tipo,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al generar PDF del movimiento de tableta");
+  }
+});
+
+// 8. GET /api/tabletas/:id/resguardo-pdf — PDF directo de Resguardo Personal actual de una tableta
+app.get("/api/tabletas/:id/resguardo-pdf", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canAccessTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para descargar formatos de tabletas.");
+    }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return httpError(res, 400, "ID de tableta inválido.");
+
+    const [[tab]] = await poolRead.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1`, [id]);
+    if (!tab) return httpError(res, 404, "Tableta no encontrada.");
+
+    const [[lastAsig]] = await poolRead.query(
+      `SELECT * FROM movimientos_tabletas
+       WHERE tableta_id = ? AND tipo = 'ASIGNACION' AND estado = 'CONFIRMADO'
+       ORDER BY id DESC LIMIT 1`,
+      [tab.id]
+    );
+
+    return renderTabletaFormatoPdf(req, res, {
+      tableta: tab,
+      movimiento: lastAsig || null,
+      modo: "ASIGNACION",
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al generar PDF de resguardo de tableta");
   }
 });
 
@@ -10349,9 +16078,10 @@ const server = app.listen(port, '0.0.0.0', async () => {
     await ensureSchemaAndUsers();
     // DRP: Snapshot inicial de la base de datos para recuperación ante desastres
     exportDatabaseSnapshot().catch((err) => console.warn("[WARN] Snapshot inicial BD:", err?.message || err));
-    // Si inventario_oficina está vacío y existe seed_pruebas.sql, poblar datos de prueba automáticamente
+    // Si inventario_oficina y almacen_dregcivil están completamente vacíos, poblar datos de prueba automáticamente
     const [[invCount]] = await poolRead.query(`SELECT COUNT(*) AS n FROM inventario_oficina`).catch(() => [[{ n: 1 }]]);
-    if (Number(invCount?.n || 0) === 0) {
+    const [[almCount]] = await poolRead.query(`SELECT COUNT(*) AS n FROM almacen_dregcivil`).catch(() => [[{ n: 1 }]]);
+    if (Number(invCount?.n || 0) === 0 && Number(almCount?.n || 0) === 0) {
       const { runSeedPruebas } = require("./seed-pruebas");
       await runSeedPruebas().catch((err) => console.warn("[WARN] Auto-seed pruebas:", err?.message || err));
     }

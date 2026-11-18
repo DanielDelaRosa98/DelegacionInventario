@@ -1,9 +1,54 @@
 (() => {
   'use strict';
 
+  const APP_VERSION = 62;
+
   const $ = (id)=> document.getElementById(id);
   const hide = (id)=>{ const el=$(id); if(el) el.classList.add('hidden'); };
   const show = (id)=>{ const el=$(id); if(el) el.classList.remove('hidden'); };
+
+  function escHtml(unsafe) {
+    return (unsafe ?? '').toString()
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  const TITULARES_REGIONALES_V59 = {
+    LA_PAZ: 'Sandra Guadalupe Salvatierra Amador',
+    LOS_CABOS: 'Samir Savin Ruiz',
+    COMONDU_LORETO: 'Humberto Arce Cordero',
+    MULEGE: 'Diana Ramírez Hernández',
+  };
+
+  function getTitularRegionalFromText(regOrUser) {
+    const k = String(regOrUser || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .trim();
+    if (!k) return '';
+    if (k.includes('CABOS') || k === 'LOSCABOS') return TITULARES_REGIONALES_V59.LOS_CABOS;
+    if (k.includes('COMONDU') || k.includes('LORETO')) return TITULARES_REGIONALES_V59.COMONDU_LORETO;
+    if (k.includes('MULEGE') || k.includes('GUERRERO')) return TITULARES_REGIONALES_V59.MULEGE;
+    if (k.includes('PAZ') || k === 'LAPAZ') return TITULARES_REGIONALES_V59.LA_PAZ;
+    return '';
+  }
+
+  function isSiniestroActivo(row) {
+    if (!row || typeof row !== 'object') return false;
+    const det = row.detalles_vehiculo && typeof row.detalles_vehiculo === 'object'
+      ? JSON.stringify(row.detalles_vehiculo)
+      : String(row.detalles_vehiculo || '');
+    const txt = [row.estatus_uso, row.estado_fisico, row.observaciones, row.observaciones_control, det]
+      .join(' ')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase();
+    return txt.includes('SINIESTRO') || txt.includes('ASEGURADORA') || txt.includes('NO DISPONIBLE');
+  }
 
   // Notificaciones flotantes fijas en el viewport (no requieren hacer scroll)
   function toast(msg, ok=false){
@@ -112,12 +157,56 @@
   const getAssignedRubroId = () => {
     const uname = String(CURRENT_USER?.username || UI_PERMISOS?.user || '').toLowerCase().trim();
     if (uname === 'jesus') return 3;
-    if (uname === 'luiseduardo') return 4;
+    if (['luismayoral', 'luiseduardo', 'luis'].includes(uname)) return 4;
     if (uname === 'evelia') return 2;
-    if (uname === 'gabrielfiol') return 1;
     const r = Number(uiPerms().regionalRubroId || UI_PERMISOS?.rubro_id || CURRENT_USER?.rubro_id || 0);
-    return r > 0 ? r : null;
+    return r > 1 ? r : null;
   };
+
+  function getLoggedUserFullName() {
+    if (!CURRENT_USER) return '';
+    const uName = norm(CURRENT_USER.username || UI_PERMISOS?.user || '');
+    if (uName === 'GABRIELFIOL' || uName === 'FIOL' || uName === 'ENCARGADO') {
+      return 'Gabriel Adán Fiol Collins';
+    }
+    const full = safestr(
+      CURRENT_USER.nombre_completo ||
+      [
+        CURRENT_USER.nombre || CURRENT_USER.NOMBRE,
+        CURRENT_USER.PRIMER_APELLIDO || CURRENT_USER.primer_apellido || CURRENT_USER.primer_ap,
+        CURRENT_USER.SEGUNDO_APELLIDO || CURRENT_USER.segundo_apellido || CURRENT_USER.segundo_ap
+      ].filter(Boolean).join(' ') ||
+      CURRENT_USER.nombre ||
+      CURRENT_USER.username ||
+      ''
+    );
+    return full;
+  }
+
+  function renderPruebaBadge(esPrueba) {
+    return Number(esPrueba) === 1
+      ? ' <span class="badge-prueba" title="Registro de prueba (No afecta inventarios reales)">🧪 PRUEBA</span>'
+      : '';
+  }
+
+  function getSolicitudStatusBadgeHtml(statusRaw) {
+    const st = String(statusRaw || 'PENDIENTE').trim().toUpperCase();
+    let cls = 'status-pendiente';
+    let label = st;
+    if (st === 'EN_PROCESO') {
+      cls = 'badge-status-en-proceso';
+      label = 'EN PROCESO';
+    } else if (st === 'PARA_FIRMAS') {
+      cls = 'badge-status-para-firmas';
+      label = 'PARA FIRMAS';
+    } else if (['COMPLETADA', 'SURTIDA', 'SURTIDO', 'ENTREGADA', 'ENTREGADO', 'APROBADA'].includes(st)) {
+      cls = 'badge-status-completada';
+      label = st === 'COMPLETADA' ? 'COMPLETADA' : st;
+    } else if (['CANCELADA', 'CANCELADO', 'RECHAZADA'].includes(st)) {
+      cls = 'status-cancelada';
+    }
+    return `<span class="status-badge ${cls}">${escHtml(label)}</span>`;
+  }
 
   // Regla de Negocio: Inventario General (Estatal) exclusivo para Rodrigo Molina, Jorge Patrón y Admin
   function canViewInventarioGeneral(user = CURRENT_USER) {
@@ -133,36 +222,59 @@
     );
   }
 
-  // Regla de Negocio: solo admin y Gabriel Fiol (almacén) pueden elegir cualquier departamento
+  // Regla de Negocio: solo Administrador puede elegir cualquier departamento (Gabriel Fiol solicita bajo su área)
   const canUserSelectAnyDepartment = () => {
+    const uname = norm(CURRENT_USER?.username || UI_PERMISOS?.user || '');
+    if (uname === 'gabrielfiol' || uname === 'fiol' || uname === 'encargado') return false;
     if (uiPerms().puedeSeleccionarCualquierDepartamento !== undefined) {
       return Boolean(uiPerms().puedeSeleccionarCualquierDepartamento);
     }
     if (CURRENT_USER?.puede_seleccionar_cualquier_departamento !== undefined) {
       return Boolean(CURRENT_USER.puede_seleccionar_cualquier_departamento);
     }
-    const uname = norm(CURRENT_USER?.username || '');
     const rol = norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || '');
-    return rol === 'ADMIN' || uname === 'admin' || uname === 'gabrielfiol';
+    return rol === 'ADMIN' || uname === 'admin';
+  };
+
+  const getBloqueReceptorVale = () => $('bloque-receptor-vale') || $('vp_bloque_quien_recibe');
+  const getTipoValeSelect = () => $('vp_tipo_vale') || $('vp_modalidad');
+
+  const isAuditorUser = () => {
+    const uname = norm(CURRENT_USER?.username || UI_PERMISOS?.user || '');
+    return ['RODRIGO', 'JORGE', 'JORGEPATRON'].includes(uname);
   };
 
   const canUserUseCuatroFirmas = () => {
-    if (uiPerms().puedeUsarCuatroFirmas !== undefined) {
-      return Boolean(uiPerms().puedeUsarCuatroFirmas);
-    }
     const uname = norm(CURRENT_USER?.username || UI_PERMISOS?.user || '');
     const rol = norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || '');
-    if (rol === 'ADMIN' || ['ADMIN', 'RODRIGO', 'JORGE', 'JORGEPATRON'].includes(uname)) return true;
-    if (rol === 'REGIONAL' || ['LAPAZ', 'SANDRA', 'LOSCABOS', 'COMONDU', 'MULEGE'].includes(uname)) return true;
-    if (rol === 'ENCARGADO' || ['JESUS', 'LUISEDUARDO', 'LUIS', 'GABRIELFIOL', 'FIOL', 'EVELIA'].includes(uname)) return true;
+    if (rol === 'ADMIN' || uname === 'ADMIN') return true;
+    const allowed = ['RODRIGO', 'JORGE', 'JORGEPATRON', 'LUISEDUARDO', 'LUIS', 'GABRIELFIOL', 'FIOL', 'ENCARGADO', 'EVELIA', 'JESUS'];
+    if (allowed.includes(uname)) return true;
+    if (rol === 'ENCARGADO') return true;
     return false;
   };
 
+  const canUserEditQuienRecibe = () => {
+    return canUserUseCuatroFirmas();
+  };
+
+  const canUserSeeAllSolicitudes = () => {
+    if (uiPerms().puedeVerTodasSolicitudes !== undefined) {
+      return Boolean(uiPerms().puedeVerTodasSolicitudes);
+    }
+    const uname = norm(CURRENT_USER?.username || UI_PERMISOS?.user || '');
+    const rol = norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || '');
+    return rol === 'ADMIN' || rol === 'ENCARGADO' || uname === 'admin' || uname === 'gabrielfiol' || uname === 'fiol' || uname === 'encargado';
+  };
+
   function getUserAssignedDepartment() {
+    const uName = norm(CURRENT_USER?.username || UI_PERMISOS?.user || '');
+    if (uName === 'gabrielfiol' || uName === 'fiol' || uName === 'encargado') {
+      return { id: 30030008, nombre: 'Encargado de Archivos y Materiales' };
+    }
     let id = Number(CURRENT_USER?.departamento_id || CURRENT_USER?.id_oficialia || 0);
     let nombre = safestr(CURRENT_USER?.departamento_nombre || CURRENT_USER?.oficialia_nombre || CURRENT_USER?.departamento);
     if (!id) {
-      const uName = norm(CURRENT_USER?.username || '');
       const regId = Number(CURRENT_USER?.region_id || UI_PERMISOS?.scope?.region_id || 0);
       if (uName === 'loscabos' || regId === 2) {
         id = 30030009;
@@ -333,9 +445,9 @@
     const regId = Number(scope.region_id || p.region_id || CURRENT_USER?.region_id || 0);
     const uName = norm(CURRENT_USER?.username || '');
     let userRegionLabel = 'La Paz';
-    if (regCod === 'LOS_CABOS' || regId === 2 || uName === 'loscabos') userRegionLabel = 'Los Cabos';
-    else if (regCod === 'MULEGE' || regId === 4 || uName === 'mulege') userRegionLabel = 'Mulegé';
-    else if (regCod === 'COMONDU_LORETO' || regId === 3 || uName === 'comondu') userRegionLabel = 'Comondú / Loreto';
+    if (regCod === 'LOS_CABOS' || regId === 2 || uName === 'LOSCABOS') userRegionLabel = 'Los Cabos';
+    else if (regCod === 'MULEGE' || regId === 4 || uName === 'MULEGE') userRegionLabel = 'Mulegé';
+    else if (regCod === 'COMONDU_LORETO' || regId === 3 || uName === 'COMONDU') userRegionLabel = 'Comondú / Loreto';
 
     if (regSel && !p.admin) {
       regSel.value = userRegionLabel;
@@ -347,17 +459,56 @@
 
     const selectedRegion = safestr(regSel?.value || userRegionLabel);
     const isSelectedForeign = ['los cabos', 'mulegé', 'mulege', 'comondú / loreto', 'comondu / loreto'].includes(selectedRegion.toLowerCase());
-    const showFirma = Boolean(p.es_region_foranea || scope.es_region_foranea || (p.admin && isSelectedForeign) || isSelectedForeign);
 
-    if (firmaCard) firmaCard.classList.toggle('hidden', !showFirma);
-    if (nombreWrap) nombreWrap.classList.toggle('hidden', !showFirma);
-    if (!showFirma && SOL_SIG_PAD && typeof SOL_SIG_PAD.clear === 'function') {
-      try { SOL_SIG_PAD.clear(); } catch {}
+    // v61: Firma digital SIEMPRE visible y obligatoria para TODOS los usuarios al crear una solicitud de almacén
+    if (firmaCard) firmaCard.classList.remove('hidden');
+    if (nombreWrap) nombreWrap.classList.remove('hidden');
+
+    const nameIn = $('sol_nombre_firma');
+    if (nameIn) {
+      if (isSelectedForeign) {
+        const titular = getTitularRegionalFromText(selectedRegion) || getTitularRegionalFromText(uName);
+        const cur = safestr(nameIn.value).trim();
+        const isKnownTitularOrPlaceholder =
+          !cur ||
+          Object.values(TITULARES_REGIONALES_V59).includes(cur) ||
+          /enlace regional|nieves flores/i.test(cur);
+        if (titular && isKnownTitularOrPlaceholder) nameIn.value = titular;
+      } else if (!safestr(nameIn.value)) {
+        const ownFull = getLoggedUserFullName();
+        if (ownFull) nameIn.value = ownFull;
+      }
+    }
+  }
+
+  function syncModoPruebaBannerAndControls() {
+    const activo = Boolean(UI_PERMISOS?.modo_prueba_grupal ?? true);
+    const banner = $('modo-prueba-banner');
+    if (banner) {
+      banner.classList.toggle('hidden', !activo);
+      banner.style.display = activo ? 'block' : 'none';
+    }
+    const badge = $('badge-modo-prueba-estado');
+    if (badge) {
+      badge.textContent = activo ? '🧪 MODO PRUEBA ACTIVO (Cero afectación a BD)' : '🟢 MODO PRODUCCIÓN REAL ACTIVO';
+      badge.style.background = activo ? '#f59e0b' : '#16a34a';
+      badge.style.color = '#ffffff';
+    }
+    const btnToggle = $('btn-toggle-modo-prueba');
+    if (btnToggle) {
+      btnToggle.textContent = activo
+        ? '🟢 Desactivar Modo Prueba (Pasar a Producción Real)'
+        : '🧪 Activar Modo Prueba Grupal';
+      btnToggle.style.background = activo ? '#15803d' : '#b45309';
+      btnToggle.style.borderColor = activo ? '#166534' : '#92400e';
     }
   }
 
   function applyPermassions(){  
     const p = uiPerms();
+    const uname = String(CURRENT_USER?.username || UI_PERMISOS?.user || '').toLowerCase().trim();
+    const isFiol = uname === 'gabrielfiol' || uname === 'fiol';
+    const hideReportesGraficas = !p.reportes?.acceso || isFiol;
 
     // 1. Ocultar/mostrar botones del Sidebar según el rol
     document.querySelectorAll('.sidebar-nav .nav-item').forEach(btn => {  
@@ -368,14 +519,29 @@
         btn.classList.toggle('hidden', !p.puedeAccederRegional);
       } else if (v === 'inventario_estatal') {
         btn.classList.toggle('hidden', !canViewInventarioGeneral());
+      } else if (v === 'tabletas') {
+        const canTab = Boolean(p.puedeAccederTabletas);
+        btn.classList.toggle('hidden', !canTab);
       } else if (v === 'reporte' || v === 'graficas') {
-        btn.classList.toggle('hidden', !p.reportes?.acceso);
+        btn.classList.toggle('hidden', hideReportesGraficas);
+        if (hideReportesGraficas) {
+          btn.style.display = 'none';
+        } else {
+          btn.style.removeProperty('display');
+        }
       } else if (v === 'auditoria') {
         btn.classList.toggle('hidden', !p.verLogs);
       } else if (v === 'usuarios') {
         btn.classList.toggle('hidden', !p.gestionarUsuarios);
       }
     });  
+
+    if (hideReportesGraficas) {
+      if ($('nav-reportes')) { $('nav-reportes').classList.add('hidden'); $('nav-reportes').style.display = 'none'; }
+      if ($('nav-graficas')) { $('nav-graficas').classList.add('hidden'); $('nav-graficas').style.display = 'none'; }
+      if ($('view-reporte')) { $('view-reporte').classList.add('hidden'); $('view-reporte').style.display = 'none'; }
+      if ($('view-graficas')) { $('view-graficas').classList.add('hidden'); $('view-graficas').style.display = 'none'; }
+    }  
 
     // 2. Botones de Inventario Regional según permisos de edición / PDF
     if ($('btn-reg-add')) $('btn-reg-add').classList.toggle('hidden', !p.puedeEditarRegional);
@@ -384,6 +550,62 @@
       $('btn-reg-pdf').classList.toggle('hidden', !canPdf);
       $('btn-reg-pdf').disabled = !canPdf;
     }
+
+    // 2B. Botones del módulo de Tabletas Digitales según permisos estrictos
+    if ($('btn-tab-bitacora')) $('btn-tab-bitacora').classList.toggle('hidden', !p.admin);
+    if ($('btn-tab-importar-excel')) $('btn-tab-importar-excel').classList.toggle('hidden', !p.puedeEditarTabletas);
+
+    // 2C. Acceso a Vales Provisionales (v61: Oculto para Gabriel Fiol ya que Rubro 1 se solicita por Solicitudes de Almacén; Luis Mayoral restringido a Rubro 4)
+    const isLuisRubro4 = !p.admin && getAssignedRubroId() === 4;
+    if ($('nav-vales-prestamo')) {
+      if (isFiol) {
+        $('nav-vales-prestamo').classList.add('hidden');
+        $('nav-vales-prestamo').style.display = 'none';
+      } else {
+        $('nav-vales-prestamo').classList.remove('hidden');
+        $('nav-vales-prestamo').style.removeProperty('display');
+      }
+    }
+    if ($('btn-sol-modo-prestamo')) {
+      $('btn-sol-modo-prestamo').classList.toggle('hidden', isFiol);
+      if (isFiol) $('btn-sol-modo-prestamo').style.display = 'none';
+      else $('btn-sol-modo-prestamo').style.removeProperty('display');
+    }
+    if ($('tipo_solicitud')) {
+      const optPrestamo = $('tipo_solicitud').querySelector('option[value="PRESTAMO_ACTIVOS"]');
+      if (optPrestamo) {
+        optPrestamo.hidden = isFiol;
+        optPrestamo.disabled = isFiol;
+      }
+    }
+    // v61: Ocultar pestaña Paso 4 (Descargar PDF) en creación de solicitudes para todos los usuarios (las órdenes nuevas van a revisión de Fiol)
+    if ($('btn-sol-tab-pdf')) {
+      $('btn-sol-tab-pdf').classList.add('hidden');
+      $('btn-sol-tab-pdf').style.display = 'none';
+    }
+    if ($('vp_rubro_id')) {
+      if (isLuisRubro4) {
+        $('vp_rubro_id').value = '4';
+        $('vp_rubro_id').disabled = true;
+        $('vp_rubro_id').classList.add('readonly');
+        $('vp_rubro_id').title = 'Rubro exclusivo asignado: 4. Tabletas Digitales (Luis Eduardo Mayoral Geraldo)';
+      } else {
+        $('vp_rubro_id').disabled = false;
+        $('vp_rubro_id').classList.remove('readonly');
+      }
+    }
+    if ($('vp_filter_rubro')) {
+      if (isLuisRubro4) {
+        $('vp_filter_rubro').value = '4';
+        $('vp_filter_rubro').disabled = true;
+        $('vp_filter_rubro').classList.add('readonly');
+      } else {
+        $('vp_filter_rubro').disabled = false;
+        $('vp_filter_rubro').classList.remove('readonly');
+      }
+    }
+
+    syncModoPruebaBannerAndControls();
 
     // 3. Selector de área/usuario al crear solicitud: bloqueado si no es admin ni gabrielfiol
     const uidIn = $('sol_user_id');  
@@ -426,8 +648,9 @@
     // 5. Menú y botones de acciones sobre solicitudes
     updateSolicitudActionsVisibility(CONSULTA_STATUS);
 
-    // 6. Modalidades permitidas en vales de préstamo
+    // 6. Modalidades y campos permitidos en vales de préstamo
     syncVpModalidadOptions();
+    syncVpQuienRecibeVisibility();
   }
 
   let API = ''; 
@@ -481,9 +704,33 @@
     routeKey('GET', '/api/inventario-regional'),
     routeKey('POST', '/api/inventario-regional'),
     routeKey('PUT', '/api/inventario-regional/:id'),
+    routeKey('PUT', '/api/inventario-regional/:id/forzar-retorno'),
+    routeKey('POST', '/api/inventario-regional/:id/forzar-retorno'),
+    routeKey('POST', '/api/inventario-regional/transferir'),
     routeKey('POST', '/api/inventario-regional/:id/transferir'),
     routeKey('POST', '/api/inventario-regional/formatos'),
-    routeKey('PUT', '/api/usuarios/:id/perfil')
+    routeKey('POST', '/api/inventario-regional/homologar-claves'),
+    routeKey('DELETE', '/api/inventario-regional/:id'),
+    routeKey('GET', '/api/ver-bitacora'),
+    routeKey('GET', '/api/admin/backups'),
+    routeKey('POST', '/api/admin/backups/restore'),
+    routeKey('POST', '/api/migracion/consolidar-bodega-rm-jesus'),
+    routeKey('PUT', '/api/usuarios/:id/perfil'),
+    routeKey('GET', '/api/tabletas'),
+    routeKey('GET', '/api/tabletas/bitacora'),
+    routeKey('PUT', '/api/tabletas/:id'),
+    routeKey('POST', '/api/tabletas/importar-nombres'),
+    routeKey('POST', '/api/tabletas/:id/generar-devolucion'),
+    routeKey('PUT', '/api/tabletas/movimientos/:movId/confirmar-devolucion'),
+    routeKey('POST', '/api/tabletas/:id/generar-resguardo'),
+    routeKey('PUT', '/api/vales-prestamo/:id/autorizar'),
+    routeKey('PUT', '/api/vales-prestamo/:id/devolver'),
+    routeKey('PUT', '/api/vales-prestamo/:id/cancelar'),
+    routeKey('PUT', '/api/solicitudes/:id/estado'),
+    routeKey('PATCH', '/api/solicitudes/:id/estado'),
+    routeKey('GET', '/api/admin/modo-prueba'),
+    routeKey('PUT', '/api/admin/modo-prueba'),
+    routeKey('DELETE', '/api/admin/purgar-pruebas')
   ]);
   async function hasRoute(method, path){ return APP_ROUTES.has(routeKey(method, path)); }
 
@@ -491,10 +738,20 @@
     const createSel = $('sol_user_id');
     const nameIn = $('sol_nombre_firma');
     if (!createSel || !nameIn) return;
+    const uName = norm(CURRENT_USER?.username || UI_PERMISOS?.user || '');
+    if (uName === 'GABRIELFIOL' || uName === 'FIOL' || uName === 'ENCARGADO') {
+      nameIn.value = 'Gabriel Adán Fiol Collins';
+      return;
+    }
     if (!force && safestr(nameIn.value)) return;
+    const ownFull = getLoggedUserFullName();
+    if (!canUserSelectAnyDepartment() && ownFull) {
+      nameIn.value = ownFull;
+      return;
+    }
     const selectedId = Number(createSel.value || 0);
     const found = OFICIALIAS_LIST.find(o => Number(o.id || 0) === selectedId);
-    const jefe = safestr(found?.oficial_reponsable) || safestr(CURRENT_USER?.nombre_completo || CURRENT_USER?.nombre);
+    const jefe = safestr(found?.oficial_reponsable) || ownFull;
     if (jefe) nameIn.value = jefe;
   }
 
@@ -547,7 +804,7 @@
     createSel.innerHTML = filteredOfi.map(o => {
       const id = Number(o.id || 0);
       const nombre = safestr(o.nombre) || `Área ${id}`;
-      return `<option value="${id}">${nombre}</option>`;
+      return `<option value="${id}">${escHtml(nombre)}</option>`;
     }).join('') || '<option value="">Sin áreas disponibles</option>';
 
     if (!canSelectAny) {
@@ -555,6 +812,11 @@
       createSel.disabled = true;
       createSel.classList.add('readonly');
       createSel.title = `Área asignada a tu perfil: ${userDepto.nombre}`;
+      const uName = norm(CURRENT_USER?.username || UI_PERMISOS?.user || '');
+      if (uName === 'gabrielfiol' || uName === 'fiol' || uName === 'encargado') {
+        const nameIn = $('sol_nombre_firma');
+        if (nameIn) nameIn.value = 'Gabriel Adán Fiol Collins';
+      }
     } else {
       const validCurrent = currentCreate && filteredOfi.some(o => String(o.id) === String(currentCreate));
       createSel.value = validCurrent ? currentCreate : String(filteredOfi[0]?.id || userDepto.id);
@@ -570,7 +832,7 @@
       vpDeptoSel.innerHTML = filteredOfi.map(o => {
         const id = Number(o.id || 0);
         const nombre = safestr(o.nombre) || `Área ${id}`;
-        return `<option value="${id}">${nombre}</option>`;
+        return `<option value="${id}">${escHtml(nombre)}</option>`;
       }).join('') || '<option value="">Sin áreas disponibles</option>';
 
       if (!canSelectAny) {
@@ -587,12 +849,12 @@
     const vpFilterDepto = $('vp_filter_depto');
     if (vpFilterDepto) {
       if (!canSelectAny) {
-        vpFilterDepto.innerHTML = `<option value="${userDepto.id}">${userDepto.nombre}</option>`;
+        vpFilterDepto.innerHTML = `<option value="${Number(userDepto.id || 0)}">${escHtml(userDepto.nombre)}</option>`;
         vpFilterDepto.value = String(userDepto.id);
         vpFilterDepto.disabled = true;
       } else {
         const opts = ['<option value="0">Todos los Departamentos</option>']
-          .concat(filteredOfi.map(o => `<option value="${o.id}">${safestr(o.nombre)}</option>`));
+          .concat(filteredOfi.map(o => `<option value="${Number(o.id || 0)}">${escHtml(safestr(o.nombre))}</option>`));
         vpFilterDepto.innerHTML = opts.join('');
         vpFilterDepto.disabled = false;
       }
@@ -602,7 +864,7 @@
   async function loadSolicitudOficialias(){
     const listSel = $('list_oficialia');
     if (!listSel) return;
-    const canSelectAny = canUserSelectAnyDepartment();
+    const canSeeAll = canUserSeeAllSolicitudes();
     let rows = [];
     try{
       if (await hasRoute('GET','/api/oficialias')){
@@ -613,20 +875,20 @@
 
     const userDepto = getUserAssignedDepartment();
 
-    if (!canSelectAny) {
+    if (!canSeeAll) {
       // Regla de Negocio 2:
       // En el filtro del listado, ocultar "Todos los departamentos" y dejar fijo su departamento
       let myOfi = rows.find(r => Number(r.id) === Number(userDepto.id));
       if (!myOfi) {
         myOfi = { id: userDepto.id, nombre: userDepto.nombre };
       }
-      listSel.innerHTML = `<option value="${myOfi.id}">${escHtml(safestr(myOfi.nombre))}</option>`;
+      listSel.innerHTML = `<option value="${Number(myOfi.id || 0)}">${escHtml(safestr(myOfi.nombre))}</option>`;
       listSel.value = String(myOfi.id);
       listSel.disabled = true;
       listSel.classList.add('readonly');
       listSel.title = `Filtro fijo a tu departamento: ${safestr(myOfi.nombre)}`;
     } else {
-      const options = rows.map(r => `<option value="${Number(r.id || 0)}">${safestr(r.nombre) || `Oficialía ${Number(r.id || 0)}`}</option>`).join('');
+      const options = rows.map(r => `<option value="${Number(r.id || 0)}">${escHtml(safestr(r.nombre) || `Oficialía ${Number(r.id || 0)}`)}</option>`).join('');
       listSel.innerHTML = '<option value="">Todos los departamentos</option>' + (options || '');
       listSel.value = '';
       listSel.disabled = false;
@@ -654,11 +916,19 @@
       const rol = u.rol || UI_PERMISOS?.rol || 'USUARIO';
       CURRENT_USER.rol = rol;
 
+      const uName = norm(u.username || '');
+      let rolDisplay = rol;
+      if (uName === 'gabrielfiol' || uName === 'fiol' || uName === 'encargado') {
+        rolDisplay = 'ENCARGADO DE ARCHIVOS Y MATERIALES';
+      }
+
       if($('who'))$('who').textContent = u.username || u.nombre || 'usuario';
-      if($('who_rol'))$('who_rol').textContent = `[${rol}]`; 
+      if($('who_rol'))$('who_rol').textContent = `[${rolDisplay}]`; 
       
       applyPermassions();
-      showView('panel_general'); 
+      const unameLower = String(u.username || '').toLowerCase().trim();
+      const isLuisMayoral = ['luismayoral', 'luiseduardo', 'luis'].includes(unameLower) || (!uiPerms().admin && Number(u.rubro_id || UI_PERMISOS?.rubro_id || 0) === 4);
+      showView(isLuisMayoral ? 'tabletas' : 'panel_general'); 
       
       await Promise.all([loadSolicitudUsers(), loadSolicitudOficialias()]); 
       applyPermassions();
@@ -675,12 +945,28 @@
   }
 
   function showView(id){
+    // v53: Auto-cerrar Bitácora de Movimientos al cambiar de menú/pestaña
+    if (typeof closeBitacoraModal === 'function') {
+      try { closeBitacoraModal(); } catch (_) {}
+    }
+
+    const p = uiPerms();
+    const uname = String(CURRENT_USER?.username || UI_PERMISOS?.user || '').toLowerCase().trim();
+    const isFiol = uname === 'gabrielfiol' || uname === 'fiol';
+    if ((id === 'reporte' || id === 'graficas') && (!p.reportes?.acceso || isFiol)) {
+      toast('Acceso restringido', false);
+      return showView(p.puedeAccederAlmacen ? 'almacen' : 'panel_general');
+    }
     if (id === 'inventario_estatal' && !canViewInventarioGeneral()) {
       toast('Acceso exclusivo para Rodrigo Molina, Jorge Patrón y Administración', false);
       return showView('panel_general');
     }
     if (id === 'regional' && uiPerms().puedeAccederRegional === false) {
       toast('No tienes acceso al módulo de Inventario Regional', false);
+      return showView('panel_general');
+    }
+    if (id === 'tabletas' && !uiPerms().puedeAccederTabletas) {
+      toast('Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales y Administración', false);
       return showView('panel_general');
     }
     document.querySelectorAll('.view-section, #view-container > section').forEach(sec => {
@@ -730,6 +1016,9 @@
     if (id === 'vales_prestamo') {
       if (typeof loadValesProvisionales === 'function') loadValesProvisionales();
     }
+    if (id === 'tabletas') {
+      if (typeof loadTabletasModule === 'function') loadTabletasModule();
+    }
     if (id === 'reporte') { setReporteView('home'); loadReporteUsuarios(); }
     if (id === 'graficas') { loadGraficas(); }
     if (id === 'auditoria') { if (typeof loadAuditoria === 'function') loadAuditoria(); }
@@ -742,8 +1031,8 @@
       const rows = Array.isArray(solRes?.data) ? solRes.data : [];
 
       const total = rows.length;
-      const pendientes = rows.filter(r => norm(r.status || r.STATUS) === 'PENDIENTE').length;
-      const surtidas = rows.filter(r => ['APROBADA', 'SURTIDA', 'ENTREGADO', 'ENTREGADA'].includes(norm(r.status || r.STATUS))).length;
+      const pendientes = rows.filter(r => ['PENDIENTE', 'EN_PROCESO', 'PARA_FIRMAS'].includes(norm(r.status || r.STATUS))).length;
+      const surtidas = rows.filter(r => ['COMPLETADA', 'APROBADA', 'SURTIDA', 'ENTREGADO', 'ENTREGADA'].includes(norm(r.status || r.STATUS))).length;
 
       if ($('kpi-ordenes-total'))$('kpi-ordenes-total').textContent = total;
       if ($('kpi-ordenes-pendientes'))$('kpi-ordenes-pendientes').textContent = pendientes;
@@ -772,21 +1061,18 @@
                   ${recientes.map(r => {
                     const id = r.id ?? r.ID;
                     const status = String(r.status ?? r.STATUS ?? '-').toUpperCase();
-                    let badgeClass = 'status-pendiente';
-                    if (['APROBADA', 'SURTIDA', 'ENTREGADA'].includes(status)) badgeClass = 'status-aprobada';
-                    if (['CANCELADA', 'CANCELADO', 'RECHAZADA'].includes(status)) badgeClass = 'status-cancelada';
-                    const tieneFirma = Boolean(r.tiene_firma_digital || r.folio_firma_digital || r.firma_solicitante_data);
+                    const tieneFirma = Boolean(r.tiene_firma_digital || r.folio_firma_digital || r.firma_solicitante_data || r.firma_solicitante);
                     const firmaBadge = tieneFirma
-                      ? `<div style="margin-top:4px;"><span class="badge-firma-digital" title="Sello: ${safestr(r.folio_firma_digital || '')}">✓ Firmado Digitalmente por Solicitante</span></div>`
+                      ? `<div style="margin-top:4px;"><span class="badge-firma-digital" title="Sello: ${escHtml(safestr(r.folio_firma_digital || ''))}">✓ Firmado Digitalmente por Solicitante</span></div>`
                       : '';
-                    const regTxt = safestr(r.region_solicitante) ? `<div class="muted" style="font-size:11px;">Región: ${safestr(r.region_solicitante)}</div>` : '';
+                    const regTxt = safestr(r.region_solicitante) ? `<div class="muted" style="font-size:11px;">Región: ${escHtml(safestr(r.region_solicitante))}</div>` : '';
                     return `<tr>
-                      <td><b>#${id}</b></td>
-                      <td>${fmtDate(r.fecha_solicitud)}</td>
-                      <td>${safestr(r.nombre_solicitante_firma) || pickUsuario(r)}${regTxt}</td>
-                      <td>${safestr(r.oficialia_nombre || r.id_oficialia || '-')}</td>
-                      <td><span class="status-badge ${badgeClass}">${status}</span>${firmaBadge}</td>
-                      <td><button class="mini" data-open-sol="${id}">Revisar / Surtir</button></td>
+                      <td><b>#${escHtml(id)}</b>${renderPruebaBadge(r.es_prueba)}</td>
+                      <td>${escHtml(fmtDate(r.fecha_solicitud))}</td>
+                      <td>${escHtml(safestr(r.nombre_solicitante_firma) || pickUsuario(r))}${regTxt}</td>
+                      <td>${escHtml(safestr(r.oficialia_nombre || r.id_oficialia || '-'))}</td>
+                      <td>${getSolicitudStatusBadgeHtml(status)}${firmaBadge}</td>
+                      <td><button class="mini" data-open-sol="${escHtml(id)}">Revisar / Surtir</button></td>
                     </tr>`;
                   }).join('')}
                 </tbody>
@@ -838,17 +1124,17 @@
                 ? '<span style="color: var(--accent); font-weight: 600;">Exitoso</span>' 
                 : '<span style="color: var(--danger); font-weight: 600;">Fallido</span>';
               return `<tr>
-                <td>${r.id}</td>
-                <td><b>${safestr(r.username)}</b></td>
-                <td>${safestr(r.ip_address)}</td>
-                <td>${f}</td>
+                <td>${escHtml(r.id)}</td>
+                <td><b>${escHtml(safestr(r.username))}</b></td>
+                <td>${escHtml(safestr(r.ip_address))}</td>
+                <td>${escHtml(f)}</td>
                 <td>${exito}</td>
               </tr>`;
             }).join('')}
           </tbody>
         </table>`;
     } catch (e) {
-      box.innerHTML = `<div class="muted" style="color: var(--danger);">${e.message || 'Error al cargar bitácora'}</div>`;
+      box.innerHTML = `<div class="muted" style="color: var(--danger);">${escHtml(e.message || 'Error al cargar bitácora')}</div>`;
     }
   }
 
@@ -976,8 +1262,39 @@
     }
   }
 
+  function syncVpQuienRecibeVisibility() {
+    const bloqueRecibe = getBloqueReceptorVale();
+    if (!bloqueRecibe) return;
+
+    const modSelect = getTipoValeSelect();
+    const modVal = String(modSelect?.value || '2_FIRMAS');
+    const allowed = canUserUseCuatroFirmas();
+    const is4Firmas = allowed && (modVal === '4_FIRMAS' || modVal === '1');
+
+    if (is4Firmas) {
+      bloqueRecibe.style.display = 'block';
+      bloqueRecibe.classList.remove('hidden');
+    } else {
+      bloqueRecibe.style.display = 'none';
+      bloqueRecibe.classList.add('hidden');
+
+      // Sincronizar automáticamente en segundo plano los campos de quien recibe con los del solicitante
+      const solNombre = safestr($('vp_solicitante_nombre')?.value);
+      const solCargo = safestr($('vp_solicitante_cargo')?.value);
+      const deptoOption = $('vp_departamento_id')?.selectedOptions?.[0];
+      const deptoNombre = deptoOption ? deptoOption.textContent.trim() : '';
+
+      if ($('vale-recibe-nombre')) {
+        $('vale-recibe-nombre').value = solNombre;
+      }
+      if ($('vale-recibe-cargo')) {
+        $('vale-recibe-cargo').value = solCargo || deptoNombre;
+      }
+    }
+  }
+
   function syncVpModalidadOptions() {
-    const modSelect = $('vp_modalidad');
+    const modSelect = getTipoValeSelect();
     if (!modSelect) return;
     const allowed = canUserUseCuatroFirmas();
     const opt4 = modSelect.querySelector('option[value="4_FIRMAS"]');
@@ -993,13 +1310,14 @@
       }
     }
     syncVpMinDates();
+    syncVpQuienRecibeVisibility();
   }
 
   function syncVpMinDates() {
     const todayLocal = getTodayLocalISO();
     const salidaIn = $('vp_fecha_salida');
     const devIn = $('vp_fecha_devolucion_estimada');
-    const modSelect = $('vp_modalidad');
+    const modSelect = getTipoValeSelect();
     const fDevWrap = $('vp_fecha_devolucion_wrap');
     const devLabel = $('vp_fecha_devolucion_label');
     const devHint = $('vp_fecha_devolucion_hint');
@@ -1051,6 +1369,12 @@
   }
 
   function setSolicitudModo(modo){
+    const uname = String(CURRENT_USER?.username || UI_PERMISOS?.user || '').toLowerCase().trim();
+    const isFiol = uname === 'gabrielfiol' || uname === 'fiol' || uname === 'encargado';
+    if (isFiol && modo === 'PRESTAMO_ACTIVOS') {
+      toast('Los materiales de almacén (Rubro 1) se gestionan exclusivamente en Solicitudes de Almacén.', false);
+      modo = 'CONSUMIBLES';
+    }
     const isPrestamo = modo === 'PRESTAMO_ACTIVOS';
     const btnCons = $('btn-sol-modo-consumibles');
     const btnPrest = $('btn-sol-modo-prestamo');
@@ -1075,25 +1399,56 @@
         panePrestamo.style.display = 'block';
       }
 
-      // Asignar rubro automático si el usuario tiene un rubro encargado (Jesús, Luis Eduardo, Evelia, etc.)
+      // Asignar rubro automático si el usuario tiene un rubro encargado (Jesús=3, Luis Eduardo=4, Evelia=2)
       const assignedRubro = getAssignedRubroId();
-      if (assignedRubro && $('vp_rubro_id')) {
-        $('vp_rubro_id').value = String(assignedRubro);
+      if ($('vp_rubro_id')) {
+        if (assignedRubro && assignedRubro >= 2) {
+          $('vp_rubro_id').value = String(assignedRubro);
+          if (!uiPerms().admin && assignedRubro === 4) {
+            $('vp_rubro_id').disabled = true;
+            $('vp_rubro_id').classList.add('readonly');
+          }
+        } else if (!$('vp_rubro_id').value || $('vp_rubro_id').value === '1') {
+          $('vp_rubro_id').value = '2';
+        }
       }
 
-      // Prellenar solicitante si está vacío
-      const uNombre = [CURRENT_USER?.nombre, CURRENT_USER?.PRIMER_APELLIDO, CURRENT_USER?.SEGUNDO_APELLIDO].filter(Boolean).join(' ') || CURRENT_USER?.nombre || '';
-      if ($('vp_solicitante_nombre') && !$('vp_solicitante_nombre').value) {
-        $('vp_solicitante_nombre').value = uNombre;
+      // v61: Prellenar SIEMPRE con el nombre real del usuario logueado en sesión (NUNCA precargar "Sandra Guadalupe Salvatierra Amador" por región)
+      const uNombreReal = getLoggedUserFullName();
+      const userDepto = getUserAssignedDepartment();
+      const uCargoReal = safestr(CURRENT_USER?.cargo || userDepto.nombre || CURRENT_USER?.departamento || '');
+      const rolNorm = norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || 'USUARIO');
+      const isStandardUser = rolNorm === 'USUARIO' && !uiPerms().admin;
+
+      if ($('vp_departamento_id') && userDepto.id && !canUserSelectAnyDepartment()) {
+        $('vp_departamento_id').value = String(userDepto.id);
       }
-      if ($('vale-recibe-nombre') && !$('vale-recibe-nombre').value) {
-        $('vale-recibe-nombre').value = uNombre;
+
+      const solNombreIn = $('vp_solicitante_nombre');
+      if (solNombreIn) {
+        if (isStandardUser || !solNombreIn.value || /sandra guadalupe salvatierra amador/i.test(solNombreIn.value)) {
+          solNombreIn.value = uNombreReal;
+        }
+        solNombreIn.readOnly = isStandardUser;
+        solNombreIn.classList.toggle('readonly', isStandardUser);
+      }
+      const solCargoIn = $('vp_solicitante_cargo');
+      if (solCargoIn) {
+        if (isStandardUser || !solCargoIn.value) {
+          solCargoIn.value = uCargoReal;
+        }
+      }
+      if ($('vale-recibe-nombre')) {
+        if (!$('vale-recibe-nombre').value || /sandra guadalupe salvatierra amador/i.test($('vale-recibe-nombre').value)) {
+          $('vale-recibe-nombre').value = uNombreReal;
+        }
       }
       if ($('vale-recibe-cargo') && !$('vale-recibe-cargo').value) {
-        $('vale-recibe-cargo').value = CURRENT_USER?.departamento || '';
+        $('vale-recibe-cargo').value = uCargoReal;
       }
       syncVpModalidadOptions();
       syncVpMinDates();
+      syncVpQuienRecibeVisibility();
       if (typeof loadVpCatalogo === 'function') loadVpCatalogo();
     } else {
       if (panePrestamo) {
@@ -1215,9 +1570,22 @@
     const obs  = $('obs_sol')?.value?.trim() || '';
     const regEl = $('sol_region') || $('sol_region_solicitante');
     const regionSol = safestr(regEl?.value) || 'La Paz';
-    const firmaVisible = !$('sol_firma_card_wrap')?.classList.contains('hidden');
-    const nombreFirma = firmaVisible ? (safestr($('sol_nombre_firma')?.value) || null) : null;
-    const firmaData = firmaVisible ? (SOL_SIG_PAD?.getDataUrl() || null) : null;
+    const nombreFirma = safestr($('sol_nombre_firma')?.value) || getLoggedUserFullName();
+    if ($('sol_nombre_firma') && !safestr($('sol_nombre_firma').value) && nombreFirma) {
+      $('sol_nombre_firma').value = nombreFirma;
+    }
+    if (!nombreFirma) {
+      toast('Ingresa el nombre completo de quien solicita y firma', false);
+      if (msg) msg.textContent = 'Ingresa el nombre completo de quien solicita y firma';
+      $('sol_nombre_firma')?.focus();
+      return;
+    }
+    const firmaData = SOL_SIG_PAD?.getDataUrl() || null;
+    if (!firmaData || (SOL_SIG_PAD && !SOL_SIG_PAD.hasSignature())) {
+      toast('✍️ La firma digital del solicitante es obligatoria antes de continuar al Paso 2.', false);
+      if (msg) msg.textContent = '✍️ Dibuja o sube tu firma digital en el recuadro antes de continuar.';
+      return;
+    }
 
     SOL_DRAFT = {
       usuario_id: CURRENT_USER?.id ?? null,
@@ -1226,6 +1594,7 @@
       observaciones: obs,
       region_solicitante: regionSol,
       nombre_solicitante_firma: nombreFirma,
+      firma_solicitante: firmaData,
       firma_solicitante_data: firmaData
     };
     SOL_DRAFT_ACTIVE = true;
@@ -1354,11 +1723,9 @@
     renderDetallePreviewFromRows();
     updateSolBadge();
 
-    // Limpiar campos para el siguiente producto
-    if ($('busca_prod')) $('busca_prod').value = '';
+    // Limpiar campos para el siguiente producto (v62: conservar búsqueda y resultados para adición rápida)
     if ($('det_cant')) $('det_cant').value = '1';
     if ($('det_obs')) $('det_obs').value = '';
-    if ($('prod_sel')) $('prod_sel').innerHTML = `<option value="">- selecciona producto -</option>`;
   }
 
   // --- Funciones de Datos Globales ---
@@ -1374,6 +1741,62 @@
   const PRODUCTO_CACHE     = new Map(); 
   const ALMACEN_CACHE      = new Map(); 
   const CATEGORIA_NOMBRE_BY_ID = new Map(); 
+
+  // v44: Selección múltiple y persistente en Almacén General
+  const selectedMaterialIds = new Set();
+  let filterOnlySelected = false;
+
+  // v44: Lematizador y normalizador de raíces para búsqueda flexible (acentos y plurales)
+  function getSearchTokenRoots(queryStr) {
+    if (!queryStr) return [];
+    const normalized = String(queryStr)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim();
+    if (!normalized) return [];
+
+    const tokens = normalized.split(/\s+/).filter(Boolean);
+    const roots = [];
+
+    for (const token of tokens) {
+      if (!token) continue;
+      const variants = new Set([token]);
+      // 1. -ces -> -z / -c (ej: lapices -> lapiz, lapic)
+      if (token.endsWith("ces") && token.length > 3) {
+        variants.add(token.slice(0, -3) + "z");
+        variants.add(token.slice(0, -3) + "c");
+      }
+      // 2. Consonante + es (ej: plumones -> plumon, papeles -> papel, colores -> color; sobres -> sobre)
+      else if (token.length > 3 && /[^aeiou]es$/i.test(token)) {
+        variants.add(token.slice(0, -2));
+        variants.add(token.slice(0, -1));
+      }
+      // 3. Vocal + s (ej: sillas -> silla, carpetas -> carpeta, toldos -> toldo)
+      else if (token.length > 2 && /[aeiou]s$/i.test(token)) {
+        variants.add(token.slice(0, -1));
+      }
+      roots.push(Array.from(variants));
+    }
+    return roots;
+  }
+
+  function matchFlexible(queryStr, ...fields) {
+    if (!queryStr || !queryStr.trim()) return true;
+    const tokenGroups = getSearchTokenRoots(queryStr);
+    if (!tokenGroups.length) return true;
+
+    const targetText = fields
+      .filter(Boolean)
+      .join(" ")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+
+    return tokenGroups.every(group =>
+      group.some(variant => targetText.includes(variant))
+    );
+  } 
 
   function extractClave(r) {
     const raw = r?.CLAVE ?? r?.clave ?? r?.PRODUCTO_CLAVE ?? r?.producto_clave ?? r?.CLAVE_PRODUCTO ?? r?.clave_producto ?? '';
@@ -1599,14 +2022,14 @@
               const atend = (r.atendida ?? r.ATENDIDA ?? '');
               const obs   = (r.observaciones ?? r.OBSERVACIONES ?? '');
               return `
-                <tr data-det="${detId}" data-index="${idx}">
-                  <td><b>${clave}</b></td>
-                  <td>${desc}</td>
-                  <td>${cat}</td>
-                  <td>${uni}</td>
+                <tr data-det="${escHtml(detId)}" data-index="${idx}">
+                  <td><b>${escHtml(clave)}</b></td>
+                  <td>${escHtml(desc)}</td>
+                  <td>${escHtml(cat)}</td>
+                  <td>${escHtml(uni)}</td>
                   <td><b>${cant}</b></td>
-                  <td><input class="mini-in in-atendida" type="number" min="0" max="${cant}" value="${atend}"></td>
-                  <td><input class="mini-in in-obs" type="text" value="${obs}"></td>
+                  <td><input class="mini-in in-atendida" type="number" min="0" max="${cant}" value="${escHtml(atend)}"></td>
+                  <td><input class="mini-in in-obs" type="text" value="${escHtml(obs)}"></td>
                   <td style="text-align:center;">
                     <button type="button" class="btn-del-det-row" data-index="${idx}" style="color:var(--danger, #ef4444); border:1px solid #fca5a5; background:transparent; padding:2px 8px; border-radius:4px; cursor:pointer;" title="Eliminar este producto">&times;</button>
                   </td>
@@ -1616,7 +2039,7 @@
         </table>
       </div>
       <div class="actions" style="margin-top:1rem; display:flex; gap:8px; flex-wrap:wrap;">
-        <button class="btn-primary" id="${saveButtonId}" type="button">Guardar solicitud</button>
+        <button class="btn-primary" id="${escHtml(saveButtonId)}" type="button">Guardar solicitud</button>
       </div>
     `;
   }
@@ -1624,10 +2047,12 @@
   function buildConsultaDetalleHtml(rows){
     if (!rows?.length) return '<div class="muted">Sin renglones.</div>';
     const p = uiPerms();
-    const stNorm = norm(CONSULTA_STATUS);
-    // Órdenes ya SURTIDAS / CANCELADAS / RECHAZADAS: solo lectura, sin comparar contra stock actual
-    const isClosed = ['SURTIDA', 'SURTIDO', 'ENTREGADA', 'CANCELADA', 'CANCELADO', 'RECHAZADA'].includes(stNorm);
-    const puedeSurtir = Boolean(p.solicitudes?.puedeSurtir) && !isClosed;
+    const stNorm = norm(CONSULTA_STATUS || 'PENDIENTE');
+    const isClosed = ['COMPLETADA', 'SURTIDA', 'SURTIDO', 'ENTREGADA', 'ENTREGADO', 'CANCELADA', 'CANCELADO', 'RECHAZADA'].includes(stNorm);
+    const isAuditorOnly = isAuditorUser();
+    const puedeSurtir = !isAuditorOnly && Boolean(p.solicitudes?.puedeSurtir) && !isClosed;
+    const canDownloadPdf = Boolean(p.solicitudes?.puedeDescargarPdf || p.admin || p.encargado || isAuditorOnly);
+    const allowEditQty = puedeSurtir && (stNorm === 'EN_PROCESO' || stNorm === 'PARA_FIRMAS');
 
     return `
       <div class="table-scroll">
@@ -1640,7 +2065,7 @@
               <th>Unidad</th>
               <th>Solicitada</th>
               ${puedeSurtir ? '<th>Stock Almacén</th>' : ''}
-              <th>Entregada</th>
+              <th>Cantidad Surtida</th>
               <th>Observaciones</th>
             </tr>
           </thead>
@@ -1653,8 +2078,9 @@
               const uni   = safestr(r.unidad ?? r.UNIDAD) || '-';
               const cant  = Number(r.cantidad ?? r.CANTIDAD ?? 0) || 0;
               const stockAlm = Number(r.stock_almacen ?? r.STOCK_ALMACEN ?? r.STOCK ?? r.stock ?? 0) || 0;
-              const rawAtend = Number(r.atendida ?? r.ATENDIDA ?? 0) || 0;
-              const defaultAtend = (rawAtend === 0)
+              const hasSurtida = r.cantidad_surtida !== null && r.cantidad_surtida !== undefined && r.cantidad_surtida !== '';
+              const rawAtend = hasSurtida ? Number(r.cantidad_surtida) : (Number(r.atendida ?? r.ATENDIDA ?? 0) || 0);
+              const defaultAtend = (!hasSurtida && rawAtend === 0 && stNorm === 'EN_PROCESO')
                 ? Math.max(0, Math.min(cant, stockAlm))
                 : rawAtend;
               const obs   = safestr(r.observaciones ?? r.OBSERVACIONES) || '';
@@ -1665,25 +2091,34 @@
                 : `<span style="${stockStyle}">${stockAlm}</span>`;
 
               if (puedeSurtir) {
-                return `<tr data-det="${detId}" data-clave="${escHtml(clave)}" data-desc="${escHtml(desc)}" data-cant="${cant}" data-stock="${stockAlm}">
-                  <td><b>${clave}</b></td>
-                  <td>${desc}</td>
-                  <td>${cat}</td>
-                  <td>${uni}</td>
+                const maxPermitido = UI_PERMISOS?.modo_prueba_grupal ? cant : Math.min(cant, Math.max(stockAlm, defaultAtend));
+                return `<tr data-det="${escHtml(detId)}" data-clave="${escHtml(clave)}" data-desc="${escHtml(desc)}" data-cant="${cant}" data-stock="${stockAlm}">
+                  <td><b>${escHtml(clave)}</b></td>
+                  <td>${escHtml(desc)}</td>
+                  <td>${escHtml(cat)}</td>
+                  <td>${escHtml(uni)}</td>
                   <td><b>${cant}</b></td>
                   <td>${stockBadge}</td>
-                  <td><input class="mini-in in-atendida" type="number" min="0" max="${Math.min(cant, Math.max(stockAlm, rawAtend))}" step="1" value="${defaultAtend}" style="width:75px;"></td>
-                  <td><input class="mini-in in-obs" type="text" value="${obs}" placeholder="Opcional" style="max-width:200px;"></td>
+                  <td>${
+                    allowEditQty
+                      ? `<input class="mini-in in-atendida" type="number" min="0" max="${maxPermitido}" step="1" value="${defaultAtend}" style="width:80px; font-weight:700;">`
+                      : `<b>${defaultAtend}</b> <span class="muted" style="font-size:11px;">(Acepta la orden para editar)</span>`
+                  }</td>
+                  <td>${
+                    allowEditQty
+                      ? `<input class="mini-in in-obs" type="text" value="${escHtml(obs)}" placeholder="Opcional" style="max-width:200px;">`
+                      : escHtml(obs || '-')
+                  }</td>
                 </tr>`;
               }
               return `<tr>
-                <td><b>${clave}</b></td>
-                <td>${desc}</td>
-                <td>${cat}</td>
-                <td>${uni}</td>
+                <td><b>${escHtml(clave)}</b></td>
+                <td>${escHtml(desc)}</td>
+                <td>${escHtml(cat)}</td>
+                <td>${escHtml(uni)}</td>
                 <td>${cant}</td>
-                <td>${rawAtend}</td>
-                <td>${obs || '-'}</td>
+                <td><b>${rawAtend}</b></td>
+                <td>${escHtml(obs || '-')}</td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -1691,14 +2126,46 @@
       </div>
       ${puedeSurtir ? `
         <div id="sol_surtir_alert" class="surtir-alert hidden" role="alert"></div>
-        <div style="margin-top:14px; display:flex; gap:10px; align-items:center; justify-content:flex-end;">
-          <span class="muted" style="font-size:12px; margin-right:auto;">Si un artículo no tiene existencia, deja su cantidad en 0 para surtir parcialmente los demás.</span>
-          <button class="btn-primary" id="btn-aprobar-surtir-consulta" type="button">
-            Aceptar y Surtir Orden (Descontar Inventario)
-          </button>
+        <div style="margin-top:14px; padding:12px 14px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between;">
+          ${stNorm === 'PENDIENTE' ? `
+            <div style="font-size:13px; color:#334155;">
+              <b>Paso 1 de 4 (PENDIENTE):</b> Revisa la orden solicitada y acéptala para pasarla a preparación y habilitar el ajuste de cantidades.
+            </div>
+            <button class="btn-primary" id="btn-sol-pasar-en-proceso" type="button" style="background:#1d4ed8; border-color:#1e40af;">
+              👍 Aceptar Orden (Pasar a En Proceso)
+            </button>
+          ` : ''}
+          ${stNorm === 'EN_PROCESO' ? `
+            <div style="font-size:13px; color:#1e40af;">
+              <b>Paso 2 de 4 (EN PROCESO):</b> Ajusta la <b>Cantidad Surtida</b> de cada artículo según el stock disponible (puedes poner 0 si no hay existencia). Aún no se descontará del inventario.
+            </div>
+            <button class="btn-primary" id="btn-sol-pasar-para-firmas" type="button" style="background:#7e22ce; border-color:#6b21a8;">
+              ✍️ Pasar a Recaudar Firmas (Listo para Imprimir)
+            </button>
+          ` : ''}
+          ${stNorm === 'PARA_FIRMAS' ? `
+            <div style="font-size:13px; color:#6b21a8;">
+              <b>Paso 3 de 4 (PARA FIRMAS):</b> Imprime el Vale PDF (ya incluye la firma digital del solicitante y las cantidades surtidas) para recabar firmas físicas. Al entregar el material, márcala como Completada.
+            </div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+              <button class="btn-secondary" id="btn-sol-imprimir-vale-firmas" type="button" style="background:#f3e8ff; color:#6b21a8; border:1px solid #c084fc; font-weight:700;">
+                🖨️ Imprimir Vale PDF (Con Firma del Solicitante)
+              </button>
+              <button class="btn-primary" id="btn-sol-marcar-completada" type="button" style="background:#15803d; border-color:#166534;">
+                ✅ Marcar como Entregada / Completada
+              </button>
+            </div>
+          ` : ''}
         </div>
       ` : (isClosed ? `
-        <div class="muted" style="margin-top:12px; font-size:12.5px;">Orden en estado <b>${escHtml(CONSULTA_STATUS)}</b>: vista de solo lectura (cantidades solicitadas y surtidas).</div>
+        <div style="margin-top:12px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+          <div class="muted" style="font-size:12.5px;">Orden en estado <b>${escHtml(CONSULTA_STATUS)}</b>: vista de solo lectura (cantidades solicitadas y surtidas).</div>
+          ${canDownloadPdf && ['COMPLETADA', 'SURTIDA', 'SURTIDO', 'ENTREGADA', 'ENTREGADO', 'APROBADA'].includes(stNorm) ? `
+            <button class="btn-secondary" id="btn-sol-imprimir-vale-firmas" type="button">
+              🖨️ Imprimir Vale PDF (Con Firma del Solicitante)
+            </button>
+          ` : ''}
+        </div>
       ` : '')}
     `;
   }
@@ -1732,7 +2199,7 @@
           const uni = safestr(r.unidad ?? r.UNIDAD);
           return `
             <div style="display:flex; justify-content:space-between; align-items:center; background:var(--card-bg, #fff); padding:6px 10px; border-radius:6px; border:1px solid var(--border);">
-              <span><b>${clave ? `${clave} - ` : ''}</b>${desc} &times; <b>${cant}</b> ${uni ? `(${uni})` : ''}</span>
+              <span><b>${clave ? `${escHtml(clave)} - ` : ''}</b>${escHtml(desc)} &times; <b>${cant}</b> ${uni ? `(${escHtml(uni)})` : ''}</span>
               <button type="button" class="btn-del-preview-row" data-index="${idx}" style="color:var(--danger, #ef4444); background:transparent; border:none; cursor:pointer; font-weight:bold; font-size:16px; line-height:1;" title="Eliminar">&times;</button>
             </div>
           `;
@@ -1803,9 +2270,10 @@
     if (!inConsulta) return;
 
     const p = uiPerms();
+    const isAuditorOnly = isAuditorUser();
     const rol = norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || 'USUARIO');
-    const isAdmin = Boolean(p.admin || rol === 'ADMIN');
-    const isEncargado = Boolean(p.encargado || rol === 'ENCARGADO');
+    const isAdmin = !isAuditorOnly && Boolean(p.admin || rol === 'ADMIN');
+    const isEncargado = !isAuditorOnly && Boolean(p.encargado || rol === 'ENCARGADO');
     const isCancelada = norm(status) === 'CANCELADA' || norm(status) === 'CANCELADO';
 
     const btnCancelar = $('btn-sol-cancelar');
@@ -1813,26 +2281,38 @@
     const btnPdf = $('btn-sol-pdf');
 
     // el usuario "departamento" solo puede descargar los pdf que existen:
-    // ocultar cancelar y eliminar para departamento
+    // ocultar cancelar y eliminar para departamento y auditores
     if (btnCancelar) {
-      const showCancel = (isAdmin || isEncargado);
+      const showCancel = !isAuditorOnly && (isAdmin || isEncargado);
       btnCancelar.classList.toggle('hidden', !showCancel);
       btnCancelar.disabled = !showCancel || isCancelada;
-      btnCancelar.title = isCancelada ? 'La solicitud ya está cancelada' : (showCancel ? 'Cancelar esta solicitud' : 'Solo usuarios autorizados');
+      btnCancelar.title = isAuditorOnly
+        ? 'Modo auditoría: solo lectura'
+        : (isCancelada ? 'La solicitud ya está cancelada' : (showCancel ? 'Cancelar esta solicitud' : 'Solo usuarios autorizados'));
     }
 
     if (btnEliminar) {
-      // el administrador puede eliminarlas
-      btnEliminar.classList.toggle('hidden', !isAdmin);
-      btnEliminar.disabled = !isAdmin;
-      btnEliminar.title = isAdmin ? 'Eliminar permanentemente esta solicitud' : 'Eliminar solo Admin';
+      // el administrador puede eliminarlas (auditores no pueden)
+      const showEliminar = !isAuditorOnly && isAdmin;
+      btnEliminar.classList.toggle('hidden', !showEliminar);
+      btnEliminar.disabled = !showEliminar;
+      btnEliminar.title = isAuditorOnly
+        ? 'Modo auditoría: solo lectura'
+        : (isAdmin ? 'Eliminar permanentemente esta solicitud' : 'Eliminar solo Admin');
     }
 
     if (btnPdf) {
-      // descargar PDF disponible para todos
-      btnPdf.classList.remove('hidden');
-      btnPdf.disabled = false;
-      btnPdf.title = 'Descargar Vale PDF oficial';
+      // v61: Bloquear y ocultar descarga de PDF de Solicitudes de Almacén para rol USUARIO; solo visible para Fiol/Encargado, Admin o Auditor (Jorge) y cuando ya está en PARA_FIRMAS / COMPLETADA
+      const canDownloadPdf = Boolean(p.solicitudes?.puedeDescargarPdf || isAdmin || isEncargado || isAuditorOnly);
+      const stNorm = norm(status);
+      const pdfReadyState = ['PARA_FIRMAS', 'COMPLETADA', 'SURTIDA', 'SURTIDO', 'ENTREGADA', 'ENTREGADO', 'APROBADA'].includes(stNorm);
+      const showPdfBtn = canDownloadPdf && pdfReadyState;
+      btnPdf.classList.toggle('hidden', !showPdfBtn);
+      btnPdf.style.display = showPdfBtn ? '' : 'none';
+      btnPdf.disabled = !showPdfBtn;
+      btnPdf.title = showPdfBtn
+        ? 'Imprimir Vale PDF Oficial (Con Firma del Solicitante)'
+        : 'El PDF se habilita para Almacén al pasar a Recaudar Firmas (PARA_FIRMAS)';
     }
   }
 
@@ -1900,32 +2380,35 @@
         productoLinea = `${clave ? (clave + ' - ') : ''}${desc || 'Producto'}` + (consultaRows.length > 1 ? `  (+${consultaRows.length - 1} mas)` : '');
       }
       const totalQty = consultaRows.reduce((acc, r) => acc + (Number(r.cantidad ?? r.CANTIDAD ?? 0) || 0), 0);
-      const totalAtendido = consultaRows.reduce((acc, r) => acc + (Number(r.atendida ?? r.ATENDIDA ?? 0) || 0), 0);
+      const totalAtendido = consultaRows.reduce((acc, r) => {
+        const hasSurt = r.cantidad_surtida !== null && r.cantidad_surtida !== undefined && r.cantidad_surtida !== '';
+        return acc + (hasSurt ? Number(r.cantidad_surtida) : (Number(r.atendida ?? r.ATENDIDA ?? 0) || 0));
+      }, 0);
 
       const regionSol = safestr(d.region_solicitante) || 'La Paz';
       const nombreFirmante = safestr(d.nombre_solicitante_firma) || usuario;
-      const tieneFirmaDig = Boolean(d.tiene_firma_digital || d.folio_firma_digital || d.firma_solicitante_data);
+      const tieneFirmaDig = Boolean(d.tiene_firma_digital || d.folio_firma_digital || d.firma_solicitante_data || d.firma_solicitante);
       const folioFirma = safestr(d.folio_firma_digital);
       const fechaFirmaFmt = d.fecha_firma_digital ? new Date(d.fecha_firma_digital).toLocaleString('es-MX') : fmtDate(d.fecha_solicitud);
 
       const box = $('sol_resumen');
       if (box){
         box.innerHTML = `
-          <div class="item"><div class="label">Folio</div><div class="value">#${idSol}</div></div>
-          <div class="item"><div class="label">Fecha</div><div class="value">${fechaFmt}</div></div>
-          <div class="item"><div class="label">Jefe / Enlace Solicitante</div><div class="value">${nombreFirmante}</div></div>
-          <div class="item"><div class="label">Región / Oficina</div><div class="value"><b>${regionSol}</b> — ${oficialia}</div></div>
-          <div class="item"><div class="label">Tipo</div><div class="value">${tipo}</div></div>
-          <div class="item"><div class="label">Estatus</div><div class="value">${status}</div></div>
+          <div class="item"><div class="label">Folio</div><div class="value">#${escHtml(idSol)}${renderPruebaBadge(d.es_prueba)}</div></div>
+          <div class="item"><div class="label">Fecha</div><div class="value">${escHtml(fechaFmt)}</div></div>
+          <div class="item"><div class="label">Jefe / Enlace Solicitante</div><div class="value">${escHtml(nombreFirmante)}</div></div>
+          <div class="item"><div class="label">Región / Oficina</div><div class="value"><b>${escHtml(regionSol)}</b> — ${escHtml(oficialia)}</div></div>
+          <div class="item"><div class="label">Tipo</div><div class="value">${escHtml(tipo)}</div></div>
+          <div class="item"><div class="label">Estatus</div><div class="value">${getSolicitudStatusBadgeHtml(status)}</div></div>
           <div class="item span-2"><div class="label">Firma Digital Solicitante</div><div class="value">${
             tieneFirmaDig
-              ? `<span class="badge-firma-digital">✓ Firmado Digitalmente por Solicitante</span> <span class="muted" style="font-size:12px; margin-left:6px;">(${fechaFirmaFmt}${folioFirma ? ` · Sello: <b>${folioFirma}</b>` : ''})</span>`
-              : `<span class="muted">Pendiente de firma digital (puedes firmarla abajo)</span>`
+              ? `<span class="badge-firma-digital">✓ Firmado Digitalmente por Solicitante</span> <span class="muted" style="font-size:12px; margin-left:6px;">(${escHtml(fechaFirmaFmt)}${folioFirma ? ` · Sello: <b>${escHtml(folioFirma)}</b>` : ''})</span>`
+              : `<span class="muted">Sin firma digital registrada</span>`
           }</div></div>
-          <div class="item span-2"><div class="label">Resumen</div><div class="value">${productoLinea} (${consultaRows.length} renglones)</div></div>
+          <div class="item span-2"><div class="label">Resumen</div><div class="value">${escHtml(productoLinea)} (${consultaRows.length} renglones)</div></div>
           <div class="item"><div class="label">Cantidad solicitada</div><div class="value">${totalQty}</div></div>
-          <div class="item"><div class="label">Cantidad atendida</div><div class="value">${totalAtendido}</div></div>
-          <div class="item span-2"><div class="label">Observaciones</div><div class="value">${observ}</div></div>
+          <div class="item"><div class="label">Cantidad surtida</div><div class="value">${totalAtendido}</div></div>
+          <div class="item span-2"><div class="label">Observaciones</div><div class="value">${escHtml(observ)}</div></div>
         `;
       }
 
@@ -1964,9 +2447,20 @@
     const obs  = $('obs_sol')?.value?.trim() || SOL_DRAFT?.observaciones || null;
     const regEl = $('sol_region') || $('sol_region_solicitante');
     const regionSol = safestr(regEl?.value) || SOL_DRAFT?.region_solicitante || 'La Paz';
-    const firmaVisible = !$('sol_firma_card_wrap')?.classList.contains('hidden');
-    const nombreFirma = firmaVisible ? (safestr($('sol_nombre_firma')?.value) || SOL_DRAFT?.nombre_solicitante_firma || null) : null;
-    const firmaData = firmaVisible ? (SOL_SIG_PAD?.getDataUrl() || SOL_DRAFT?.firma_solicitante_data || null) : null;
+    const nombreFirma = safestr($('sol_nombre_firma')?.value) || SOL_DRAFT?.nombre_solicitante_firma || getLoggedUserFullName() || null;
+    const firmaData = SOL_SIG_PAD?.getDataUrl() || SOL_DRAFT?.firma_solicitante_data || SOL_DRAFT?.firma_solicitante || null;
+
+    if (!nombreFirma) {
+      toast('Ingresa el nombre completo de quien solicita y firma en el Paso 1', false);
+      setSolicitudTab('crear');
+      $('sol_nombre_firma')?.focus();
+      return;
+    }
+    if (!firmaData) {
+      toast('✍️ La firma digital del solicitante es obligatoria antes de guardar la solicitud.', false);
+      setSolicitudTab('crear');
+      return;
+    }
 
     // Sincronizar cambios en campos Atendida u Observaciones si el usuario tiene permiso
     const tableRows = $('sol_detalle_box')?.querySelectorAll('tbody tr') || [];
@@ -2008,6 +2502,7 @@
           observaciones: obs,
           region_solicitante: regionSol,
           nombre_solicitante_firma: nombreFirma,
+          firma_solicitante: firmaData,
           firma_solicitante_data: firmaData,
           items: itemsPayload
         })
@@ -2017,25 +2512,14 @@
         throw new Error(res?.error || 'No se pudo crear la solicitud');
       }
 
-      SOL_ID = res.solicitud_id;
-      DET_SOL_ID = SOL_ID;
-      SOL_READY_FOR_PDF = true;
       CAPTURA_DIRTY = false;
+      const msgExito = '✅ Orden creada con éxito. El encargado de almacén la revisará para su surtido.';
+      toast(msgExito, true);
+      alert(msgExito);
 
-      if ($('sol_edit_id')) $('sol_edit_id').value = String(SOL_ID);
-      if (msg) msg.textContent = `Solicitud #${SOL_ID} guardada con éxito`;
-
-      toast(`Solicitud #${SOL_ID} guardada exitosamente`, true);
-
-      updateSolBadge();
-
-      const pdfSuccessText = $('sol_pdf_success_text');
-      if (pdfSuccessText) {
-        const selloInfo = res.folio_firma_digital ? ` (Firmada digitalmente con Sello ${res.folio_firma_digital})` : '';
-        pdfSuccessText.textContent = `La solicitud #${SOL_ID}${selloInfo} ha sido registrada con éxito en el sistema. Ahora puedes descargar el vale oficial en PDF con la firma digital impresa.`;
-      }
-
-      setSolicitudTab('pdf');
+      // v61: Limpiar formulario, carrito y pad de firma, y redirigir a la vista principal sin abrir/descargar PDF
+      resetSolicitudFlow({ stayInCaptura: false });
+      showView('panel_general');
     } catch (e) {
       if (msg) msg.textContent = e.message || 'Error al guardar solicitud';
       if (!handleAuthError(e)) toast(e.message || 'Error al guardar solicitud', false);
@@ -2044,38 +2528,25 @@
     }
   }
 
-  async function guardarTodoDetalle(containerId='sol_consulta_detalle', { goToPdf = false } = {}){
-    if (!uiPerms().solicitudes?.puedeSurtir){
-      SOL_READY_FOR_PDF = true;
-      updateSolBadge();
-      if (goToPdf) setSolicitudTab('pdf');
-      return true;
-    }
-    const targetSolId = containerId === 'sol_detalle_box' ? (SOL_ID || DET_SOL_ID) : (DET_SOL_ID || SOL_ID);
-    if (!targetSolId){ toast('Sin solicitud activa', false); return false; }
+  function collectConsultaItemsPayload(containerId = 'sol_consulta_detalle') {
     const tbody = $(containerId)?.querySelector('tbody');
-    if (!tbody){ toast('Nada que guardar', false); return false; }
-    const msg = $('sol_msg_detalle');
-    if (msg) msg.textContent = '';
-    showSurtirAlert('');
-
+    if (!tbody) return { payload: [], validationError: null };
     const payload = [];
     let validationError = null;
-    const sinStock = [];
+    const isModoPrueba = Boolean(UI_PERMISOS?.modo_prueba_grupal);
 
-    tbody.querySelectorAll('tr').forEach(tr=>{
+    tbody.querySelectorAll('tr').forEach(tr => {
       if (validationError) return;
       const detId = tr.dataset.det;
       const clave = tr.dataset.clave || 'Producto';
       const nombre = tr.dataset.desc || clave;
       const cant = Number(tr.dataset.cant || 0);
       const stock = Number(tr.dataset.stock || 0);
-      const inputs = tr.querySelectorAll('input');
-      const inAtend = tr.querySelector('.in-atendida') || inputs[0];
-      const inObs = tr.querySelector('.in-obs') || inputs[1];
-      if (stock <= 0) sinStock.push({ nombre, stock });
+      const inAtend = tr.querySelector('.in-atendida');
+      const inObs = tr.querySelector('.in-obs');
+      if (!inAtend) return;
 
-      const valRaw = String(inAtend?.value ?? '').trim();
+      const valRaw = String(inAtend.value ?? '').trim();
       if (valRaw === '' || isNaN(Number(valRaw))) {
         validationError = `Debes ingresar una cantidad válida a surtir para ${nombre} (usa 0 si no se surtirá).`;
         return;
@@ -2089,7 +2560,7 @@
         validationError = `La cantidad a surtir (${atendida}) no puede superar la cantidad solicitada (${cant}) para ${nombre}.`;
         return;
       }
-      if (atendida > stock) {
+      if (!isModoPrueba && atendida > stock) {
         if (stock <= 0) {
           validationError = `No hay stock disponible para ${nombre} (Existencia actual: 0).`;
         } else {
@@ -2097,45 +2568,81 @@
         }
         return;
       }
-      payload.push({ detalle_id: detId, atendida, observaciones: inObs?.value || null });
+      payload.push({
+        detalle_id: detId,
+        cantidad_surtida: atendida,
+        atendida,
+        observaciones: inObs?.value || null
+      });
     });
 
-    if (!validationError && payload.length && payload.every(it => it.atendida === 0)) {
-      validationError = 'No hay stock disponible para surtir esta solicitud (todas las cantidades a surtir están en 0).';
-    }
+    return { payload, validationError };
+  }
 
-    if (validationError) {
-      showSurtirAlert(validationError);
-      toast(validationError, false);
+  async function cambiarEstadoSolicitudConsulta(nuevoEstado) {
+    if (isAuditorUser() || !uiPerms().solicitudes?.puedeSurtir) {
+      toast('No tienes permisos para cambiar el estado de la solicitud.', false);
       return false;
+    }
+    const targetSolId = DET_SOL_ID || LIST_SELECTED_ID || SOL_ID;
+    if (!targetSolId) {
+      toast('Sin solicitud seleccionada', false);
+      return false;
+    }
+    showSurtirAlert('');
+
+    const estUpper = String(nuevoEstado || '').trim().toUpperCase();
+    let itemsPayload = [];
+
+    if (estUpper === 'PARA_FIRMAS' || estUpper === 'COMPLETADA') {
+      const { payload, validationError } = collectConsultaItemsPayload('sol_consulta_detalle');
+      if (validationError) {
+        showSurtirAlert(validationError);
+        toast(validationError, false);
+        return false;
+      }
+      itemsPayload = payload;
     }
 
     try {
-      await apiJSON(`/api/solicitudes/${targetSolId}/surtir`, {
-        method: 'POST',
+      const res = await apiJSON(`/api/solicitudes/${encodeURIComponent(targetSolId)}/estado`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: payload })
+        body: JSON.stringify({
+          status: estUpper,
+          items: itemsPayload
+        })
       });
+
       showSurtirAlert('');
-      toast('Solicitud surtida y existencias de almacén descontadas con éxito', true);
-      // Redireccionar al listado de solicitudes
-      showView('solicitudes');
-      setSolicitudesTab('lista');
+      if (estUpper === 'EN_PROCESO') {
+        toast('👍 Orden aceptada y pasada a EN PROCESO. Ahora puedes ajustar las cantidades a surtir.', true);
+      } else if (estUpper === 'PARA_FIRMAS') {
+        toast('✍️ Cantidades guardadas. Orden lista en PARA FIRMAS para imprimir el Vale PDF.', true);
+      } else if (estUpper === 'COMPLETADA') {
+        const msgComp = res?.inventario_descontado
+          ? '✅ Orden completada y existencias descontadas del almacén con éxito.'
+          : '✅ Orden completada en Modo de Prueba Grupal (sin afectar inventarios reales).';
+        toast(msgComp, true);
+      } else {
+        toast(`Estado actualizado a ${estUpper}`, true);
+      }
+
+      await consultarSolicitudById(targetSolId);
       await listarSolicitudes();
-      // Refrescar inventario de almacén y panel general en segundo plano
       if (typeof loadAlmacen === 'function') Promise.resolve(loadAlmacen()).catch(() => {});
       if (typeof loadPanelGeneral === 'function') Promise.resolve(loadPanelGeneral()).catch(() => {});
       return true;
-    } catch(e) {
-      let detail = e?.message || 'No se pudo surtir la solicitud';
-      // Nunca mostrar HTML crudo al usuario
-      if (/<\/?[a-z][\s\S]*>/i.test(detail) || /^Cannot (POST|PUT|GET)/i.test(detail)) {
-        detail = 'El servidor no reconoce la operación de surtido. Reinicia el servidor de la API (node server.js) e inténtalo de nuevo.';
-      }
+    } catch (e) {
+      const detail = e?.message || 'Error al actualizar el estado de la solicitud';
       showSurtirAlert(detail);
       if (!handleAuthError(e)) toast(detail, false);
       return false;
     }
+  }
+
+  async function guardarTodoDetalle(containerId='sol_consulta_detalle', { goToPdf = false } = {}){
+    return cambiarEstadoSolicitudConsulta('PARA_FIRMAS');
   }
 
   function renderSolicitudesListado(rows){
@@ -2153,17 +2660,14 @@
       const tipo = r.tipo_solicitud ?? r.TIPO ?? '-';
       const ofi  = r.oficialia_nombre ?? r.OFICIALIA_NOMBRE ?? r.id_oficialia ?? r.ID_OFICIALIA ?? '-';
       const status = String(r.status ?? r.STATUS ?? '-').toUpperCase();
-      let badgeClass = 'status-pendiente';
-      if (['APROBADA', 'SURTIDA', 'ENTREGADA'].includes(status)) badgeClass = 'status-aprobada';
-      if (['CANCELADA', 'CANCELADO', 'RECHAZADA'].includes(status)) badgeClass = 'status-cancelada';
-      const tieneFirma = Boolean(r.tiene_firma_digital || r.folio_firma_digital || r.firma_solicitante_data);
+      const tieneFirma = Boolean(r.tiene_firma_digital || r.folio_firma_digital || r.firma_solicitante_data || r.firma_solicitante);
       const firmaBadge = tieneFirma
-        ? `<div style="margin-top:4px;"><span class="badge-firma-digital" title="Sello: ${safestr(r.folio_firma_digital || '')}">✓ Firmado Digitalmente por Solicitante</span></div>`
+        ? `<div style="margin-top:4px;"><span class="badge-firma-digital" title="Sello: ${escHtml(safestr(r.folio_firma_digital || ''))}">✓ Firmado Digitalmente por Solicitante</span></div>`
         : '';
 
-      return `<tr data-sol-id="${id}">
-        <td><b>#${id}</b></td><td>${fec}</td><td>${usr}</td><td><b>${reg}</b></td><td>${tipo}</td><td>${ofi}</td>
-        <td><span class="status-badge ${badgeClass}">${status}</span>${firmaBadge}</td>
+      return `<tr data-sol-id="${escHtml(id)}">
+        <td><b>#${escHtml(id)}</b>${renderPruebaBadge(r.es_prueba)}</td><td>${escHtml(fec)}</td><td>${escHtml(usr)}</td><td><b>${escHtml(reg)}</b></td><td>${escHtml(tipo)}</td><td>${escHtml(ofi)}</td>
+        <td>${getSolicitudStatusBadgeHtml(status)}${firmaBadge}</td>
       </tr>`;
     }).join('');
     return `<div class="table-scroll"><table>${head}<tbody>${body}</tbody></table></div>`;
@@ -2172,7 +2676,7 @@
   async function listarSolicitudes(){
     const q = $('list_q').value.trim();
     let oficialia_id = $('list_oficialia')?.value?.trim() || '';
-    if (!canUserSelectAnyDepartment()) {
+    if (!canUserSeeAllSolicitudes()) {
       const userDepto = getUserAssignedDepartment();
       oficialia_id = String(userDepto.id || oficialia_id || '');
     }
@@ -2205,6 +2709,10 @@
   }
 
   async function cancelarSolicitud(){
+    if (isAuditorUser()) {
+      toast('Modo auditoría. No tienes permisos para cancelar solicitudes.', false);
+      return;
+    }
     const p = uiPerms();
     if (!p.solicitudes?.puedeCancelar){ toast('No tienes permiso para cancelar solicitudes', false); return; }
     const id = String($('sol_edit_id')?.value || LIST_SELECTED_ID || DET_SOL_ID || '').trim();
@@ -2230,6 +2738,10 @@
   }
 
   async function eliminarSolicitud(){
+    if (isAuditorUser()) {
+      toast('Modo auditoría. No tienes permisos para eliminar solicitudes.', false);
+      return;
+    }
     const p = uiPerms();
     if (!p.solicitudes?.puedeEliminar){ toast('Eliminar solo Admin', false); return; }
     const id = $('sol_edit_id').value.trim();
@@ -2284,7 +2796,7 @@
     ALM_UNI_OPTIONS = Array.from(vals).sort();
     if (ALM_UNI_OPTIONS.length === 0){ ensureUnidadInput(); return; }
     const sel = ensureUnidadSelect(); if (!sel) return;
-    sel.innerHTML = `<option value="">- seleccionar -</option>` + ALM_UNI_OPTIONS.map(u => `<option value="${u}">${u}</option>`).join('');
+    sel.innerHTML = `<option value="">- seleccionar -</option>` + ALM_UNI_OPTIONS.map(u => `<option value="${escHtml(u)}">${escHtml(u)}</option>`).join('');
     sel.value = '';
   }
   function ensureCategoriaInput(){
@@ -2333,7 +2845,7 @@
     const list = Array.from(vals).sort((a,b) => a.localeCompare(b));
     if (!list.length){ ensureCategoriaInput(); return; }
     const sel = ensureCategoriaSelect(); if (!sel) return;
-    sel.innerHTML = `<option value="">- seleccionar -</option>` + list.map(c => `<option value="${c}">${c}</option>`).join('');
+    sel.innerHTML = `<option value="">- seleccionar -</option>` + list.map(c => `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join('');
     ALM_CAT_IS_SELECT = true;
     if (ALM_EDIT_ID) onlyQtyEnabled();
   }
@@ -2348,7 +2860,7 @@
       if (!ALM_CATS.length){ await updateCategoriaFallbackOptions(ALM_LAST_ROWS); return; }
       const selNow = ensureCategoriaSelect();
       if (!selNow) return;
-      selNow.innerHTML = `<option value="">- seleccionar -</option>` + ALM_CATS.map(c => `<option value="${c.id}">${c.nombre}</option>`).join('');
+      selNow.innerHTML = `<option value="">- seleccionar -</option>` + ALM_CATS.map(c => `<option value="${escHtml(c.id)}">${escHtml(c.nombre)}</option>`).join('');
       ALM_CAT_IS_SELECT = true;
       if (ALM_EDIT_ID) onlyQtyEnabled();
       ALM_CATS.forEach(c=>{ if (isNum(c.id)) CATEGORIA_NOMBRE_BY_ID.set(Number(c.id), safestr(c.nombre)); });
@@ -2361,13 +2873,13 @@
     let maxNum = 0;
     (rows || []).forEach(r => {
       const c = safestr(r?.CLAVE ?? r?.clave).toUpperCase();
-      const m = c.match(/^CL-(\d+)$/);
+      const m = c.match(/^MAT-(\d+)$/);
       if (m) {
         const n = parseInt(m[1], 10);
         if (Number.isFinite(n) && n > maxNum) maxNum = n;
       }
     });
-    return `CL-${String(maxNum + 1).padStart(3, '0')}`;
+    return `MAT-${String(maxNum + 1).padStart(3, '0')}`;
   }
   function formatOrigenLabel(origen) {
     const o = String(origen || '').trim().toUpperCase();
@@ -2398,20 +2910,64 @@
     const st = $('alm_stock'); if (st){ st.focus(); }
   }
   function allEnabled(){
-    ['alm_desc','alm_estado','alm_cat','alm_unidad','alm_stock','alm_stock_minimo','alm_origen_adquisicion','alm_observaciones_control'].forEach(id=>{
+    ['alm_clave','alm_desc','alm_estado','alm_cat','alm_unidad','alm_stock','alm_stock_minimo','alm_origen_adquisicion','alm_observaciones_control'].forEach(id=>{
       const el = $(id); if (el) { el.readOnly = false; el.disabled = false; el.classList.remove('readonly'); }
     });
-    const claveEl = $('alm_clave');
-    if (claveEl) {
-      claveEl.readOnly = true;
-      claveEl.disabled = false;
-      claveEl.classList.add('readonly');
+  }
+  function updateAlmSelectionUI() {
+    const cnt = selectedMaterialIds.size;
+    const badge = $('alm_sel_counter');
+    if (badge) badge.textContent = `${cnt} seleccionado${cnt === 1 ? '' : 's'}`;
+    const toggleBtn = $('btn-alm-toggle-sel');
+    if (toggleBtn) {
+      if (filterOnlySelected) {
+        toggleBtn.textContent = `👁️ Ver todos (${ALM_LAST_ROWS.length})`;
+        toggleBtn.classList.remove('btn-secondary');
+        toggleBtn.classList.add('btn-primary');
+      } else {
+        toggleBtn.textContent = `🔍 Ver solo seleccionados (${cnt})`;
+        toggleBtn.classList.remove('btn-primary');
+        toggleBtn.classList.add('btn-secondary');
+      }
+    }
+    const chkAll = $('alm_check_all');
+    if (chkAll) {
+      const rowChecks = document.querySelectorAll('.alm-row-check');
+      if (rowChecks.length > 0 && Array.from(rowChecks).every(c => c.checked)) {
+        chkAll.checked = true;
+        chkAll.indeterminate = false;
+      } else if (Array.from(rowChecks).some(c => c.checked)) {
+        chkAll.checked = false;
+        chkAll.indeterminate = true;
+      } else {
+        chkAll.checked = false;
+        chkAll.indeterminate = false;
+      }
     }
   }
+
   function almResetForm(){
     ALM_EDIT_ID = null;
-    $('alm_clave').value = ALM_NEXT_CLAVE || computeNextClave(ALM_LAST_ROWS);
-    $('alm_desc').value = '';
+    const claveEl = $('alm_clave');
+    if (claveEl) {
+      const nextKey = ALM_NEXT_CLAVE || computeNextClave(ALM_LAST_ROWS);
+      claveEl.value = nextKey;
+      claveEl.placeholder = 'Auto: ' + (nextKey || 'MAT-001');
+      claveEl.readOnly = false;
+      claveEl.disabled = false;
+      claveEl.classList.remove('readonly');
+      claveEl.style.backgroundColor = '';
+      claveEl.style.cursor = '';
+    }
+    const descEl = $('alm_desc');
+    if (descEl) {
+      descEl.value = '';
+      descEl.readOnly = false;
+      descEl.disabled = false;
+      descEl.classList.remove('readonly');
+      descEl.style.backgroundColor = '';
+      descEl.style.cursor = '';
+    }
     $('alm_stock').value = '';
     if ($('alm_stock_minimo')) $('alm_stock_minimo').value = '0';
     if ($('alm_origen_adquisicion')) $('alm_origen_adquisicion').value = 'COMPRA_DELEGACION';
@@ -2452,7 +3008,7 @@
         <table>
           <thead><tr><th>CLAVE</th><th>Producto</th><th>Stock</th><th>Mínimo</th></tr></thead>
           <tbody>
-            ${bajos.slice(0, 25).map(r => `<tr><td>${safestr(r.CLAVE)}</td><td>${safestr(r.DESCRIPCION)}</td><td class="danger" style="color:var(--danger);font-weight:bold;">${Number(r.stock || 0)}</td><td>${Number(r.minimo || 0)}</td></tr>`).join('')}
+            ${bajos.slice(0, 25).map(r => `<tr><td>${escHtml(safestr(r.CLAVE))}</td><td>${escHtml(safestr(r.DESCRIPCION))}</td><td class="danger" style="color:var(--danger);font-weight:bold;">${Number(r.stock || 0)}</td><td>${Number(r.minimo || 0)}</td></tr>`).join('')}
           </tbody>
         </table>
       </div>`;
@@ -2463,7 +3019,18 @@
     const p = uiPerms();
     const puedeEliminarAlmacen = p.puedeEliminarAlmacen;
 
-    rows.forEach(r=>{
+    let displayRows = rows || [];
+    if (filterOnlySelected) {
+      displayRows = displayRows.filter(r => selectedMaterialIds.has(String(r.ID ?? r.id)));
+    }
+
+    if (!displayRows.length) {
+      tb.innerHTML = `<tr><td colspan="10" class="muted" style="text-align:center; padding:18px;">${filterOnlySelected ? 'No hay materiales seleccionados actualmente.' : 'No se encontraron materiales.'}</td></tr>`;
+      updateAlmSelectionUI();
+      return;
+    }
+
+    displayRows.forEach(r=>{
       const id = r.ID ?? r.id;
       const categoriaNom = nombreCategoriaFromRow(r) || '';
       const stock = Number(r.STOCK ?? 0);
@@ -2471,29 +3038,40 @@
       const origen = safestr(r.origen_adquisicion || 'COMPRA_DELEGACION').toUpperCase();
       const obsControl = safestr(r.observaciones_control || '');
       const estado = r.status ?? r.STATUS ?? r.ESTADO ?? '-';
-      const isBajo = (stockMin > 0 && stock <= stockMin) || stock <= 0;
+      const isChecked = selectedMaterialIds.has(String(id));
+
+      // v55: Semáforo de Stock: Rojo para stock 0 (sin badge de texto) y Amarillo para stock bajo
+      const isSinProducto = stock <= 0;
+      const isBajoStock = stockMin > 0 && stock > 0 && stock <= stockMin;
 
       const tr = document.createElement('tr');
       tr.dataset.id = id; tr.dataset.clave = r.CLAVE ?? ''; tr.dataset.desc = r.DESCRIPCION ?? '';
       tr.dataset.categoria = r.CATEGORIA; tr.dataset.categoriaNombre = categoriaNom;
       tr.dataset.unidad = r.UNIDAD ?? r.unidad ?? ''; tr.dataset.stock = stock; tr.dataset.estado = estado;
       tr.dataset.stockMinimo = stockMin; tr.dataset.origen = origen; tr.dataset.obsControl = obsControl;
-      if (isBajo) tr.style.background = '#fef2f2';
 
-      const stockBadge = isBajo
-        ? `<span style="color:#b91c1c; font-weight:700;">${stock}</span> <span style="display:inline-block; font-size:10.5px; background:#fee2e2; color:#991b1b; border:1px solid #f87171; border-radius:4px; padding:1px 5px; margin-left:4px;">¡Bajo!</span>`
-        : `<b>${stock}</b>`;
+      let stockBadge = `<b>${stock}</b>`;
+      if (isSinProducto) {
+        tr.style.backgroundColor = '#fee2e2';
+        tr.style.color = '#991b1b';
+        stockBadge = `<span style="font-weight:700;">0</span>`;
+      } else if (isBajoStock) {
+        tr.style.backgroundColor = '#fef3c7';
+        tr.style.color = '#92400e';
+        stockBadge = `<span style="font-weight:700;">${stock}</span>`;
+      }
       const origenHtml = `<div style="font-size:11.5px;"><b>${escHtml(formatOrigenLabel(origen))}</b>${obsControl ? `<br><span class="muted">${escHtml(obsControl)}</span>` : ''}</div>`;
 
       tr.innerHTML = `
-        <td><b>${r.CLAVE ?? ''}</b></td>
-        <td>${r.DESCRIPCION ?? ''}</td>
-        <td>${categoriaNom}</td>
-        <td>${tr.dataset.unidad||''}</td>
+        <td style="text-align:center;"><input type="checkbox" class="alm-row-check" data-id="${escHtml(id)}" ${isChecked ? 'checked' : ''}></td>
+        <td><b>${escHtml(r.CLAVE ?? '')}</b></td>
+        <td>${escHtml(r.DESCRIPCION ?? '')}</td>
+        <td>${escHtml(categoriaNom)}</td>
+        <td>${escHtml(tr.dataset.unidad||'')}</td>
         <td>${stockBadge}</td>
         <td>${stockMin}</td>
         <td>${origenHtml}</td>
-        <td>${estado}</td>
+        <td>${escHtml(estado)}</td>
         <td>
           <button class="mini" data-action="hist">Historial</button>
           <button class="mini" data-action="edit">Editar</button>
@@ -2505,6 +3083,8 @@
       if (clave && categoriaNom) CATEGORIA_BY_CLAVE.set(clave, String(categoriaNom));
       if (clave && tr.dataset.unidad) UNIDAD_BY_CLAVE.set(clave, String(tr.dataset.unidad));
     });
+
+    updateAlmSelectionUI();
   }
   async function loadAlmacen(){
     const p = uiPerms();
@@ -2520,13 +3100,23 @@
     try{
       const j = await apiJSON(`/api/almacen?q=${encodeURIComponent(q)}&order=${encodeURIComponent(order)}&dir=${encodeURIComponent(dir)}&limit=500&page=1`);
       let rows = Array.isArray(j.data) ? j.data : [];
+      if (!q && selectedMaterialIds.size > 0) {
+        const existingIdSet = new Set(rows.map(r => String(r.ID ?? r.id)));
+        for (const selId of Array.from(selectedMaterialIds)) {
+          if (!existingIdSet.has(selId)) {
+            selectedMaterialIds.delete(selId);
+          }
+        }
+      }
       await ensureCategoriaNames(rows);
       ALM_LAST_ROWS = rows;
       ALM_NEXT_CLAVE = safestr(j.next_clave) || computeNextClave(rows);
       if (!ALM_EDIT_ID && $('alm_clave')) {
         $('alm_clave').value = ALM_NEXT_CLAVE;
-        $('alm_clave').readOnly = true;
-        $('alm_clave').classList.add('readonly');
+        $('alm_clave').placeholder = 'Auto: ' + (ALM_NEXT_CLAVE || 'MAT-001');
+        $('alm_clave').readOnly = false;
+        $('alm_clave').disabled = false;
+        $('alm_clave').classList.remove('readonly');
       }
       if (!ALM_CATS.length) await updateCategoriaFallbackOptions(rows);
       updateUnidadOptions(rows);
@@ -2536,7 +3126,7 @@
       applyPermassions();
     }catch(e){
       $('alm_meta').textContent = '-';
-      $('alm_tbody').innerHTML = `<tr><td colspan="7" class="muted">Error: ${e.message || 'Error'}</td></tr>`;
+      $('alm_tbody').innerHTML = `<tr><td colspan="7" class="muted">Error: ${escHtml(e.message || 'Error')}</td></tr>`;
       renderStockBajo([]);
       if (!handleAuthError(e)) console.error(e);
     }
@@ -2558,12 +3148,12 @@
           <table>
             <thead><tr><th>Fecha</th><th>Tipo</th><th>Cantidad</th><th>Responsable</th><th>Referencia</th><th>Observaciones</th></tr></thead>
             <tbody>
-              ${rows.map(r => `<tr><td>${fmtDate(r.fecha || r.FECHA)}</td><td>${safestr(r.tipo || r.TIPO || r.TIPO_MOVIMIENTO)}</td><td><b>${Number(r.cantidad ?? r.CANTIDAD ?? 0)}</b></td><td>${safestr(r.responsable || r.RESPONSABLE)}</td><td>${safestr(r.referencia || r.REFERENCIA)}</td><td>${safestr(r.observaciones || r.OBSERVACIONES)}</td></tr>`).join('')}
+              ${rows.map(r => `<tr><td>${escHtml(fmtDate(r.fecha || r.FECHA))}</td><td>${escHtml(safestr(r.tipo || r.TIPO || r.TIPO_MOVIMIENTO))}</td><td><b>${Number(r.cantidad ?? r.CANTIDAD ?? 0)}</b></td><td>${escHtml(safestr(r.responsable || r.RESPONSABLE))}</td><td>${escHtml(safestr(r.referencia || r.REFERENCIA))}</td><td>${escHtml(safestr(r.observaciones || r.OBSERVACIONES))}</td></tr>`).join('')}
             </tbody>
           </table>
         </div>`;
     }catch(e){
-      box.innerHTML = `<div style="color:var(--danger)">${e.message || 'Error'}</div>`;
+      box.innerHTML = `<div style="color:var(--danger)">${escHtml(e.message || 'Error')}</div>`;
       if (!handleAuthError(e)) toast(e.message || 'Error', false);
     }
   }
@@ -2593,7 +3183,7 @@
         return;
       }
     } else {
-      if (!rawClave || !rawDesc || !rawCat || !rawUni || rawStock === '' || !Number.isFinite(Number(rawStock)) || Number(rawStock) < 0 || !rawEst) {
+      if (!rawDesc || !rawCat || !rawUni || rawStock === '' || !Number.isFinite(Number(rawStock)) || Number(rawStock) < 0 || !rawEst) {
         const warn = 'Falta agregar información: completa todos los campos';
         if (msg) msg.textContent = warn;
         toast(warn, false);
@@ -2607,16 +3197,21 @@
       if (ALM_EDIT_ID){
         const add = Number(body.STOCK||0) || 0;
         await apiJSON(`/api/almacen/${ALM_EDIT_ID}`, {
-          method:'PATCH',
+          method:'PUT',
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify({
+            CLAVE: body.CLAVE,
+            DESCRIPCION: body.DESCRIPCION,
+            CATEGORIA: body.CATEGORIA,
+            UNIDAD: body.UNIDAD,
+            ESTADO: body.ESTADO,
             addStock: add,
             stock_minimo: body.stock_minimo,
             origen_adquisicion: body.origen_adquisicion,
             observaciones_control: body.observaciones_control
           })
         });
-        toast(`Registro actualizado (ajuste stock: ${add >= 0 ? '+' : ''}${add})`, true);
+        toast(`Registro actualizado exitosamente`, true);
       } else {
         await apiJSON('/api/almacen', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
         toast('Guardado', true);
@@ -2625,7 +3220,13 @@
       await loadAlmacen();
       almResetForm();
     }catch(e){
-      msg.textContent = e.message || 'Error'; if (!handleAuthError(e)) toast(e.message || 'Error');
+      msg.textContent = e.message || 'Error';
+      if (e.status === 409 || (e.message && e.message.includes('ya existe'))) {
+        alert(e.message || "⚠️ Error: La clave de producto ingresada ya existe. Por favor asigna una clave diferente.");
+        $('alm_clave')?.focus();
+      } else if (!handleAuthError(e)) {
+        toast(e.message || 'Error', false);
+      }
     }
   }
   function startEditFromRow(tr){
@@ -2650,19 +3251,58 @@
       }
       $('alm_unidad').value = valU;
     }
-    if (ALM_CAT_IS_SELECT){
-      $('alm_cat').value = tr.dataset.categoria || '';
-      if (!$('alm_cat').value && tr.dataset.categoriaNombre){
-        const opt = Array.from($('alm_cat').options).find(o => o.textContent === tr.dataset.categoriaNombre);
-        if (opt) $('alm_cat').value = opt.value;
+
+    // v44: Precarga exacta de categoría inyectando opción si falta
+    const catVal = tr.dataset.categoria || '';
+    const catNom = tr.dataset.categoriaNombre || catVal || '';
+    const catEl = $('alm_cat');
+    if (catEl) {
+      if (ALM_CAT_IS_SELECT && catEl.tagName.toLowerCase() === 'select') {
+        let optFound = Array.from(catEl.options).find(o => 
+          o.value === catVal ||
+          (catNom && o.textContent.trim().toUpperCase() === catNom.trim().toUpperCase()) ||
+          (catVal && o.textContent.trim().toUpperCase() === catVal.trim().toUpperCase())
+        );
+        if (!optFound && (catNom || catVal)) {
+          const opt = document.createElement('option');
+          opt.value = catVal || catNom;
+          opt.textContent = catNom || catVal;
+          catEl.appendChild(opt);
+          optFound = opt;
+        }
+        if (optFound) catEl.value = optFound.value;
+        else catEl.value = catVal || '';
+      } else {
+        catEl.value = catNom || catVal || '';
       }
-    } else {
-      $('alm_cat').value = tr.dataset.categoriaNombre || tr.dataset.categoria || '';
     }
+
     $('btn-alm-crear').textContent = 'Actualizar';
     show('btn-alm-cancel');
-    toast('Editando registro (usa negativo para restar)');
-    onlyQtyEnabled();
+    toast('Editando registro');
+    allEnabled();
+
+    // v44: Restricción parcial de privilegios para Gabriel Fiol / no-admins:
+    // No puede editar clave ni descripción de productos existentes
+    const esAdmin = !!(p.esAdmin || p.esAdministrador || p.rol === 'ADMIN');
+    if (!esAdmin) {
+      const claveEl = $('alm_clave');
+      const descEl = $('alm_desc');
+      if (claveEl) {
+        claveEl.readOnly = true;
+        claveEl.disabled = true;
+        claveEl.classList.add('readonly');
+        claveEl.style.backgroundColor = '#f1f5f9';
+        claveEl.style.cursor = 'not-allowed';
+      }
+      if (descEl) {
+        descEl.readOnly = true;
+        descEl.disabled = true;
+        descEl.classList.add('readonly');
+        descEl.style.backgroundColor = '#f1f5f9';
+        descEl.style.cursor = 'not-allowed';
+      }
+    }
   }
   function cancelEdit(){ almResetForm(); toast('Edicion cancelada'); }
   async function eliminarFila(id){
@@ -2676,9 +3316,53 @@
       msg.textContent = 'Listo';
       toast(j.deleted ? 'Eliminado' : 'No se elimino (?no existe?)', true);
       if (ALM_EDIT_ID === String(id)) almResetForm();
+      selectedMaterialIds.delete(String(id));
+      updateAlmSelectionUI();
       await loadAlmacen();
     }catch(e){
       msg.textContent = e.message || 'Error'; if (!handleAuthError(e)) toast(e.message || 'Error');
+    }
+  }
+
+  // v44: Generador de Reporte PDF Institucional del Almacén General
+  async function generarReporteAlmacenPdf(soloSeleccionados = false) {
+    let ids = [];
+    if (soloSeleccionados) {
+      if (!selectedMaterialIds.size) {
+        toast('Selecciona al menos un material con los checkboxes para generar este reporte', false);
+        return;
+      }
+      ids = Array.from(selectedMaterialIds);
+    }
+    toast('Generando reporte PDF institucional...', true);
+    try {
+      const token = typeof AUTH_TOKEN !== 'undefined' ? AUTH_TOKEN : (localStorage.getItem('token') || '');
+      const resp = await fetch('/api/almacen/reporte-pdf', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ ids })
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.message || 'Error al generar reporte PDF');
+      }
+      const blob = await resp.blob();
+      const url = window.URL.createObjectURL(blob);
+      const filename = soloSeleccionados ? `reporte_materiales_${Date.now()}.pdf` : `inventario_general_almacen_${Date.now()}.pdf`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.target = '_blank';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => window.URL.revokeObjectURL(url), 2000);
+      toast('Reporte PDF descargado exitosamente', true);
+    } catch (e) {
+      toast(e.message || 'Error al generar reporte PDF', false);
     }
   }
 
@@ -2690,6 +3374,12 @@
   }
   
   async function descargarPDF({ resetAfter = false } = {}) {
+    const p = uiPerms();
+    const canPdf = Boolean(p.solicitudes?.puedeDescargarPdf || p.admin || p.encargado || isAuditorUser());
+    if (!canPdf) {
+      toast('La descarga e impresión del Vale PDF está reservada exclusivamente para el Encargado de Almacén y Administración.', false);
+      return;
+    }
     const btn = document.getElementById('btn-sol-pdf');
     const btnFlow = document.getElementById('btn-sol-pdf-flow');
     if (btn) btn.disabled = true;
@@ -2781,7 +3471,7 @@
   }
   function fillOficialiasSelect(selId, rows, current='', allLabel='Todos'){
     const sel = $(selId); if (!sel) return;
-    const options = [`<option value="">${allLabel}</option>`].concat((rows || []).map(r => `<option value="${Number(r.oficialia_id || 0)}">${formatReportOficialiaLabel(r)}</option>`));
+    const options = [`<option value="">${escHtml(allLabel)}</option>`].concat((rows || []).map(r => `<option value="${Number(r.oficialia_id || 0)}">${escHtml(formatReportOficialiaLabel(r))}</option>`));
     sel.innerHTML = options.join(''); sel.value = current || '';
   }
   function fillReporteOficialiasSelect(rows, current=''){ fillOficialiasSelect('rep_oficialia', rows, current, 'Todos'); }
@@ -2795,7 +3485,7 @@
       <div class="table-scroll">
         <table>
           <thead><tr><th>CLAVE</th><th>PRODUCTO</th><th>SOLICITUDES</th><th>CANT. SOLICITADA</th><th>CANT. ENTREGADA</th></tr></thead>
-          <tbody>${tableRows.map(r => `<tr><td><b>${safestr(r.clave || r.CLAVE) || '-'}</b></td><td>${safestr(r.descripcion || r.DESCRIPCION) || '-'}</td><td>${Number(r.solicitudes_count || 0)}</td><td>${Number(r.cantidad_solicitada || 0)}</td><td>${Number(r.cantidad_atendida || 0)}</td></tr>`).join('')}</tbody>
+          <tbody>${tableRows.map(r => `<tr><td><b>${escHtml(safestr(r.clave || r.CLAVE) || '-')}</b></td><td>${escHtml(safestr(r.descripcion || r.DESCRIPCION) || '-')}</td><td>${Number(r.solicitudes_count || 0)}</td><td>${Number(r.cantidad_solicitada || 0)}</td><td>${Number(r.cantidad_atendida || 0)}</td></tr>`).join('')}</tbody>
         </table>
       </div>`;
     box.innerHTML = `<div style="margin-bottom:14px;"><h4 style="margin:0 0 8px 0;">Top 10</h4>${renderTable(topRows)}</div><div><h4 style="margin:0 0 8px 0;">Todos los productos solicitados</h4>${renderTable(rows)}</div>`;
@@ -2807,7 +3497,7 @@
       <div class="table-scroll">
         <table>
           <thead><tr><th>DEPARTAMENTO</th><th>SOLICITUDES</th><th>PROD. SOLICITADOS</th><th>PROD. ENTREGADOS</th><th>ACCIÓN</th></tr></thead>
-          <tbody>${rows.map(r => `<tr><td>${formatReportOficialiaLabel(r)}</td><td>${Number(r.solicitudes_count || 0)}</td><td>${Number(r.cantidad_solicitada || 0)}</td><td>${Number(r.cantidad_atendida || 0)}</td><td><button class="mini btn-secondary" data-rep-open-oficialia="${Number(r.oficialia_id || 0)}">Ver reporte</button></td></tr>`).join('')}</tbody>
+          <tbody>${rows.map(r => `<tr><td>${escHtml(formatReportOficialiaLabel(r))}</td><td>${Number(r.solicitudes_count || 0)}</td><td>${Number(r.cantidad_solicitada || 0)}</td><td>${Number(r.cantidad_atendida || 0)}</td><td><button class="mini btn-secondary" data-rep-open-oficialia="${Number(r.oficialia_id || 0)}">Ver reporte</button></td></tr>`).join('')}</tbody>
         </table>
       </div>`;
   }
@@ -2818,7 +3508,7 @@
       <div class="table-scroll">
         <table>
           <thead><tr><th>USUARIO</th><th>DEPARTAMENTO</th><th>SOLICITUDES</th><th>ÚLTIMA FECHA</th><th>CANT. SOLICITADA</th><th>CANT. ENTREGADA</th></tr></thead>
-          <tbody>${rows.map(r => `<tr><td><b>${safestr(r.nombre_usuario) || '-'}</b></td><td>${safestr(r.oficialia_nombre) || '-'}</td><td>${Number(r.solicitudes_count || 0)}</td><td>${fmtDate(r.ultima_fecha)}</td><td>${Number(r.cantidad_solicitada || 0)}</td><td>${Number(r.cantidad_atendida || 0)}</td></tr>`).join('')}</tbody>
+          <tbody>${rows.map(r => `<tr><td><b>${escHtml(safestr(r.nombre_usuario) || '-')}</b></td><td>${escHtml(safestr(r.oficialia_nombre) || '-')}</td><td>${Number(r.solicitudes_count || 0)}</td><td>${escHtml(fmtDate(r.ultima_fecha))}</td><td>${Number(r.cantidad_solicitada || 0)}</td><td>${Number(r.cantidad_atendida || 0)}</td></tr>`).join('')}</tbody>
         </table>
       </div>`;
   }
@@ -2829,7 +3519,7 @@
       <div class="table-scroll">
         <table>
           <thead><tr><th>USUARIO</th><th>DEPARTAMENTO SOLICITUD</th><th>DEPARTAMENTO USUARIO</th><th>SOLICITUDES</th><th>ÚLTIMA FECHA</th><th>CANT. SOLICITADA</th><th>CANT. ENTREGADA</th></tr></thead>
-          <tbody>${rows.map(r => `<tr><td>${safestr(r.nombre_usuario) || '-'}</td><td>${safestr(r.oficialia_solicitud_nombre) || '-'}</td><td>${safestr(r.oficialia_usuario_nombre) || '-'}</td><td>${Number(r.solicitudes_count || 0)}</td><td>${fmtDate(r.ultima_fecha)}</td><td>${Number(r.cantidad_solicitada || 0)}</td><td>${Number(r.cantidad_atendida || 0)}</td></tr>`).join('')}</tbody>
+          <tbody>${rows.map(r => `<tr><td>${escHtml(safestr(r.nombre_usuario) || '-')}</td><td>${escHtml(safestr(r.oficialia_solicitud_nombre) || '-')}</td><td>${escHtml(safestr(r.oficialia_usuario_nombre) || '-')}</td><td>${Number(r.solicitudes_count || 0)}</td><td>${escHtml(fmtDate(r.ultima_fecha))}</td><td>${Number(r.cantidad_solicitada || 0)}</td><td>${Number(r.cantidad_atendida || 0)}</td></tr>`).join('')}</tbody>
         </table>
       </div>`;
   }
@@ -2840,15 +3530,15 @@
     const maxVal = Math.max(...topRows.map(r => Number(r.cantidad_solicitada || 0)), 1);
     box.innerHTML = `<div class="rep-chart">${topRows.map(r => {
       const val = Number(r.cantidad_solicitada || 0); const width = Math.max(4, Math.round((val / maxVal) * 100)); const label = [safestr(r.clave || r.CLAVE), safestr(r.descripcion || r.DESCRIPCION)].filter(Boolean).join(' - ') || '-';
-      return `<div class="rep-bar-row"><div class="rep-bar-label" title="${label}">${label}</div><div class="rep-bar-track"><div class="rep-bar-fill" style="width:${width}%"></div></div><div class="rep-bar-val">${val}</div></div>`;
+      return `<div class="rep-bar-row"><div class="rep-bar-label" title="${escHtml(label)}">${escHtml(label)}</div><div class="rep-bar-track"><div class="rep-bar-fill" style="width:${width}%"></div></div><div class="rep-bar-val">${val}</div></div>`;
     }).join('')}</div>`;
   }
 
   function reportHtmlTable(headers, rows){
     return `
       <table style="width:100%; border-collapse:collapse; margin-top:10px;">
-        <thead><tr>${headers.map(h => `<th style="text-align:left; border:1px solid #4E0D28; padding:6px; background:#621132; color:#fff;">${h}</th>`).join('')}</tr></thead>
-        <tbody>${rows.map((row, idx) => `<tr style="background:${idx % 2 === 1 ? '#F9F2F4' : '#fff'};">${row.map(cell => `<td style="border:1px solid #ccc; padding:6px;">${cell}</td>`).join('')}</tr>`).join('')}</tbody>
+        <thead><tr>${headers.map(h => `<th style="text-align:left; border:1px solid #4E0D28; padding:6px; background:#621132; color:#fff;">${escHtml(h)}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map((row, idx) => `<tr style="background:${idx % 2 === 1 ? '#F9F2F4' : '#fff'};">${row.map(cell => `<td style="border:1px solid #ccc; padding:6px;">${escHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody>
       </table>`;
   }
 
@@ -2861,12 +3551,12 @@
     const productosTable = reportHtmlTable(['CLAVE','PRODUCTO','SOLICITUDES','CANT. SOLICITADA','CANT. ENTREGADA'], productos.map(r => [safestr(r.clave || r.CLAVE) || '-', safestr(r.descripcion || r.DESCRIPCION) || '-', Number(r.solicitudes_count || 0), Number(r.cantidad_solicitada || 0), Number(r.cantidad_atendida || 0)]));
     const chartRows = productos.slice(0, 10);
     const maxVal = Math.max(...chartRows.map(r => Number(r.cantidad_solicitada || 0)), 1);
-    return `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${title}</title>
+    return `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${escHtml(title)}</title>
     <style>body{font-family:Arial,sans-serif; color:#111; margin:24px;} h1,h2{margin:0 0 10px 0; color:#621132;} .meta{margin:12px 0 18px 0;} .kpis{display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin:14px 0 18px 0;} .kpi{border:1px solid #B38E5D; background:#F9F2F4; padding:10px;} .lab{font-size:12px; color:#555;} .val{font-size:18px; font-weight:700; margin-top:4px; color:#621132;} .chart{display:grid; gap:8px; margin:10px 0 18px 0;} .row{display:grid; grid-template-columns:220px 1fr 60px; gap:10px; align-items:center;} .label{font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;} .track{height:12px; border:1px solid #d6c5cb; border-radius:999px; overflow:hidden; background:#F9F2F4;} .fill{height:100%; background:#621132;} .num{font-size:12px; text-align:right;} </style></head>
-    <body><h1>${title}</h1><div class="meta"><b>Delegación Baja California Sur</b> — Fecha: ${new Date().toLocaleDateString('es-MX')}</div>
-    <div class="kpis"><div class="kpi"><div class="lab">Solicitudes</div><div class="val">${Number(summary.solicitudes_count || 0)}</div></div><div class="kpi"><div class="lab">Productos solicitados</div><div class="val">${Number(summary.cantidad_solicitada || 0)}</div></div><div class="kpi"><div class="lab">Productos entregados</div><div class="val">${Number(summary.cantidad_atendida || 0)}</div></div><div class="kpi"><div class="lab">Producto mas solicitado</div><div class="val" style="font-size:14px;">${safestr(summary.top_producto_nombre || '-') || '-'}</div></div></div>
-    <div class="meta"><b>Departamento que mas solicita:</b> ${rankings.mas_pide ? formatReportOficialiaLabel(rankings.mas_pide) : '-'}</div>
-    <h2>Grafica de productos</h2><div class="chart">${chartRows.map(r => { const val = Number(r.cantidad_solicitada || 0); const width = Math.max(4, Math.round((val / maxVal) * 100)); const label = [safestr(r.clave || r.CLAVE), safestr(r.descripcion || r.DESCRIPCION)].filter(Boolean).join(' - ') || '-'; return `<div class="row"><div class="label">${label}</div><div class="track"><div class="fill" style="width:${width}%"></div></div><div class="num">${val}</div></div>`; }).join('')}</div>
+    <body><h1>${escHtml(title)}</h1><div class="meta"><b>Delegación Baja California Sur</b> — Fecha: ${escHtml(new Date().toLocaleDateString('es-MX'))}</div>
+    <div class="kpis"><div class="kpi"><div class="lab">Solicitudes</div><div class="val">${Number(summary.solicitudes_count || 0)}</div></div><div class="kpi"><div class="lab">Productos solicitados</div><div class="val">${Number(summary.cantidad_solicitada || 0)}</div></div><div class="kpi"><div class="lab">Productos entregados</div><div class="val">${Number(summary.cantidad_atendida || 0)}</div></div><div class="kpi"><div class="lab">Producto mas solicitado</div><div class="val" style="font-size:14px;">${escHtml(safestr(summary.top_producto_nombre || '-') || '-')}</div></div></div>
+    <div class="meta"><b>Departamento que mas solicita:</b> ${escHtml(rankings.mas_pide ? formatReportOficialiaLabel(rankings.mas_pide) : '-')}</div>
+    <h2>Grafica de productos</h2><div class="chart">${chartRows.map(r => { const val = Number(r.cantidad_solicitada || 0); const width = Math.max(4, Math.round((val / maxVal) * 100)); const label = [safestr(r.clave || r.CLAVE), safestr(r.descripcion || r.DESCRIPCION)].filter(Boolean).join(' - ') || '-'; return `<div class="row"><div class="label">${escHtml(label)}</div><div class="track"><div class="fill" style="width:${width}%"></div></div><div class="num">${val}</div></div>`; }).join('')}</div>
     <h2>Top 10 productos mas solicitados</h2>${topProductosTable}<h2>Todos los productos solicitados</h2>${productosTable}</body></html>`;
   }
 
@@ -2875,7 +3565,7 @@
     const productos = Array.isArray(data?.productos) ? data.productos : [];
     const solicitudes = Array.isArray(data?.solicitudes) ? data.solicitudes : [];
     return `<!doctype html><html><head><meta charset="utf-8"></head><body><table border="1">
-      <tr><th colspan="2">Resumen</th></tr><tr><td>Departamento</td><td>${safestr(summary.scope_label) || '-'}</td></tr><tr><td>Solicitudes</td><td>${Number(summary.solicitudes_count || 0)}</td></tr><tr><td>Productos solicitados</td><td>${Number(summary.cantidad_solicitada || 0)}</td></tr><tr><td>Productos entregados</td><td>${Number(summary.cantidad_atendida || 0)}</td></tr><tr><td>Producto mas solicitado</td><td>${safestr(summary.top_producto_nombre) || '-'}</td></tr></table>
+      <tr><th colspan="2">Resumen</th></tr><tr><td>Departamento</td><td>${escHtml(safestr(summary.scope_label) || '-')}</td></tr><tr><td>Solicitudes</td><td>${Number(summary.solicitudes_count || 0)}</td></tr><tr><td>Productos solicitados</td><td>${Number(summary.cantidad_solicitada || 0)}</td></tr><tr><td>Productos entregados</td><td>${Number(summary.cantidad_atendida || 0)}</td></tr><tr><td>Producto mas solicitado</td><td>${escHtml(safestr(summary.top_producto_nombre) || '-')}</td></tr></table>
       ${reportHtmlTable(['USUARIO','DEPARTAMENTO','SOLICITUDES','ULTIMA FECHA','CANT. SOLICITADA','CANT. ENTREGADA'], solicitudes.map(r => [safestr(r.nombre_usuario) || '-', safestr(r.oficialia_nombre) || '-', Number(r.solicitudes_count || 0), fmtDate(r.ultima_fecha), Number(r.cantidad_solicitada || 0), Number(r.cantidad_atendida || 0)]))}
       ${reportHtmlTable(['CLAVE','PRODUCTO','SOLICITUDES','CANT. SOLICITADA','CANT. ENTREGADA'], productos.map(r => [safestr(r.clave || r.CLAVE) || '-', safestr(r.descripcion || r.DESCRIPCION) || '-', Number(r.solicitudes_count || 0), Number(r.cantidad_solicitada || 0), Number(r.cantidad_atendida || 0)]))}
       </body></html>`;
@@ -2916,7 +3606,8 @@
 
   async function loadReporteUsuarios(forceDetail = false){
     const p = uiPerms();
-    if (!p.reportes?.acceso){ toast('Acceso restringido', false); return; }
+    const uname = String(CURRENT_USER?.username || UI_PERMISOS?.user || '').toLowerCase().trim();
+    if (!p.reportes?.acceso || uname === 'gabrielfiol' || uname === 'fiol'){ toast('Acceso restringido', false); return; }
     const msg = $('rep_msg');
     const currentOficialiaId = $('rep_oficialia')?.value || '';
     const range = getDateRange('rep');
@@ -2993,10 +3684,10 @@
     box.innerHTML = `
       <div class="pie-wrap">
         <div class="pie-chart" style="background:conic-gradient(${stops.join(', ')});">
-          <div class="pie-center"><div class="big">${total}</div><div class="small">${totalLabel}</div></div>
+          <div class="pie-center"><div class="big">${total}</div><div class="small">${escHtml(totalLabel)}</div></div>
         </div>
         <div class="pie-legend">
-          ${data.map(item => `<div class="pie-legend-item"><span class="pie-swatch" style="background:${item.color};"></span><span class="pie-label" title="${item.label}">${item.label}</span><span class="pie-val">${item.value} / ${item.percent}%</span></div>`).join('')}
+          ${data.map(item => `<div class="pie-legend-item"><span class="pie-swatch" style="background:${item.color};"></span><span class="pie-label" title="${escHtml(item.label)}">${escHtml(item.label)}</span><span class="pie-val">${item.value} / ${item.percent}%</span></div>`).join('')}
         </div>
       </div>`;
   }
@@ -3014,7 +3705,7 @@
     box.innerHTML = `<div class="rep-chart">${data.map(r => {
       const label = [safestr(r.clave || r.CLAVE), safestr(r.descripcion || r.DESCRIPCION)].filter(Boolean).join(' - ') || '-';
       const width = Math.max(4, Math.min(100, Number(r.ratio || 0)));
-      return `<div class="rep-bar-row"><div class="rep-bar-label" title="${label}">${label}</div><div class="rep-bar-track"><div class="rep-bar-fill" style="width:${width}%"></div></div><div class="rep-bar-val">${Number(r.ratio || 0)}%</div></div>`;
+      return `<div class="rep-bar-row"><div class="rep-bar-label" title="${escHtml(label)}">${escHtml(label)}</div><div class="rep-bar-track"><div class="rep-bar-fill" style="width:${width}%"></div></div><div class="rep-bar-val">${Number(r.ratio || 0)}%</div></div>`;
     }).join('')}</div>`;
   }
 
@@ -3048,7 +3739,7 @@
       <div class="pie-scroll table-scroll">
         <table>
           <thead><tr><th>COLOR</th><th>CLAVE</th><th>PRODUCTO</th><th>SOLICITADA</th><th>%</th></tr></thead>
-          <tbody>${decorated.map(r => `<tr><td><span class="pie-swatch" style="display:inline-block;background:${r.color};"></span></td><td><b>${r.clave}</b></td><td>${r.descripcion}</td><td>${r.cantidad_solicitada}</td><td>${r.percent}%</td></tr>`).join('')}</tbody>
+          <tbody>${decorated.map(r => `<tr><td><span class="pie-swatch" style="display:inline-block;background:${r.color};"></span></td><td><b>${escHtml(r.clave)}</b></td><td>${escHtml(r.descripcion)}</td><td>${r.cantidad_solicitada}</td><td>${r.percent}%</td></tr>`).join('')}</tbody>
         </table>
       </div>`;
   }
@@ -3062,7 +3753,8 @@
 
   async function loadGraficas(){
     const p = uiPerms();
-    if (!p.reportes?.acceso){ toast('Acceso restringido', false); return; }
+    const uname = String(CURRENT_USER?.username || UI_PERMISOS?.user || '').toLowerCase().trim();
+    if (!p.reportes?.acceso || uname === 'gabrielfiol' || uname === 'fiol'){ toast('Acceso restringido', false); return; }
     const msg = $('graf_msg');
     const currentOficialiaId = $('graf_oficialia')?.value || '';
     const range = getDateRange('graf');
@@ -3162,12 +3854,6 @@
     { key: 'bayoneta_transmision', label: 'Bayoneta de transmisión' }
   ];
 
-  function escHtml(v){
-    return String(v ?? '').replace(/[&<>"']/g, ch => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[ch]));
-  }
-
   function isRubroParqueVehicular(rubroId){
     const rid = Number(rubroId || 0);
     if (!rid) return false;
@@ -3214,6 +3900,19 @@
     if (!vehSec) return;
     const isVeh = isRubroParqueVehicular(rubId);
     vehSec.classList.toggle('hidden', !isVeh);
+    const btnSavePdf = $('btn-reg-save-and-pdf');
+    if (btnSavePdf) {
+      const canPdf = uiPerms().puedeGenerarPdfRegional !== false;
+      btnSavePdf.classList.toggle('hidden', !(isVeh && canPdf));
+    }
+  }
+
+  function normalizeRegionalCargo(val){
+    const s = safestr(val).trim();
+    if (!s) return '';
+    return s
+      .replace(/Coordinadora?\s+Regionall?(\s+(de\s+)?(Muleg[eé]|Los\s+Cabos|Comond[uú](\s*\/\s*Loreto)?|La\s+Paz))?/gi, 'Director Regional')
+      .replace(/Coordinadora?\s+Regionall?/gi, 'Director Regional');
   }
 
   function populateVehiculoFormFields(detalles = null, row = null){
@@ -3221,6 +3920,16 @@
     const u = det.unidad && typeof det.unidad === 'object' ? det.unidad : {};
     const eg = det.estado_general && typeof det.estado_general === 'object' ? det.estado_general : {};
     const chk = det.checklist && typeof det.checklist === 'object' ? det.checklist : {};
+    const resg = det.resguardante && typeof det.resguardante === 'object' ? det.resguardante : {};
+
+    if ($('veh_resg_preset')) $('veh_resg_preset').value = '';
+    if ($('veh_resg_nombre')) $('veh_resg_nombre').value = safestr(row?.resguardante_nombre || resg.nombre_completo || '');
+    if ($('veh_resg_rfc')) $('veh_resg_rfc').value = safestr(row?.resguardante_rfc || resg.rfc || '').toUpperCase();
+    if ($('veh_resg_puesto')) $('veh_resg_puesto').value = normalizeRegionalCargo(row?.resguardante_puesto || resg.puesto || '');
+    if ($('veh_resg_adscripcion')) $('veh_resg_adscripcion').value = safestr(row?.resguardante_adscripcion || resg.adscripcion || '');
+    if ($('veh_resg_programa')) $('veh_resg_programa').value = safestr(row?.resguardante_programa || resg.programa || '');
+    if ($('veh_resg_licencia')) $('veh_resg_licencia').value = safestr(row?.resguardante_licencia || resg.licencia_no || '').toUpperCase();
+    if ($('veh_resg_vigencia')) $('veh_resg_vigencia').value = safestr(row?.resguardante_vigencia_licencia || resg.vigencia_licencia || '');
 
     if ($('veh_marca')) $('veh_marca').value = safestr(u.marca || row?.marca_modelo || '');
     if ($('veh_tipo')) $('veh_tipo').value = safestr(u.tipo || '');
@@ -3245,6 +3954,15 @@
   }
 
   function collectVehiculoFormFields(){
+    const resguardante = {
+      nombre_completo: safestr($('veh_resg_nombre')?.value).trim(),
+      rfc: safestr($('veh_resg_rfc')?.value).trim().toUpperCase(),
+      puesto: normalizeRegionalCargo($('veh_resg_puesto')?.value),
+      adscripcion: safestr($('veh_resg_adscripcion')?.value).trim(),
+      programa: safestr($('veh_resg_programa')?.value).trim(),
+      licencia_no: safestr($('veh_resg_licencia')?.value).trim().toUpperCase(),
+      vigencia_licencia: safestr($('veh_resg_vigencia')?.value).trim()
+    };
     const unidad = {
       marca: safestr($('veh_marca')?.value),
       tipo: safestr($('veh_tipo')?.value),
@@ -3269,7 +3987,7 @@
         if (key) checklist[key] = sel.value || 'Sí';
       });
     }
-    return { unidad, estado_general, checklist };
+    return { resguardante, unidad, estado_general, checklist };
   }
 
   function updateRegionalFirmasPreview(){
@@ -3287,29 +4005,50 @@
     const regObj = REGIONAL_CATALOGS.regiones.find(r => Number(r.id) === regId);
     const rubObj = REGIONAL_CATALOGS.rubros.find(r => Number(r.id) === rubId);
 
+    const respRegionalNombre =
+      getTitularRegionalFromText(regObj?.clave || regObj?.nombre || '') ||
+      safestr(regObj?.responsable_regional || 'POR CONFIRMAR');
+
     const entregaTxt = rubObj
       ? `${safestr(rubObj.encargado_nombre)} (${safestr(rubObj.encargado_cargo)})`
       : 'Todos los rubros (selecciona un rubro para firma específica)';
-    const validaTxt = 'Jorge Patron Murillo (Encargado de Recursos Materiales)';
+    const validaTxt = 'Jorge Luis Patrón Murillo (Coordinador Operativo de Recursos Materiales)';
     const recibeTxt = regObj
-      ? `${safestr(regObj.responsable_regional || 'POR CONFIRMAR')} (${safestr(regObj.nombre)})`
-      : 'POR CONFIRMAR (selecciona una región para responsable regional)';
-    const autorizaTxt = 'Diphna Yanssen Weichselbaum Calderon (Delegada de Programas para el Desarrollo en BCS)';
+      ? `${respRegionalNombre} (Director Regional — ${safestr(regObj.nombre)})`
+      : 'POR CONFIRMAR (Director Regional)';
+    const autorizaTxt = 'Diphna Yanssen Weichselbaum Calderón (Delegada de Programas para el Desarrollo en BCS)';
 
     box.innerHTML = `
       <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap:8px;">
-        <div><b>1. Entrega:</b><br>${escHtml(entregaTxt)}</div>
-        <div><b>2. Valida:</b><br>${escHtml(validaTxt)}</div>
-        <div><b>3. Recibe:</b><br>${escHtml(recibeTxt)}</div>
-        <div><b>4. Autoriza:</b><br>${escHtml(autorizaTxt)}</div>
+        <div><b>1. Entrega / 2. Recibe Retorno:</b><br>${escHtml(entregaTxt)}</div>
+        <div><b>2. Recibe / 1. Devuelve:</b><br>${escHtml(recibeTxt)}</div>
+        <div><b>3. Valida (Entrega y Retorno):</b><br>${escHtml(validaTxt)}</div>
+        <div><b>4. Autoriza (Entrega y Retorno):</b><br>${escHtml(autorizaTxt)}</div>
       </div>
     `;
   }
 
+  function formatRegionalOficinaOptionLabel(o) {
+    if (!o) return '';
+    const nombreNorm = safestr(o.nombre)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+    const isSA = nombreNorm.includes('s/a') || nombreNorm.includes('sin asignar');
+    if (isSA) {
+      return o.municipio
+        ? `S/A — Sin Asignar (Pendiente Regional) — ${safestr(o.municipio)}`
+        : 'S/A — Sin Asignar (Pendiente Regional)';
+    }
+    return o.municipio
+      ? `${safestr(o.nombre)} — ${safestr(o.municipio)}`
+      : safestr(o.nombre);
+  }
+
   function filterOficinasForRegionalSelector(oficinas, rubroIdOverride = null) {
     if (!Array.isArray(oficinas)) return [];
-    const uname = safestr(CURRENT_USER?.username).toLowerCase();
-    const role = safestr(CURRENT_USER?.role).toLowerCase();
+    const uname = safestr(CURRENT_USER?.username || UI_PERMISOS?.user).toLowerCase();
+    const role = safestr(CURRENT_USER?.rol || CURRENT_USER?.role || UI_PERMISOS?.rol).toLowerCase();
     const assignedRubro = getAssignedRubroId();
     const filterRubroVal = Number(
       rubroIdOverride != null
@@ -3318,13 +4057,19 @@
     );
     const effectiveRubroId = filterRubroVal || Number(assignedRubro || 0);
 
-    const isAllowedRMUser =
-      role === 'admin' ||
-      ['admin', 'evelia', 'jorge', 'jorgepatron', 'rodrigo'].includes(uname);
-    // RM (Recursos Materiales) solo se muestra cuando el usuario autorizado tiene seleccionado Parque Vehicular (rubro_id == 2)
-    const canShowRM = isAllowedRMUser && effectiveRubroId === 2;
+    const isAdminUser = role === 'admin' || uname === 'admin' || Boolean(uiPerms().admin);
+    const isAdminOrDirectivo =
+      isAdminUser ||
+      ['jorge', 'jorgepatron', 'rodrigo'].includes(uname);
+    // RM (Recursos Materiales) se muestra cuando:
+    // - rubro_id == 2 y el usuario es evelia o administrador/directivo, O
+    // - rubro_id == 3 y el usuario es jesus o administrador/directivo
+    const canShowRM =
+      ((isAdminOrDirectivo || uname === 'evelia') && (!effectiveRubroId || effectiveRubroId === 2)) ||
+      ((isAdminOrDirectivo || uname === 'jesus') && (!effectiveRubroId || effectiveRubroId === 3));
     const isMobiliario = effectiveRubroId === 3 || uname === 'jesus';
     const isVehicular = effectiveRubroId === 2 || uname === 'evelia';
+    const canShowSA = isAdminUser || isAdminOrDirectivo || isMobiliario || uname === 'jesus';
 
     return oficinas.filter(o => {
       const nombreNorm = safestr(o.nombre)
@@ -3339,13 +4084,23 @@
       if (isRM && !canShowRM) return false;
 
       const isSA = nombreNorm.includes('s/a') || nombreNorm.includes('sin asignar');
+      if (isSA) {
+        // v55: Ni evelia ni el módulo de vehículos pueden ver o asignar a oficinas S/A
+        if (isVehicular || uname === 'evelia') return false;
+        return canShowSA;
+      }
 
-      if (isVehicular && isSA) return false;
+      // v55: Ni evelia ni el módulo de vehículos pueden ver o asignar a Coordinación Regional La Paz
+      const isCoordRegionalLaPaz =
+        nombreNorm.includes('coordinacion regional la paz') ||
+        nombreNorm.includes('coordinacion regional') ||
+        nombreNorm === 'coordinacion regional la paz';
+      if (isCoordRegionalLaPaz && (isVehicular || uname === 'evelia')) {
+        return false;
+      }
 
       if (isMobiliario) {
-        if (isRM) return false;
         if (Number(o.id) === 1 || nombreNorm.includes('delegacion la paz')) return false;
-        if (isSA) return false;
       }
       return true;
     });
@@ -3366,9 +4121,7 @@
       const rows = filterOficinasForRegionalSelector(rawRows, rubVal ? Number(rubVal) : null);
       REGIONAL_CATALOGS.oficinas = rows;
       const opts = rows.map(o => {
-        const label = o.municipio
-          ? `${safestr(o.nombre)} — ${safestr(o.municipio)}`
-          : safestr(o.nombre);
+        const label = formatRegionalOficinaOptionLabel(o);
         return `<option value="${Number(o.id)}">${escHtml(label)}</option>`;
       }).join('');
       ofiSel.innerHTML = `<option value="">Todas</option>${opts}`;
@@ -3508,9 +4261,10 @@
 
       tbody.innerHTML = rows.map((r, idx) => {
         const estatus = safestr(r.estatus_uso || 'ACTIVO').toUpperCase();
+        const inSiniestro = isSiniestroActivo(r);
         let statusClass = 'status-aprobada';
         if (estatus === 'PRESTADO' || estatus === 'EN_REPARACION') statusClass = 'status-pendiente';
-        if (estatus === 'BAJA') statusClass = 'status-cancelada';
+        if (estatus === 'BAJA' || inSiniestro) statusClass = 'status-cancelada';
 
         const isVeh = safestr(r.rubro_codigo).toUpperCase() === 'PARQUE_VEHICULAR' || isRubroParqueVehicular(r.rubro_id);
         const canEditRow = Boolean(canUserEdit && r.id && !isGrouped);
@@ -3518,12 +4272,56 @@
           ? `<button type="button" class="mini" data-reg-hist-idx="${idx}" title="Ver historial de movimientos y transferencias">⏱️ Historial</button>`
           : '';
 
+        const ofiNorm = safestr(r.oficina_nombre).toLowerCase();
+        const isRowInRM = ofiNorm.includes('rm') || ofiNorm.includes('recursos materiales') || Number(r.es_bodega_delegacion || 0) === 1;
+        const transBtnLabel = (Number(r.rubro_id) === 3 && !isRowInRM)
+          ? '🔄 Transferir / Regresar a RM'
+          : '🔄 Transferir';
+
+        const obsPublica = safestr(r.observaciones || '-');
+        const cantPropia = Number(r.cantidad_propia ?? 0);
+        const cantDisp = Number(r.cantidad_disponible ?? cantPropia);
+        const cantPrest = Number(r.cantidad_prestada_enviada ?? 0);
+        const stockMin = Number(r.stock_minimo ?? 0);
+        const showDispBadge = cantDisp < cantPropia || cantPrest > 0;
+
+        // v55: Semáforo de Stock en Inventario Regional: Solo alerta roja por stock cero (sin badge de texto, alerta amarilla eliminada)
+        // v59: Alerta roja destacada cuando el vehículo/bien está en Siniestro / Aseguradora
+        const isSinProducto = cantDisp <= 0;
+
+        let rowBgStyle = '';
+        if (inSiniestro) {
+          rowBgStyle = 'background-color:#fff1f2; border-left:4px solid #e11d48; color:#9f1239;';
+        } else if (isSinProducto) {
+          rowBgStyle = 'background-color:#fee2e2; color:#991b1b;';
+        }
+
+        const estatusCellHtml = inSiniestro
+          ? `<span class="badge-siniestro">🚨 NO DISPONIBLE — EN ASEGURADORA / SINIESTRO</span>`
+          : `<span class="status-badge ${statusClass}">${escHtml(estatus)}</span>`;
+
+        const cantHtml = showDispBadge
+          ? `<b>${cantPropia}</b><div style="font-size:11px; color:inherit; font-weight:500;">(${cantDisp} disp.${cantPrest > 0 ? ` / ${cantPrest} prést.` : ''})</div>`
+          : `<b>${cantPropia}</b>`;
+        const stockCellHtml = cantHtml;
+
+        const isAdminUser = Boolean(
+          uiPerms().admin ||
+          norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || '') === 'ADMIN' ||
+          norm(CURRENT_USER?.username || UI_PERMISOS?.user || '') === 'ADMIN'
+        );
+        const needsForzarRetorno = isAdminUser && canEditRow && (cantDisp < cantPropia || cantPrest > 0 || estatus === 'PRESTADO');
+        const forceReturnBtn = needsForzarRetorno
+          ? `<button type="button" class="mini" style="border-color:#d97706; color:#b45309; background:#fffbeb; font-weight:600;" data-reg-force-return-idx="${idx}" title="Forzar Retorno: Restaurar stock disponible igual a cantidad propia">🔄 Forzar Retorno</button>`
+          : '';
+
         let actionsHtml = `<div style="display:flex; gap:4px; align-items:center; flex-wrap:wrap;">${histBtn}<span class="muted" style="font-size:11.5px;">Solo lectura</span></div>`;
         if (canUserEdit) {
           actionsHtml = canEditRow
             ? `<div style="display:flex; gap:4px; flex-wrap:wrap;">
                  <button type="button" class="mini" data-reg-edit-idx="${idx}" title="Editar datos y checklist">Editar</button>
-                 <button type="button" class="mini" data-reg-trans-idx="${idx}" title="Transferir a otra oficina">Transferir</button>
+                 <button type="button" class="mini" data-reg-trans-idx="${idx}" title="Transferir o regresar piezas a otra oficina / RM">${transBtnLabel}</button>
+                 ${forceReturnBtn}
                  ${histBtn}
                  ${(isVeh && canUserPdf) ? `<button type="button" class="mini" style="border-color:var(--primary); color:var(--primary);" data-reg-pdf-id="${Number(r.id)}" title="Generar formato PDF de resguardo vehicular">PDF Resguardo</button>` : ''}
                </div>`
@@ -3533,15 +4331,17 @@
                </div>`;
         }
 
-        const obsPublica = safestr(r.observaciones || '-');
+        const ofiSubtitle = (!oficina_id && r.oficina_nombre)
+          ? `<div class="muted" style="font-size:11px; margin-top:2px;">📍 ${escHtml(safestr(r.oficina_nombre))}</div>`
+          : '';
 
-        return `<tr>
+        return `<tr class="${inSiniestro ? 'row-siniestro' : ''}" style="${rowBgStyle}">
           <td><b>${escHtml(safestr(r.clave_bien || '-'))}</b></td>
-          <td>${escHtml(safestr(r.descripcion || '-'))}</td>
+          <td>${escHtml(safestr(r.descripcion || '-'))}${ofiSubtitle}</td>
           <td>${escHtml(safestr(r.marca_modelo || '-'))}</td>
           <td>${escHtml(safestr(r.numero_serie_placas || '-'))}</td>
-          <td style="text-align:center; font-weight:600;">${Number(r.cantidad_propia ?? 0)}</td>
-          <td><span class="status-badge ${statusClass}">${escHtml(estatus)}</span></td>
+          <td style="text-align:center; font-weight:600;">${stockCellHtml}</td>
+          <td>${estatusCellHtml}</td>
           <td>${escHtml(obsPublica)}</td>
           <td>${actionsHtml}</td>
         </tr>`;
@@ -3561,6 +4361,12 @@
     const titleEl = $('modal-add-regional-title');
     if (!modal || !form || !ofiSel || !rubSel) return;
 
+    const isAdminUser = Boolean(
+      uiPerms().admin ||
+      norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || '') === 'ADMIN' ||
+      norm(CURRENT_USER?.username || UI_PERMISOS?.user || '') === 'ADMIN'
+    );
+
     form.reset();
     if ($('reg_add_id')) $('reg_add_id').value = editRow?.id ? String(editRow.id) : '';
     if (titleEl) {
@@ -3568,11 +4374,48 @@
         ? `Editar Activo — ${safestr(editRow.clave_bien)}`
         : 'Agregar Activo';
     }
-    if ($('reg_add_cantidad')) $('reg_add_cantidad').value = editRow?.cantidad_propia != null ? String(editRow.cantidad_propia) : '1';
+    if ($('reg_add_cantidad')) {
+      $('reg_add_cantidad').min = isAdminUser ? '0' : '1';
+      $('reg_add_cantidad').value = editRow?.cantidad_propia != null ? String(editRow.cantidad_propia) : '1';
+    }
     if ($('reg_add_estado')) $('reg_add_estado').value = safestr(editRow?.estado_fisico || 'BUENO').toUpperCase();
     if ($('reg_add_estatus')) $('reg_add_estatus').value = safestr(editRow?.estatus_uso || 'ACTIVO').toUpperCase();
     if ($('reg_add_obs')) $('reg_add_obs').value = safestr(editRow?.observaciones || '');
     if ($('reg_add_msg')) $('reg_add_msg').textContent = '';
+
+    const btnForzar = $('btn-forzar-retorno');
+    if (btnForzar) {
+      const cantPropia = Number(editRow?.cantidad_propia ?? 0);
+      const cantDisp = Number(editRow?.cantidad_disponible ?? cantPropia);
+      const cantPrest = Number(editRow?.cantidad_prestada_enviada ?? 0);
+      const estUso = norm(editRow?.estatus_uso || '');
+      if (editRow?.id && isAdminUser && (cantDisp < cantPropia || cantPrest > 0 || estUso === 'PRESTADO')) {
+        btnForzar.classList.remove('hidden');
+        btnForzar.style.display = '';
+        btnForzar.dataset.activoId = String(editRow.id);
+        btnForzar.dataset.claveBien = safestr(editRow.clave_bien);
+      } else {
+        btnForzar.classList.add('hidden');
+        btnForzar.style.display = 'none';
+        btnForzar.dataset.activoId = '';
+        btnForzar.dataset.claveBien = '';
+      }
+    }
+
+    const btnEliminar = $('btn-eliminar-regional');
+    if (btnEliminar) {
+      if (editRow?.id && isAdminUser) {
+        btnEliminar.classList.remove('hidden');
+        btnEliminar.style.display = 'inline-block';
+        btnEliminar.dataset.activoId = String(editRow.id);
+        btnEliminar.dataset.claveBien = safestr(editRow.clave_bien);
+      } else {
+        btnEliminar.classList.add('hidden');
+        btnEliminar.style.display = 'none';
+        btnEliminar.dataset.activoId = '';
+        btnEliminar.dataset.claveBien = '';
+      }
+    }
 
     try {
       if (!REGIONAL_CATALOGS.rubros.length) await loadRegionalFilters(true);
@@ -3614,7 +4457,7 @@
         Array.from(byRegion.entries()).map(([regName, list]) => (
           `<optgroup label="${escHtml(regName)}">` +
           list.map(o => {
-            const label = o.municipio ? `${safestr(o.nombre)} — ${safestr(o.municipio)}` : safestr(o.nombre);
+            const label = formatRegionalOficinaOptionLabel(o);
             return `<option value="${Number(o.id)}">${escHtml(label)}</option>`;
           }).join('') +
           '</optgroup>'
@@ -3622,13 +4465,14 @@
 
       if (editRow) {
         if (editRow.oficina_id) ofiSel.value = String(editRow.oficina_id);
-        if ($('reg_add_clave')) $('reg_add_clave').value = safestr(editRow.clave_bien);
+        if ($('reg_add_clave')) $('reg_add_clave').value = safestr(editRow.clave_bien).toUpperCase();
         if ($('reg_add_desc')) $('reg_add_desc').value = safestr(editRow.descripcion);
         if ($('reg_add_marca')) $('reg_add_marca').value = safestr(editRow.marca_modelo);
         if ($('reg_add_serie')) $('reg_add_serie').value = safestr(editRow.numero_serie_placas);
       } else {
         const curOfi = safestr($('reg_filter_oficina')?.value);
         if (curOfi && oficinas.some(o => String(o.id) === curOfi)) ofiSel.value = curOfi;
+        if ($('reg_add_clave')) $('reg_add_clave').value = '';
       }
 
       populateVehiculoFormFields(editRow?.detalles_vehiculo || null, editRow);
@@ -3661,20 +4505,86 @@
       btnHistModal.classList.add('hidden');
       btnHistModal.onclick = null;
     }
+    const btnForzar = $('btn-forzar-retorno');
+    if (btnForzar) {
+      btnForzar.classList.add('hidden');
+      btnForzar.style.display = 'none';
+      btnForzar.dataset.activoId = '';
+      btnForzar.dataset.claveBien = '';
+    }
+    const btnEliminar = $('btn-eliminar-regional');
+    if (btnEliminar) {
+      btnEliminar.classList.add('hidden');
+      btnEliminar.style.display = 'none';
+      btnEliminar.dataset.activoId = '';
+      btnEliminar.dataset.claveBien = '';
+    }
   }
 
-  async function submitRegionalAddForm(ev){
+  async function eliminarActivoRegional(activoId, claveBien = ''){
+    const id = Number(activoId || $('btn-eliminar-regional')?.dataset?.activoId || $('reg_add_id')?.value || 0);
+    if (!id) return;
+    const label = claveBien ? ` (${claveBien})` : ` #${id}`;
+    if (!confirm("⚠️ ¿Estás seguro de eliminar definitivamente este artículo del inventario regional? Esta acción no se puede deshacer.")) {
+      return;
+    }
+    const btn = $('btn-eliminar-regional');
+    try {
+      if (btn) btn.disabled = true;
+      const res = await apiJSON(`/api/inventario-regional/${encodeURIComponent(id)}`, {
+        method: 'DELETE'
+      });
+      toast(res?.message || `Artículo${label} eliminado definitivamente.`, true);
+      closeRegionalAddModal();
+      await renderRegionalInventory();
+      try { if (typeof loadVpCatalogo === 'function') await loadVpCatalogo(); } catch (_) {}
+    } catch (e) {
+      if (!handleAuthError(e)) toast(e.message || 'Error al eliminar activo regional', false);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function forzarRetornoRegional(activoId, claveBien = ''){
+    const id = Number(activoId || $('reg_add_id')?.value || 0);
+    if (!id) return;
+    const label = claveBien ? ` (${claveBien})` : ` #${id}`;
+    if (!confirm(`¿Forzar retorno y restaurar el stock disponible al 100% para el artículo${label}?`)) {
+      return;
+    }
+    const btn = $('btn-forzar-retorno');
+    try {
+      if (btn) btn.disabled = true;
+      const res = await apiJSON(`/api/inventario-regional/${encodeURIComponent(id)}/forzar-retorno`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      toast(res?.message || `Stock restaurado exitosamente para el artículo${label}`, true);
+      closeRegionalAddModal();
+      await renderRegionalInventory();
+      try { if (typeof loadVpCatalogo === 'function') await loadVpCatalogo(); } catch (_) {}
+    } catch (e) {
+      if (!handleAuthError(e)) toast(e.message || 'Error al forzar retorno del activo', false);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function submitRegionalAddForm(ev, { downloadPdfAfter = false } = {}){
     ev?.preventDefault();
     const msg = $('reg_add_msg');
     const btn = $('btn-reg-add-save');
+    const btnPdf = $('btn-reg-save-and-pdf');
     const editId = Number($('reg_add_id')?.value || 0) || null;
     const rubroId = Number($('reg_add_rubro')?.value || 0);
     const isVeh = isRubroParqueVehicular(rubroId);
+    const vehDetails = isVeh ? collectVehiculoFormFields() : null;
+    const resgObj = vehDetails?.resguardante || {};
 
     const payload = {
       oficina_id: Number($('reg_add_oficina')?.value || 0),
       rubro_id: rubroId,
-      clave_bien: safestr($('reg_add_clave')?.value),
+      clave_bien: safestr($('reg_add_clave')?.value).trim().toUpperCase(),
       descripcion: safestr($('reg_add_desc')?.value),
       marca_modelo: safestr($('reg_add_marca')?.value) || null,
       numero_serie_placas: safestr($('reg_add_serie')?.value) || null,
@@ -3682,7 +4592,16 @@
       estado_fisico: safestr($('reg_add_estado')?.value) || 'BUENO',
       estatus_uso: safestr($('reg_add_estatus')?.value) || 'ACTIVO',
       observaciones: safestr($('reg_add_obs')?.value) || null,
-      detalles_vehiculo: isVeh ? collectVehiculoFormFields() : null
+      detalles_vehiculo: vehDetails,
+      ...(isVeh ? {
+        resguardante_nombre: resgObj.nombre_completo || null,
+        resguardante_rfc: resgObj.rfc || null,
+        resguardante_puesto: resgObj.puesto || null,
+        resguardante_adscripcion: resgObj.adscripcion || null,
+        resguardante_programa: resgObj.programa || null,
+        resguardante_licencia: resgObj.licencia_no || null,
+        resguardante_vigencia_licencia: resgObj.vigencia_licencia || null
+      } : {})
     };
 
     if (isVeh && payload.detalles_vehiculo?.unidad) {
@@ -3703,13 +4622,27 @@
     if (!payload.rubro_id) return fail('Selecciona el rubro.', 'reg_add_rubro');
     if (!payload.clave_bien) return fail('La clave del bien es requerida.', 'reg_add_clave');
     if (!payload.descripcion) return fail('La descripción es requerida.', 'reg_add_desc');
-    if (!Number.isInteger(payload.cantidad_propia) || payload.cantidad_propia < 1) {
-      return fail('La cantidad debe ser un número entero mayor o igual a 1.', 'reg_add_cantidad');
+
+    const isAdminUser = Boolean(
+      uiPerms().admin ||
+      norm(CURRENT_USER?.rol || UI_PERMISOS?.rol || '') === 'ADMIN' ||
+      norm(CURRENT_USER?.username || UI_PERMISOS?.user || '') === 'ADMIN'
+    );
+    const minCant = isAdminUser ? 0 : 1;
+    if (!Number.isInteger(payload.cantidad_propia) || payload.cantidad_propia < minCant) {
+      return fail(
+        isAdminUser
+          ? 'La cantidad debe ser un número entero mayor o igual a 0.'
+          : 'La cantidad debe ser un número entero mayor o igual a 1.',
+        'reg_add_cantidad'
+      );
     }
 
     try {
       if (btn) btn.disabled = true;
+      if (btnPdf) btnPdf.disabled = true;
       if (msg) msg.textContent = 'Guardando...';
+      let savedAssetId = editId;
       if (editId) {
         await apiJSON(`/api/inventario-regional/${encodeURIComponent(editId)}`, {
           method: 'PUT',
@@ -3718,20 +4651,31 @@
         });
         toast(`Activo "${payload.clave_bien}" actualizado correctamente`, true);
       } else {
-        await apiJSON('/api/inventario-regional', {
+        const created = await apiJSON('/api/inventario-regional', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
+        savedAssetId = Number(created?.id || 0) || null;
         toast(`Activo "${payload.clave_bien}" agregado correctamente`, true);
       }
       closeRegionalAddModal();
       await renderRegionalInventory();
+      try { if (typeof loadVpCatalogo === 'function') await loadVpCatalogo(); } catch (_) {}
+      if (downloadPdfAfter && savedAssetId) {
+        await generarFormatoRegionalPDF(savedAssetId);
+      }
     } catch (e) {
       if (msg) msg.textContent = e.message || 'Error al guardar el activo';
-      if (!handleAuthError(e)) toast(e.message || 'Error al guardar el activo', false);
+      if (e.status === 409 || (e.message && e.message.includes('ya existe'))) {
+        alert(e.message || "⚠️ Error: La clave de producto ingresada ya existe. Por favor asigna una clave diferente.");
+        $('reg_add_clave')?.focus();
+      } else if (!handleAuthError(e)) {
+        toast(e.message || 'Error al guardar el activo', false);
+      }
     } finally {
       if (btn) btn.disabled = false;
+      if (btnPdf) btnPdf.disabled = false;
     }
   }
 
@@ -3818,13 +4762,15 @@
 
     form.reset();
     if ($('reg_trans_id')) $('reg_trans_id').value = String(row.id);
+    const cantPropiaRow = Number(row.cantidad_propia ?? 1);
+    const cantDispRow = Number(row.cantidad_disponible ?? cantPropiaRow);
+    const maxQty = Math.max(1, Math.min(cantPropiaRow, cantDispRow));
     if ($('reg_trans_info')) {
       $('reg_trans_info').innerHTML = `
         <b>Bien:</b> ${escHtml(safestr(row.clave_bien))} — ${escHtml(safestr(row.descripcion))}<br>
-        <b>Oficina actual:</b> ${escHtml(safestr(row.oficina_nombre || '-'))} (${escHtml(safestr(row.region_nombre || '-'))}) | <b>Cantidad disponible:</b> ${Number(row.cantidad_propia || 1)}
+        <b>Oficina actual:</b> ${escHtml(safestr(row.oficina_nombre || '-'))} (${escHtml(safestr(row.region_nombre || '-'))}) | <b>Propia:</b> ${cantPropiaRow} | <b>Disponible para transferir:</b> ${maxQty}
       `;
     }
-    const maxQty = Math.max(1, Number(row.cantidad_propia || 1));
     if ($('reg_trans_cantidad')) {
       $('reg_trans_cantidad').value = String(maxQty);
       $('reg_trans_cantidad').max = String(maxQty);
@@ -3838,22 +4784,34 @@
       const rawOficinas = Array.isArray(res?.data) ? res.data : [];
       const oficinas = filterOficinasForRegionalSelector(rawOficinas, rowRubroId);
       const byRegion = new Map();
-      oficinas
-        .filter(o => Number(o.id) !== Number(row.oficina_id))
-        .forEach(o => {
-          const key = safestr(o.region_nombre) || `Región ${o.region_id}`;
-          if (!byRegion.has(key)) byRegion.set(key, []);
-          byRegion.get(key).push(o);
-        });
+      const destCandidates = oficinas.filter(o => Number(o.id) !== Number(row.oficina_id));
+      destCandidates.forEach(o => {
+        const key = safestr(o.region_nombre) || `Región ${o.region_id}`;
+        if (!byRegion.has(key)) byRegion.set(key, []);
+        byRegion.get(key).push(o);
+      });
       destSel.innerHTML = '<option value="">- selecciona oficina destino -</option>' +
         Array.from(byRegion.entries()).map(([regName, list]) => (
           `<optgroup label="${escHtml(regName)}">` +
           list.map(o => {
-            const label = o.municipio ? `${safestr(o.nombre)} — ${safestr(o.municipio)}` : safestr(o.nombre);
+            const label = formatRegionalOficinaOptionLabel(o);
             return `<option value="${Number(o.id)}">${escHtml(label)}</option>`;
           }).join('') +
           '</optgroup>'
         )).join('');
+
+      // Si el bien está en una oficina regional (no RM), preseleccionar automáticamente RM (Recursos Materiales) si está disponible
+      const curOfiNorm = safestr(row.oficina_nombre).toLowerCase();
+      const isCurrentlyRM = curOfiNorm.includes('rm') || curOfiNorm.includes('recursos materiales') || Number(row.es_bodega_delegacion || 0) === 1;
+      if (!isCurrentlyRM) {
+        const rmOpt = destCandidates.find(o => {
+          const n = safestr(o.nombre).toLowerCase();
+          return n.includes('rm (recursos materiales)') || n === 'rm' || n.includes('recursos materiales');
+        });
+        if (rmOpt) {
+          destSel.value = String(rmOpt.id);
+        }
+      }
     } catch (e) {
       if (!handleAuthError(e)) toast(e.message || 'Error al cargar oficinas', false);
       return;
@@ -3893,19 +4851,21 @@
     try {
       if (btn) btn.disabled = true;
       if (msg) msg.textContent = 'Transfiriendo...';
-      await apiJSON(`/api/inventario-regional/${encodeURIComponent(id)}/transferir`, {
+      const res = await apiJSON('/api/inventario-regional/transferir', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          origen_id: id,
           oficina_destino_id: destino,
           cantidad_transferir: cantidad,
           cantidad: cantidad,
           motivo
         })
       });
-      toast('Transferencia realizada exitosamente', true);
+      toast(res?.message || 'Transferencia realizada exitosamente', true);
       closeRegionalTransferModal();
       await renderRegionalInventory();
+      try { if (typeof loadVpCatalogo === 'function') await loadVpCatalogo(); } catch (_) {}
     } catch (e) {
       if (msg) msg.textContent = e.message || 'Error al transferir';
       if (!handleAuthError(e)) toast(e.message || 'Error al transferir bien', false);
@@ -3987,8 +4947,83 @@
     modal.style.display = 'none';
   }
 
-  // ---- Gestión de Usuarios y Perfiles (Exclusivo Admin - Punto 8) ----
+  // ---- Gestión de Usuarios y Perfiles (Exclusivo Admin - CRUD V42 + Control Modo Prueba v61) ----
   let ADMIN_USUARIOS_ROWS = [];
+
+  async function refreshModoPruebaEstado() {
+    try {
+      const res = await apiJSON('/api/admin/modo-prueba');
+      if (res && res.ok) {
+        if (!UI_PERMISOS) UI_PERMISOS = {};
+        UI_PERMISOS.modo_prueba_grupal = Boolean(res.modo_prueba_grupal);
+        syncModoPruebaBannerAndControls();
+      }
+    } catch (_) {}
+  }
+
+  async function toggleModoPruebaGrupal() {
+    if (!uiPerms().admin) {
+      toast('Acción exclusiva para el Administrador.', false);
+      return;
+    }
+    const actual = Boolean(UI_PERMISOS?.modo_prueba_grupal ?? true);
+    const nuevo = !actual;
+    const msgConfirm = nuevo
+      ? '¿Activar el MODO DE PRUEBA GRUPAL?\n\nMientras esté activo, las nuevas Solicitudes de Almacén y Vales Provisionales se marcarán como 🧪 PRUEBA y NO descontarán ni bloquearán inventarios reales.'
+      : '¿Desactivar el Modo de Prueba Grupal y pasar a MODO PRODUCCIÓN REAL?\n\nA partir de este momento, las nuevas órdenes y vales provisionales descontarán existencias reales en la base de datos.';
+    if (!confirm(msgConfirm)) return;
+
+    const btn = $('btn-toggle-modo-prueba');
+    if (btn) btn.disabled = true;
+    try {
+      const res = await apiJSON('/api/admin/modo-prueba', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activo: nuevo })
+      });
+      if (!UI_PERMISOS) UI_PERMISOS = {};
+      UI_PERMISOS.modo_prueba_grupal = Boolean(res.modo_prueba_grupal);
+      syncModoPruebaBannerAndControls();
+      toast(res.message || (nuevo ? '🧪 Modo de Prueba Grupal ACTIVADO' : '🟢 Modo Producción Real ACTIVADO'), true);
+    } catch (e) {
+      if (!handleAuthError(e)) toast('Error al cambiar Modo de Prueba: ' + (e.message || e), false);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function purgarRegistrosDePrueba() {
+    if (!uiPerms().admin) {
+      toast('Acción exclusiva para el Administrador.', false);
+      return;
+    }
+    const conf = confirm(
+      '🧹 ¿Deseas PURGAR todos los registros de prueba (es_prueba = 1)?\n\n' +
+      '• Se eliminarán todas las Solicitudes de Almacén y Vales Provisionales de prueba.\n' +
+      '• Se conservará intacto el Vale real #3 de Víctor Huerta (es_prueba = 0).\n' +
+      '• Se restaurarán las existencias y tabletas a su estado limpio.'
+    );
+    if (!conf) return;
+
+    const btn = $('btn-purgar-pruebas');
+    if (btn) btn.disabled = true;
+    try {
+      const res = await apiJSON('/api/admin/purgar-pruebas', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const msg = res.message || `Purga completada: ${res.solicitudes_eliminadas ?? 0} solicitudes y ${res.vales_eliminados ?? 0} vales de prueba eliminados.`;
+      toast(msg, true);
+      alert(`✅ ${msg}`);
+      try { await loadPanelGeneral(); } catch (_) {}
+      try { await listarSolicitudes(); } catch (_) {}
+      try { await loadValesProvisionales(); } catch (_) {}
+    } catch (e) {
+      if (!handleAuthError(e)) toast('Error al purgar registros de prueba: ' + (e.message || e), false);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
 
   async function loadUsuariosAdmin(){
     const tbody = $('usuarios_tbody');
@@ -3998,6 +5033,7 @@
       tbody.innerHTML = '<tr><td colspan="7" class="muted">Acceso exclusivo para Administrador.</td></tr>';
       return;
     }
+    refreshModoPruebaEstado();
     tbody.innerHTML = '<tr><td colspan="7" class="muted">Cargando usuarios...</td></tr>';
     if (msg) msg.textContent = '';
 
@@ -4015,8 +5051,13 @@
         const regTxt = u.region_nombre
           ? `${safestr(u.region_nombre)}${u.oficina_nombre ? ` — ${safestr(u.oficina_nombre)}` : ''}`
           : '<span class="muted">La Paz (Delegación Central)</span>';
-        const depTxt = safestr(u.oficialia_nombre || u.departamento || (u.id_oficialia ? `Oficialía ${u.id_oficialia}` : '-'));
-        const rolBadge = `<span class="status-badge ${String(u.rol).toUpperCase() === 'ADMIN' ? 'status-aprobada' : (String(u.rol).toUpperCase() === 'ENCARGADO' ? 'status-prestamo' : 'status-pendiente')}">${escHtml(safestr(u.rol || 'USUARIO'))}</span>`;
+        const uLow = String(u.username || '').toLowerCase().trim();
+        const isFiol = uLow === 'gabrielfiol' || uLow === 'encargado' || uLow === 'fiol';
+        const depTxt = isFiol ? 'Encargado de Archivos y Materiales' : safestr(u.oficialia_nombre || u.departamento || (u.id_oficialia ? `Oficialía ${u.id_oficialia}` : '-'));
+        const cargoTxt = safestr(u.cargo || '-');
+        const rolBadge = isFiol
+          ? `<span class="status-badge status-prestamo">ENCARGADO DE ARCHIVOS Y MATERIALES</span>`
+          : `<span class="status-badge ${String(u.rol).toUpperCase() === 'ADMIN' ? 'status-aprobada' : (String(u.rol).toUpperCase() === 'ENCARGADO' ? 'status-prestamo' : 'status-pendiente')}">${escHtml(safestr(u.rol || 'USUARIO'))}</span>`;
         const nombreComp = safestr(u.nombre_completo || [u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO].filter(Boolean).join(' ') || u.nombre || '-');
 
         return `<tr>
@@ -4024,10 +5065,13 @@
           <td><b>${escHtml(safestr(u.username))}</b></td>
           <td>${escHtml(nombreComp)}</td>
           <td>${rolBadge}</td>
-          <td>${regTxt}</td>
-          <td><strong>${escHtml(depTxt)}</strong></td>
+          <td>${escHtml(cargoTxt)}</td>
+          <td><small>${regTxt}</small><br><strong>${escHtml(depTxt)}</strong></td>
           <td>
-            <button type="button" class="mini btn-secondary" data-usr-edit-idx="${idx}">✏️ Editar Perfil</button>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button type="button" class="mini btn-secondary" data-usr-edit-idx="${idx}">✏️ Editar</button>
+              <button type="button" class="mini btn-danger" data-usr-del-idx="${idx}">🗑️ Eliminar</button>
+            </div>
           </td>
         </tr>`;
       }).join('');
@@ -4040,19 +5084,123 @@
   // Alias global requerido
   window.loadUsuarios = loadUsuariosAdmin;
 
-  async function openEditUsuarioModal(u){
-    if (!u || !u.id) return;
-    const modal = $('modal-edit-usuario');
+  async function loadUserModalCatalogs(u) {
+    const [ofiRes, regRes, ofiRegRes, rubRes] = await Promise.all([
+      apiJSON('/api/oficialias'),
+      apiJSON('/api/regiones'),
+      apiJSON('/api/oficinas'),
+      apiJSON('/api/rubros')
+    ]);
+
+    const oficialias = Array.isArray(ofiRes?.data) ? ofiRes.data : [];
+    const regiones = Array.isArray(regRes?.data) ? regRes.data : [];
+    const oficinas = Array.isArray(ofiRegRes?.data) ? ofiRegRes.data : [];
+    const rubros = Array.isArray(rubRes?.data) ? rubRes.data : [];
+
+    const ofiSelect = $('usr_edit_oficialia') || $('usr_edit_departamento');
+    if (ofiSelect) {
+      ofiSelect.innerHTML = '<option value="">- Sin oficialía asignada -</option>' +
+        oficialias.map(o => `<option value="${Number(o.id)}">${escHtml(safestr(o.nombre))}</option>`).join('');
+      const currentOfi = u ? (u.id_oficialia || u.departamento_id || u.OFICIALIA_ID) : '';
+      ofiSelect.value = currentOfi ? String(currentOfi) : '';
+    }
+    if ($('usr_edit_region')) {
+      $('usr_edit_region').innerHTML = '<option value="">La Paz (Delegación Central por defecto)</option>' +
+        regiones.map(r => `<option value="${Number(r.id)}">${escHtml(safestr(r.nombre))}</option>`).join('');
+      $('usr_edit_region').value = u && u.region_id ? String(u.region_id) : '';
+    }
+    if ($('usr_edit_oficina')) {
+      $('usr_edit_oficina').innerHTML = '<option value="">- ninguna -</option>' +
+        oficinas.map(o => `<option value="${Number(o.id)}">${escHtml(`${safestr(o.region_nombre || '')} — ${safestr(o.nombre)}`)}</option>`).join('');
+      $('usr_edit_oficina').value = u && u.oficina_id ? String(u.oficina_id) : '';
+    }
+    if ($('usr_edit_rubro')) {
+      $('usr_edit_rubro').innerHTML = '<option value="">- ninguno (no es encargado de rubro) -</option>' +
+        rubros.map(r => `<option value="${Number(r.id)}">${escHtml(`${safestr(r.nombre_rubro)} (${safestr(r.encargado_nombre)})`)}</option>`).join('');
+      $('usr_edit_rubro').value = u && u.rubro_id ? String(u.rubro_id) : '';
+    }
+  }
+
+  function getEditUserModal() {
+    return $('modal-edit-user') || $('modal-edit-usuario');
+  }
+
+  async function openNewUsuarioModal() {
+    const modal = getEditUserModal();
     const form = $('form-edit-usuario');
     if (!modal || !form) return;
 
     form.reset();
-    if ($('usr_edit_id')) $('usr_edit_id').value = String(u.id);
-    if ($('usr_edit_username')) $('usr_edit_username').value = safestr(u.username);
+    form.dataset.isEditing = '';
+    form.dataset.editingUsername = '';
+    if ($('usr_edit_id')) $('usr_edit_id').value = '';
+    const uInput = $('usr_edit_username');
+    if (uInput) {
+      uInput.value = '';
+      uInput.readOnly = false;
+      uInput.classList.remove('readonly');
+      uInput.placeholder = 'ej. jnieves';
+    }
+    const titleEl = $('modal-user-title') || modal.querySelector('.modal-header h3');
+    if (titleEl) titleEl.textContent = '➕ Nuevo Usuario';
+    const pwdLabel = $('usr_edit_password_label');
+    if (pwdLabel) pwdLabel.textContent = 'Contraseña inicial *';
+    const pwdInput = $('usr_edit_password');
+    if (pwdInput) {
+      pwdInput.required = true;
+      pwdInput.placeholder = 'Contraseña de acceso';
+    }
+
+    if ($('usr_edit_rol')) $('usr_edit_rol').value = 'USUARIO';
+    if ($('usr_edit_nombre')) $('usr_edit_nombre').value = '';
+    if ($('usr_edit_primer_ap')) $('usr_edit_primer_ap').value = '';
+    if ($('usr_edit_segundo_ap')) $('usr_edit_segundo_ap').value = '';
+    if ($('usr_edit_cargo')) $('usr_edit_cargo').value = '';
+    if ($('usr_edit_licencia')) $('usr_edit_licencia').value = '';
+    if ($('usr_edit_vigencia_licencia')) $('usr_edit_vigencia_licencia').value = '';
+
+    if ($('usr_edit_msg')) {
+      $('usr_edit_msg').textContent = '';
+      $('usr_edit_msg').className = 'msg';
+    }
+
+    try {
+      await loadUserModalCatalogs(null);
+    } catch (_) {}
+
+    modal.classList.remove('hidden');
+    modal.style.display = 'flex';
+  }
+
+  async function openEditUsuarioModal(u){
+    if (!u || (u.id == null && !u.username)) return;
+    const modal = getEditUserModal();
+    const form = $('form-edit-usuario');
+    if (!modal || !form) return;
+
+    form.reset();
+    form.dataset.isEditing = '1';
+    form.dataset.editingUsername = safestr(u.username);
+    if ($('usr_edit_id')) $('usr_edit_id').value = String(u.id ?? 0);
+    const uInput = $('usr_edit_username');
+    if (uInput) {
+      uInput.value = safestr(u.username);
+      uInput.readOnly = true;
+      uInput.classList.add('readonly');
+    }
+    const titleEl = $('modal-user-title') || modal.querySelector('.modal-header h3');
+    if (titleEl) titleEl.textContent = `✏️ Editar Usuario: ${u.username}`;
+    const pwdLabel = $('usr_edit_password_label');
+    if (pwdLabel) pwdLabel.textContent = 'Nueva Contraseña (dejar en blanco para mantener la actual)';
+    const pwdInput = $('usr_edit_password');
+    if (pwdInput) {
+      pwdInput.required = false;
+      pwdInput.placeholder = 'Escribe nueva contraseña solo si deseas cambiarla';
+    }
+
     if ($('usr_edit_rol')) $('usr_edit_rol').value = safestr(u.rol || 'USUARIO').toUpperCase();
     if ($('usr_edit_nombre')) $('usr_edit_nombre').value = safestr(u.nombre);
 
-    // Apellidos: soportando tanto usr_edit_primer_ap / usr_edit_segundo_ap como usr_edit_ap1 / usr_edit_ap2
     const ap1Val = safestr(u.PRIMER_APELLIDO || u.primer_apellido || '');
     if ($('usr_edit_primer_ap')) $('usr_edit_primer_ap').value = ap1Val;
     if ($('usr_edit_ap1')) $('usr_edit_ap1').value = ap1Val;
@@ -4061,6 +5209,10 @@
     if ($('usr_edit_segundo_ap')) $('usr_edit_segundo_ap').value = ap2Val;
     if ($('usr_edit_ap2')) $('usr_edit_ap2').value = ap2Val;
 
+    if ($('usr_edit_cargo')) $('usr_edit_cargo').value = safestr(u.cargo || '');
+    if ($('usr_edit_licencia')) $('usr_edit_licencia').value = safestr(u.licencia || '');
+    if ($('usr_edit_vigencia_licencia')) $('usr_edit_vigencia_licencia').value = safestr(u.vigencia_licencia || '');
+
     if ($('usr_edit_password')) $('usr_edit_password').value = '';
     if ($('usr_edit_msg')) {
       $('usr_edit_msg').textContent = '';
@@ -4068,40 +5220,7 @@
     }
 
     try {
-      const [ofiRes, regRes, ofiRegRes, rubRes] = await Promise.all([
-        apiJSON('/api/oficialias'),
-        apiJSON('/api/regiones'),
-        apiJSON('/api/oficinas'),
-        apiJSON('/api/rubros')
-      ]);
-
-      const oficialias = Array.isArray(ofiRes?.data) ? ofiRes.data : [];
-      const regiones = Array.isArray(regRes?.data) ? regRes.data : [];
-      const oficinas = Array.isArray(ofiRegRes?.data) ? ofiRegRes.data : [];
-      const rubros = Array.isArray(rubRes?.data) ? rubRes.data : [];
-
-      const ofiSelect = $('usr_edit_oficialia') || $('usr_edit_departamento');
-      if (ofiSelect) {
-        ofiSelect.innerHTML = '<option value="">- Sin oficialía asignada -</option>' +
-          oficialias.map(o => `<option value="${Number(o.id)}">${escHtml(safestr(o.nombre))}</option>`).join('');
-        const currentOfi = u.id_oficialia || u.departamento_id || u.OFICIALIA_ID;
-        ofiSelect.value = currentOfi ? String(currentOfi) : '';
-      }
-      if ($('usr_edit_region')) {
-        $('usr_edit_region').innerHTML = '<option value="">La Paz (Delegación Central por defecto)</option>' +
-          regiones.map(r => `<option value="${Number(r.id)}">${escHtml(safestr(r.nombre))}</option>`).join('');
-        $('usr_edit_region').value = u.region_id ? String(u.region_id) : '';
-      }
-      if ($('usr_edit_oficina')) {
-        $('usr_edit_oficina').innerHTML = '<option value="">- ninguna -</option>' +
-          oficinas.map(o => `<option value="${Number(o.id)}">${escHtml(`${safestr(o.region_nombre || '')} — ${safestr(o.nombre)}`)}</option>`).join('');
-        $('usr_edit_oficina').value = u.oficina_id ? String(u.oficina_id) : '';
-      }
-      if ($('usr_edit_rubro')) {
-        $('usr_edit_rubro').innerHTML = '<option value="">- ninguno (no es encargado de rubro) -</option>' +
-          rubros.map(r => `<option value="${Number(r.id)}">${escHtml(`${safestr(r.nombre_rubro)} (${safestr(r.encargado_nombre)})`)}</option>`).join('');
-        $('usr_edit_rubro').value = u.rubro_id ? String(u.rubro_id) : '';
-      }
+      await loadUserModalCatalogs(u);
     } catch (e) {
       if (!handleAuthError(e)) toast(e.message || 'Error al cargar catálogos de usuario', false);
     }
@@ -4111,7 +5230,7 @@
   }
 
   function closeEditUsuarioModal(){
-    const modal = $('modal-edit-usuario');
+    const modal = getEditUserModal();
     if (modal) {
       modal.classList.add('hidden');
       modal.style.display = 'none';
@@ -4122,22 +5241,61 @@
     if (btn) btn.disabled = false;
   }
 
+  async function deleteUsuarioAdmin(u) {
+    if (!u || (u.id == null && !u.username)) return;
+    const uIdNum = Number(u.id || 0);
+    if ((uIdNum > 0 && Number(CURRENT_USER?.id) === uIdNum) || (u.username && norm(CURRENT_USER?.username) === norm(u.username))) {
+      toast('No puedes eliminar tu propio usuario de sesión activa.', false);
+      return;
+    }
+    const conf = confirm(`¿Estás seguro de que deseas eliminar al usuario "${u.username}" (${u.nombre_completo || u.nombre})?`);
+    if (!conf) return;
+
+    try {
+      const qUser = u.username ? `?username=${encodeURIComponent(u.username)}` : '';
+      const res = await apiJSON(`/api/usuarios/${encodeURIComponent(uIdNum)}${qUser}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: u.username })
+      });
+      if (!res.ok) throw new Error(res.error || res.message || 'Error al eliminar usuario');
+      toast(res.message || '✓ Usuario eliminado correctamente', true);
+      await loadUsuariosAdmin();
+    } catch (e) {
+      if (!handleAuthError(e)) toast('Error al eliminar: ' + (e.message || e), false);
+    }
+  }
+
   async function submitEditUsuarioForm(ev){
     if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+    const form = $('form-edit-usuario');
     const id = Number($('usr_edit_id')?.value || 0);
-    if (!id) return;
+    const isEditing = Boolean(id > 0 || form?.dataset?.isEditing === '1');
     const msg = $('usr_edit_msg');
     const btn = $('btn-usr-edit-save');
 
-    const nombre = safestr($('usr_edit_nombre')?.value);
-    const primerAp = safestr($('usr_edit_primer_ap')?.value || $('usr_edit_ap1')?.value);
-    const segundoAp = safestr($('usr_edit_segundo_ap')?.value || $('usr_edit_ap2')?.value);
+    const username = safestr($('usr_edit_username')?.value || form?.dataset?.editingUsername).trim().toLowerCase();
+    const nombre = safestr($('usr_edit_nombre')?.value).trim();
+    const primerAp = safestr($('usr_edit_primer_ap')?.value || $('usr_edit_ap1')?.value).trim();
+    const segundoAp = safestr($('usr_edit_segundo_ap')?.value || $('usr_edit_ap2')?.value).trim();
+    const cargo = safestr($('usr_edit_cargo')?.value).trim();
+    const licencia = safestr($('usr_edit_licencia')?.value).trim();
+    const vigenciaLicencia = safestr($('usr_edit_vigencia_licencia')?.value).trim();
     const rol = safestr($('usr_edit_rol')?.value) || 'USUARIO';
     const ofiEl = $('usr_edit_oficialia') || $('usr_edit_departamento');
     const ofiId = ofiEl && ofiEl.value ? Number(ofiEl.value) : null;
     const regEl = $('usr_edit_region');
     const regId = regEl && regEl.value ? Number(regEl.value) : null;
     const pwd = safestr($('usr_edit_password')?.value);
+
+    if (!isEditing && !username) {
+      if (msg) {
+        msg.textContent = 'El nombre de usuario (login) es obligatorio.';
+        msg.className = 'msg text-danger';
+      }
+      $('usr_edit_username')?.focus();
+      return;
+    }
 
     if (!nombre) {
       if (msg) {
@@ -4148,21 +5306,31 @@
       return;
     }
 
+    if (!isEditing && !pwd) {
+      if (msg) {
+        msg.textContent = 'La contraseña inicial es obligatoria para nuevos usuarios.';
+        msg.className = 'msg text-danger';
+      }
+      $('usr_edit_password')?.focus();
+      return;
+    }
+
     const payload = {
       nombre,
       primer_apellido: primerAp,
       segundo_apellido: segundoAp,
+      cargo: cargo || null,
+      licencia: licencia || null,
+      vigencia_licencia: vigenciaLicencia || null,
       rol,
       id_oficialia: ofiId,
       departamento_id: ofiId,
       region_id: regId
     };
 
-    if (pwd) {
-      payload.password = pwd;
-    }
+    if (username) payload.username = username;
+    if (pwd) payload.password = pwd;
 
-    // Solo enviar oficina y rubro si existen en el formulario
     if ($('usr_edit_oficina')) {
       payload.oficina_id = $('usr_edit_oficina').value ? Number($('usr_edit_oficina').value) : null;
     }
@@ -4177,34 +5345,189 @@
         msg.className = 'msg muted';
       }
 
-      const res = await apiJSON(`/api/usuarios/${encodeURIComponent(id)}/perfil`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        throw new Error(res.error || res.message || 'Error al actualizar usuario');
+      let res;
+      if (isEditing) {
+        res = await apiJSON(`/api/usuarios/${encodeURIComponent(id || 0)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+      } else {
+        res = await apiJSON('/api/usuarios', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
       }
 
-      toast('✓ Perfil de usuario actualizado correctamente', true);
-      closeEditUsuarioModal();
+      if (!res.ok) {
+        throw new Error(res.error || res.message || 'Error al guardar usuario');
+      }
 
-      // Recargar la tabla completa de usuarios desde el backend
+      toast(isEditing ? '✓ Perfil de usuario actualizado correctamente' : '✓ Usuario creado exitosamente', true);
+      closeEditUsuarioModal();
       await loadUsuariosAdmin();
 
-      if (Number(CURRENT_USER?.id) === id) {
+      if (isEditing && ((id > 0 && Number(CURRENT_USER?.id) === id) || (username && norm(CURRENT_USER?.username) === norm(username)))) {
         await fetchUiConfig();
         applyPermassions();
       }
     } catch (e) {
       if (msg) {
-        msg.textContent = e.message || 'Error al actualizar usuario';
+        msg.textContent = e.message || 'Error al guardar usuario';
         msg.className = 'msg text-danger';
       }
-      if (!handleAuthError(e)) toast('Error: ' + (e.message || 'Error al actualizar usuario'), false);
+      if (!handleAuthError(e)) toast('Error: ' + (e.message || 'Error al guardar usuario'), false);
     } finally {
       if (btn) btn.disabled = false;
+    }
+  }
+
+  // ============================================================================
+  // v42: DESCARGA DE RESPALDO DE BASE DE DATOS (BACKUP)
+  // ============================================================================
+  async function downloadDatabaseBackup() {
+    try {
+      toast('Generando respaldo completo de base de datos...', true);
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/backup-db', {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || errJson.message || 'Error al descargar respaldo de BD');
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const nowStr = new Date().toISOString().slice(0, 10);
+      const filename = match ? match[1] : `respaldo_inventario_${nowStr}.sql`;
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast('✓ Respaldo de BD descargado (' + filename + ')', true);
+    } catch (e) {
+      if (!handleAuthError(e)) toast('Error al descargar respaldo: ' + (e.message || e), false);
+    }
+  }
+
+  // ============================================================================
+  // v44: BITÁCORA DE MOVIMIENTOS DEL INVENTARIO (ADMINISTRADOR)
+  // ============================================================================
+  function openBitacoraModal() {
+    const modal = $('modal-bitacora');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    cargarBitacora();
+  }
+
+  function closeBitacoraModal() {
+    const modal = $('modal-bitacora');
+    if (!modal) return;
+    modal.style.display = 'none';
+  }
+
+  async function cargarBitacora(q = '', fecha = '') {
+    const tb = $('bitacora_tbody');
+    const meta = $('bitacora_meta');
+    if (!tb) return;
+    tb.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center; padding:16px;">Cargando movimientos...</td></tr>';
+    if (meta) meta.textContent = 'Consultando registros de auditoría...';
+
+    try {
+      let url = '/api/bitacora?limit=500';
+      if (q && q.trim()) url += `&q=${encodeURIComponent(q.trim())}`;
+      if (fecha && fecha.trim()) url += `&fecha=${encodeURIComponent(fecha.trim())}`;
+
+      const res = await apiJSON(url);
+      const rows = Array.isArray(res?.data) ? res.data : [];
+
+      if (!rows.length) {
+        tb.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center; padding:16px;">Sin movimientos registrados para el filtro seleccionado.</td></tr>';
+        if (meta) meta.textContent = '0 movimientos encontrados';
+        return;
+      }
+
+      if (meta) meta.textContent = `Mostrando ${rows.length} movimiento${rows.length === 1 ? '' : 's'} más recientes`;
+
+      tb.innerHTML = rows.map(r => {
+        const d = r.fecha ? new Date(r.fecha) : new Date();
+        const fechaFmt = isNaN(d.getTime()) ? String(r.fecha || '-') : d.toLocaleString('es-MX', { timeZone: 'America/Mazatlan', hour12: false });
+        const accion = safestr(r.accion).toUpperCase();
+        let badgeColor = '#64748b';
+        let badgeBg = '#f1f5f9';
+        if (accion.includes('ALTA')) { badgeColor = '#15803d'; badgeBg = '#dcfce7'; }
+        else if (accion.includes('ENTRADA')) { badgeColor = '#0369a1'; badgeBg = '#e0f2fe'; }
+        else if (accion.includes('SURTIDA')) { badgeColor = '#621132'; badgeBg = '#fdf2f4'; }
+        else if (accion.includes('AJUSTE')) { badgeColor = '#b45309'; badgeBg = '#fef3c7'; }
+
+        const badgeHtml = `<span style="display:inline-block; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px; background:${badgeBg}; color:${badgeColor}; border:1px solid ${badgeColor}33;">${escHtml(accion)}</span>`;
+
+        return `
+          <tr>
+            <td style="font-size:11.5px; white-space:nowrap; color:#475569;">${escHtml(fechaFmt)}</td>
+            <td><b>${escHtml(safestr(r.usuario))}</b><br><span class="muted" style="font-size:11px;">${escHtml(safestr(r.nombre_usuario || ''))}</span></td>
+            <td><span style="font-size:11.5px; font-weight:600; color:#334155;">${escHtml(safestr(r.modulo))}</span></td>
+            <td>${badgeHtml}</td>
+            <td style="font-size:12px; color:#1e293b;">${escHtml(safestr(r.detalles))}</td>
+          </tr>
+        `;
+      }).join('');
+    } catch (e) {
+      tb.innerHTML = `<tr><td colspan="5" style="color:var(--danger); text-align:center; padding:16px;">Error: ${escHtml(e.message || 'Error al cargar bitácora')}</td></tr>`;
+      if (meta) meta.textContent = 'Error al cargar';
+      if (!handleAuthError(e)) toast(e.message || 'Error al cargar bitácora', false);
+    }
+  }
+
+  // ============================================================================
+  // v42: HEARTBEAT (PING + AUTO-ACTUALIZACIÓN + MONITOR DE SESIONES EN LÍNEA)
+  // ============================================================================
+  async function checkSystemHeartbeat() {
+    try {
+      const token = localStorage.getItem('token');
+      if (token) {
+        await apiJSON('/api/ping', { method: 'POST' }).catch(() => {});
+      }
+      const res = await apiJSON('/api/system-status').catch(() => null);
+      if (res && res.version && Number(res.version) > APP_VERSION) {
+        toast(`⚠️ Nueva versión del sistema disponible (v${res.version}). Actualizando...`, true);
+        setTimeout(() => {
+          window.location.reload(true);
+        }, 1500);
+        return;
+      }
+      if (res && res.activeUsers && Array.isArray(res.activeUsers)) {
+        renderOnlineUsers(res.activeUsers);
+      } else if (res && res.onlineCount !== undefined) {
+        const cntEl = $('online-users-count');
+        if (cntEl) cntEl.textContent = String(res.onlineCount);
+      }
+    } catch (_) {}
+  }
+
+  function renderOnlineUsers(users) {
+    const cntEl = $('online-users-count');
+    if (cntEl) cntEl.textContent = String(users.length);
+
+    const listEl = $('online-users-list');
+    if (listEl) {
+      if (!users.length) {
+        listEl.innerHTML = '<span class="muted">No hay usuarios activos registrados</span>';
+      } else {
+        listEl.innerHTML = users.map(u => {
+          const ago = Math.max(0, Math.round((Date.now() - (u.lastSeen || Date.now())) / 1000));
+          const agoTxt = ago < 60 ? `${ago}s` : `${Math.round(ago/60)}m`;
+          return `<span style="display:inline-block; padding:3px 10px; background:#fff; border:1px solid #bae6fd; border-radius:12px; font-size:12px;">
+            👤 <b>${escHtml(safestr(u.username))}</b> (${escHtml(safestr(u.rol))}) <small class="muted" style="margin-left:4px;">hace ${agoTxt}</small>
+          </span>`;
+        }).join(' ');
+      }
     }
   }
 
@@ -4217,22 +5540,47 @@
   let VP_ACTIVE_DEVOLUCION_ID = null;
 
   async function loadVpCatalogo() {
-    const rubroId = Number($('vp_rubro_id')?.value || 1);
+    const rubroId = Number($('vp_rubro_id')?.value || 2);
     const sel = $('vp_item_select');
+    const cantIn = $('vp_item_cant');
+    if (cantIn) {
+      if (rubroId === 4) {
+        cantIn.value = 1;
+        cantIn.readOnly = true;
+        cantIn.disabled = true;
+        cantIn.title = 'Las tabletas digitales son activos serializados únicos (cantidad fija = 1)';
+      } else {
+        cantIn.readOnly = false;
+        cantIn.disabled = false;
+        cantIn.title = '';
+      }
+    }
     if (!sel) return;
     sel.innerHTML = '<option value="">- Cargando artículos disponibles... -</option>';
     try {
       const res = await apiJSON(`/api/vales-prestamo/catalogo?rubro_id=${rubroId}`);
-      VP_CATALOGO = (Array.isArray(res?.data) ? res.data : []).filter(it => (Number(it.stock ?? it.cantidad_disponible ?? it.existencia ?? 0) > 0) || it.disponible === true);
+      VP_CATALOGO = (Array.isArray(res?.data) ? res.data : []).filter(it => (Number(it.cantidad_disponible ?? it.stock ?? it.existencia ?? 0) > 0) || it.disponible === true);
       if (!VP_CATALOGO.length) {
-        sel.innerHTML = '<option value="">- No hay artículos con existencia disponible en este rubro -</option>';
+        sel.innerHTML = rubroId === 4
+          ? '<option value="">- No hay tabletas en estado DISPONIBLE para préstamo provisional -</option>'
+          : '<option value="">- No hay artículos con existencia disponible en este rubro -</option>';
         return;
       }
-      const opts = ['<option value="">- Selecciona un bien o material disponible -</option>'];
+      const opts = [rubroId === 4
+        ? '<option value="">- Selecciona una tableta disponible (Resguardo / IMEI / Serie) -</option>'
+        : '<option value="">- Selecciona un bien o material disponible -</option>'
+      ];
       VP_CATALOGO.forEach((it, idx) => {
-        const clavePrefix = it.clave ? `${it.clave} — ` : '';
-        const serieTxt = it.serie ? ` (${it.serie})` : '';
-        opts.push(`<option value="${idx}">${clavePrefix}${it.descripcion}${serieTxt}</option>`);
+        if (rubroId === 4 || it.es_tableta) {
+          const modeloTxt = safestr(it.modelo || 'QTab LTE');
+          const imeiTxt = safestr(it.imei || '-');
+          const serieTxt = safestr(it.numero_serie || '-');
+          opts.push(`<option value="${idx}">Resguardo #${Number(it.no_resguardo || 0)} — ${escHtml(modeloTxt)} (IMEI: ${escHtml(imeiTxt)} | Serie: ${escHtml(serieTxt)})</option>`);
+        } else {
+          const clavePrefix = it.clave ? `${it.clave} — ` : '';
+          const serieTxt = it.serie ? ` (${it.serie})` : '';
+          opts.push(`<option value="${idx}">${escHtml(`${clavePrefix}${it.descripcion ?? ''}${serieTxt}`)}</option>`);
+        }
       });
       sel.innerHTML = opts.join('');
     } catch (e) {
@@ -4251,11 +5599,11 @@
     tbody.innerHTML = VP_FORM_ITEMS.map((it, idx) => `
       <tr>
         <td style="text-align:center; font-weight:bold;">${idx + 1}</td>
-        <td><strong>${safestr(it.descripcion)}</strong>${it.clave ? ` <small class="muted">(${it.clave})</small>` : ''}</td>
-        <td>${safestr(it.marca || it.modelo || it.serie) ? [it.marca, it.modelo, it.serie].filter(Boolean).join(' / ') : '<span class="muted">N/A</span>'}</td>
-        <td style="text-align:center; font-weight:bold;">${it.cantidad}</td>
-        <td><span class="status-badge" style="font-size:11px;">${safestr(it.estado_salida || 'BUENO')}</span></td>
-        <td>${safestr(it.observaciones) || '<span class="muted">-</span>'}</td>
+        <td><strong>${escHtml(safestr(it.descripcion))}</strong>${it.clave ? ` <small class="muted">(${escHtml(it.clave)})</small>` : ''}</td>
+        <td>${safestr(it.marca || it.modelo || it.serie) ? escHtml([it.marca, it.modelo, it.serie].filter(Boolean).join(' / ')) : '<span class="muted">N/A</span>'}</td>
+        <td style="text-align:center; font-weight:bold;">${Number(it.cantidad || 0)}</td>
+        <td><span class="status-badge" style="font-size:11px;">${escHtml(safestr(it.estado_salida || 'BUENO'))}</span></td>
+        <td>${safestr(it.observaciones) ? escHtml(safestr(it.observaciones)) : '<span class="muted">-</span>'}</td>
         <td style="text-align:center;">
           <button type="button" class="btn-icon text-danger" title="Eliminar del vale" onclick="window.removeVpFormItem(${idx})">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
@@ -4280,11 +5628,25 @@
       return;
     }
     const catItem = VP_CATALOGO[idx];
+    const rubroId = Number($('vp_rubro_id')?.value || 1);
+    const isTableta = rubroId === 4 || Boolean(catItem.es_tableta);
     const cantIn = $('vp_item_cant');
-    const cant = Math.max(1, Number(cantIn?.value) || 1);
+    const cant = isTableta ? 1 : Math.max(1, Number(cantIn?.value) || 1);
+    const dispStock = Number(catItem.cantidad_disponible ?? catItem.stock ?? 0);
 
-    if (cant > Number(catItem.stock || 0)) {
-      toast(`La cantidad solicitada supera la disponibilidad actual.`, false);
+    if (isTableta) {
+      const dupTab = VP_FORM_ITEMS.find(x => Number(x.tableta_id || x.articulo_id) === Number(catItem.tableta_id || catItem.id));
+      if (dupTab) {
+        toast(`La tableta con Resguardo #${catItem.no_resguardo} ya fue agregada a este vale provisional.`, false);
+        return;
+      }
+    }
+
+    const existingItem = isTableta ? null : VP_FORM_ITEMS.find(x => Number(x.articulo_id) === Number(catItem.id));
+    const alreadyInForm = existingItem ? Number(existingItem.cantidad || 0) : 0;
+
+    if (alreadyInForm + cant > dispStock) {
+      toast(`La cantidad solicitada (${alreadyInForm + cant}) supera la disponibilidad actual (${dispStock}).`, false);
       return;
     }
 
@@ -4292,20 +5654,36 @@
     const estadoIn = $('vp_item_estado');
     const obsIn = $('vp_item_obs');
 
-    const itemToAdd = {
-      articulo_id: catItem.id,
-      clave: catItem.clave || null,
-      descripcion: catItem.descripcion,
-      marca: catItem.marca || null,
-      modelo: catItem.modelo || null,
-      color: catItem.color || null,
-      serie: (serieIn?.value?.trim()) || catItem.serie || null,
-      cantidad: cant,
-      estado_salida: estadoIn?.value || 'BUEN ESTADO',
-      observaciones: obsIn?.value?.trim() || null
-    };
+    if (existingItem) {
+      existingItem.cantidad = alreadyInForm + cant;
+      if (obsIn?.value?.trim()) {
+        existingItem.observaciones = existingItem.observaciones
+          ? `${existingItem.observaciones} | ${obsIn.value.trim()}`
+          : obsIn.value.trim();
+      }
+    } else {
+      const itemToAdd = {
+        articulo_id: isTableta ? null : catItem.id,
+        tableta_id: isTableta ? Number(catItem.tableta_id || catItem.id) : null,
+        id: catItem.id,
+        es_tableta: isTableta,
+        no_resguardo: catItem.no_resguardo || null,
+        imei: catItem.imei || null,
+        numero_serie: catItem.numero_serie || null,
+        clave: catItem.clave || null,
+        clave_bien: catItem.clave || null,
+        descripcion: catItem.descripcion,
+        marca: catItem.marca || null,
+        modelo: catItem.modelo || null,
+        color: catItem.color || null,
+        serie: isTableta ? (catItem.serie || null) : ((serieIn?.value?.trim()) || catItem.serie || null),
+        cantidad: cant,
+        estado_salida: estadoIn?.value || 'BUEN ESTADO',
+        observaciones: obsIn?.value?.trim() || null
+      };
+      VP_FORM_ITEMS.push(itemToAdd);
+    }
 
-    VP_FORM_ITEMS.push(itemToAdd);
     renderVpFormItems();
 
     if (cantIn) cantIn.value = 1;
@@ -4327,11 +5705,34 @@
     const fechaSalida = safestr($('vp_fecha_salida')?.value);
     const fechaDevolucionEstimada = safestr($('vp_fecha_devolucion_estimada')?.value);
     const observacionesPrestamo = safestr($('vp_obs_prestamo')?.value);
-    const modVal = safestr($('vp_modalidad')?.value || '2_FIRMAS');
-    const tipoFirmas = (modVal === '4_FIRMAS' || modVal === '1') ? 4 : 2;
-    const es4Firmas = (tipoFirmas === 4);
-    const recibeNombre = safestr($('vale-recibe-nombre')?.value) || solicitanteNombre;
-    const recibeCargo = safestr($('vale-recibe-cargo')?.value) || solicitanteCargo;
+    const modSelect = getTipoValeSelect();
+    const modVal = safestr(modSelect?.value || '2_FIRMAS');
+    const allowed4 = canUserUseCuatroFirmas();
+    const es4Firmas = allowed4 && (modVal === '4_FIRMAS' || modVal === '1');
+    const tipoFirmas = es4Firmas ? 4 : 2;
+    const deptoOption = $('vp_departamento_id')?.selectedOptions?.[0];
+    const deptoNombre = deptoOption ? deptoOption.textContent.trim() : '';
+
+    let recibeNombre = safestr($('vale-recibe-nombre')?.value);
+    let recibeCargo = safestr($('vale-recibe-cargo')?.value);
+
+    if (!es4Firmas) {
+      recibeNombre = solicitanteNombre;
+      recibeCargo = solicitanteCargo || deptoNombre;
+      if ($('vale-recibe-nombre')) $('vale-recibe-nombre').value = recibeNombre;
+      if ($('vale-recibe-cargo')) $('vale-recibe-cargo').value = recibeCargo;
+    } else {
+      if (!recibeNombre) {
+        toast('Ingresa el nombre de quien recibe para la modalidad de 4 Firmas');
+        $('vale-recibe-nombre')?.focus();
+        return;
+      }
+      if (!recibeCargo) {
+        toast('Ingresa el cargo o departamento de quien recibe para la modalidad de 4 Firmas');
+        $('vale-recibe-cargo')?.focus();
+        return;
+      }
+    }
 
     if (!rubroId) { toast('Selecciona el rubro'); return; }
     if (!solicitanteNombre) { toast('Ingresa el nombre del solicitante'); $('vp_solicitante_nombre')?.focus(); return; }
@@ -4381,9 +5782,6 @@
 
     if (!VP_FORM_ITEMS.length) { toast('Agrega al menos un artículo o bien al vale'); return; }
 
-    const deptoOption = $('vp_departamento_id')?.selectedOptions?.[0];
-    const deptoNombre = deptoOption ? deptoOption.textContent.trim() : '';
-
     const payload = {
       rubro_id: rubroId,
       departamento_id: deptoId,
@@ -4391,6 +5789,8 @@
       solicitante_nombre: solicitanteNombre,
       solicitante_cargo: solicitanteCargo,
       solicitante_telefono: solicitanteTelefono,
+      nombre_solicitante: solicitanteNombre,
+      cargo_solicitante: solicitanteCargo,
       operativo_nombre: operativoNombre,
       lugar_comision: lugarComision,
       fecha_salida: fechaSalida,
@@ -4399,6 +5799,8 @@
       es_indefinido: esIndefinido,
       recibe_nombre: recibeNombre,
       recibe_cargo: recibeCargo,
+      nombre_recibe: recibeNombre,
+      cargo_recibe: recibeCargo,
       observaciones_prestamo: observacionesPrestamo,
       items: VP_FORM_ITEMS
     };
@@ -4422,9 +5824,11 @@
       if ($('vale-recibe-nombre')) $('vale-recibe-nombre').value = '';
       if ($('vale-recibe-cargo')) $('vale-recibe-cargo').value = '';
       if ($('vale-recibe-preset')) $('vale-recibe-preset').value = '';
-      if ($('vp_modalidad')) {
-        $('vp_modalidad').value = '2_FIRMAS';
+      const selModalidad = getTipoValeSelect();
+      if (selModalidad) {
+        selModalidad.value = '2_FIRMAS';
         syncVpMinDates();
+        syncVpQuienRecibeVisibility();
       }
       if (msg) msg.textContent = '';
 
@@ -4527,26 +5931,26 @@
 
         if (est === 'SOLICITADO') {
           if (canManageThisVale) {
-            actionBtns.push(`<button type="button" class="btn-primary mini" style="background:#1d4ed8; border-color:#1d4ed8;" onclick="window.autorizarValeProvisional(${r.id}, '${r.folio}')">✓ Autorizar</button>`);
+            actionBtns.push(`<button type="button" class="btn-primary mini" style="background:#1d4ed8; border-color:#1d4ed8;" onclick="window.autorizarValeProvisional(${Number(r.id)}, '${escHtml(r.folio)}')">✓ Autorizar</button>`);
           }
           if (canManageThisVale || isOwner) {
-            actionBtns.push(`<button type="button" class="btn-secondary mini text-danger" onclick="window.cancelarValeProvisional(${r.id}, '${r.folio}')">✕ Cancelar</button>`);
+            actionBtns.push(`<button type="button" class="btn-secondary mini text-danger" onclick="window.cancelarValeProvisional(${Number(r.id)}, '${escHtml(r.folio)}')">✕ Cancelar</button>`);
           }
         } else if (est === 'AUTORIZADO_EN_PRESTAMO') {
           if (canManageThisVale) {
-            actionBtns.push(`<button type="button" class="btn-primary mini" style="background:#15803d; border-color:#15803d;" onclick="window.openDevolucionValeModal(${r.id})">📥 Registrar Devolución / Finalizar</button>`);
+            actionBtns.push(`<button type="button" class="btn-primary mini" style="background:#15803d; border-color:#15803d;" onclick="window.openDevolucionValeModal(${Number(r.id)})">📥 Registrar Devolución / Finalizar</button>`);
           }
         }
 
         return `
           <tr>
-            <td><strong>${safestr(r.folio)}</strong></td>
-            <td><span class="status-badge" style="font-size:11px;">${safestr(r.nombre_rubro || `Rubro ${r.rubro_id}`)}</span></td>
+            <td><strong>${escHtml(safestr(r.folio))}</strong>${renderPruebaBadge(r.es_prueba)}</td>
+            <td><span class="status-badge" style="font-size:11px;">${escHtml(safestr(r.nombre_rubro || `Rubro ${r.rubro_id}`))}</span></td>
             <td>${tipoValeBadge}</td>
-            <td>${safestr(r.oficialia_nombre || r.departamento_nombre)}</td>
-            <td><strong>${safestr(r.operativo_nombre)}</strong><br><small class="muted">📍 ${safestr(r.lugar_comision)}</small></td>
-            <td>${safestr(r.solicitante_nombre)}<br><small class="muted">Recibe: ${safestr(r.recibe_nombre || r.solicitante_nombre)}</small></td>
-            <td>${formatDate(r.fecha_salida)}</td>
+            <td>${escHtml(safestr(r.oficialia_nombre || r.departamento_nombre))}</td>
+            <td><strong>${escHtml(safestr(r.operativo_nombre))}</strong><br><small class="muted">📍 ${escHtml(safestr(r.lugar_comision))}</small></td>
+            <td>${escHtml(safestr(r.solicitante_nombre))}<br><small class="muted">Recibe: ${escHtml(safestr(r.recibe_nombre || r.solicitante_nombre))}</small></td>
+            <td>${escHtml(formatDate(r.fecha_salida))}</td>
             <td>${fechaDevCell}</td>
             <td>${estBadge}</td>
             <td style="text-align:center;">
@@ -4558,7 +5962,7 @@
         `;
       }).join('');
     } catch (e) {
-      tbody.innerHTML = `<tr><td colspan="10" class="text-center text-danger" style="padding:24px;">Error al cargar vales: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="10" class="text-center text-danger" style="padding:24px;">Error al cargar vales: ${escHtml(e.message)}</td></tr>`;
     }
   }
 
@@ -4617,11 +6021,11 @@
         const tipoFirmasTxt = Number(vale.tipo_firmas) === 4 ? '4 Firmas (Regional / Especial)' : '2 Firmas (Delegación)';
         infoBox.innerHTML = `
           <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-            <div><strong>Solicitante:</strong> ${safestr(vale.solicitante_nombre)} (${safestr(vale.solicitante_cargo || 'N/A')})</div>
-            <div><strong>Área:</strong> ${safestr(vale.oficialia_nombre || vale.departamento_nombre)}</div>
-            <div><strong>Operativo:</strong> ${safestr(vale.operativo_nombre)} — 📍 ${safestr(vale.lugar_comision)}</div>
-            <div><strong>Modalidad:</strong> ${tipoFirmasTxt}</div>
-            <div><strong>Fecha Límite Estimada:</strong> ${esIndef ? '<span style="color:#4338ca; font-weight:bold;">TIEMPO INDEFINIDO</span>' : formatDate(vale.fecha_devolucion_estimada)}</div>
+            <div><strong>Solicitante:</strong> ${escHtml(safestr(vale.solicitante_nombre))} (${escHtml(safestr(vale.solicitante_cargo || 'N/A'))})</div>
+            <div><strong>Área:</strong> ${escHtml(safestr(vale.oficialia_nombre || vale.departamento_nombre))}</div>
+            <div><strong>Operativo:</strong> ${escHtml(safestr(vale.operativo_nombre))} — 📍 ${escHtml(safestr(vale.lugar_comision))}</div>
+            <div><strong>Modalidad:</strong> ${escHtml(tipoFirmasTxt)}</div>
+            <div><strong>Fecha Límite Estimada:</strong> ${esIndef ? '<span style="color:#4338ca; font-weight:bold;">TIEMPO INDEFINIDO</span>' : escHtml(formatDate(vale.fecha_devolucion_estimada))}</div>
           </div>
         `;
       }
@@ -4629,13 +6033,13 @@
       const items = Array.isArray(vale.detalles) ? vale.detalles : [];
       if (tbody) {
         tbody.innerHTML = items.map(it => `
-          <tr data-det-id="${it.id}">
+          <tr data-det-id="${escHtml(it.id)}">
             <td>
-              <strong>${safestr(it.descripcion)}</strong>
-              ${it.serie ? `<br><small class="muted">S/N: ${it.serie}</small>` : ''}
-              ${it.marca || it.modelo ? `<br><small class="muted">${[it.marca, it.modelo].filter(Boolean).join(' ')}</small>` : ''}
+              <strong>${escHtml(safestr(it.descripcion))}</strong>
+              ${it.serie ? `<br><small class="muted">S/N: ${escHtml(it.serie)}</small>` : ''}
+              ${it.marca || it.modelo ? `<br><small class="muted">${escHtml([it.marca, it.modelo].filter(Boolean).join(' '))}</small>` : ''}
             </td>
-            <td style="text-align:center; font-weight:bold;">${it.cantidad}</td>
+            <td style="text-align:center; font-weight:bold;">${Number(it.cantidad || 0)}</td>
             <td>
               <select class="vp_item_dev_estado" style="width:100%; font-size:12px;">
                 <option value="BUEN ESTADO">BUEN ESTADO</option>
@@ -4645,7 +6049,7 @@
               </select>
             </td>
             <td>
-              <input class="vp_item_dev_obs" placeholder="Observaciones de recepción..." style="width:100%; font-size:12px;" value="${safestr(it.observaciones || '')}">
+              <input class="vp_item_dev_obs" placeholder="Observaciones de recepción..." style="width:100%; font-size:12px;" value="${escHtml(safestr(it.observaciones || ''))}">
             </td>
           </tr>
         `).join('');
@@ -5211,6 +6615,10 @@
       if ($('kpi-estatal-vehiculos')) $('kpi-estatal-vehiculos').textContent = Number(kpis.total_vehicular || 0).toLocaleString();
       if ($('kpi-estatal-mobiliario')) $('kpi-estatal-mobiliario').textContent = Number(kpis.total_mobiliario || 0).toLocaleString();
       if ($('kpi-estatal-tablets')) $('kpi-estatal-tablets').textContent = Number(kpis.total_tablets || 0).toLocaleString();
+      if ($('kpi-estatal-tablets-sub')) {
+        const tr = kpis.tabletas_resumen || {};
+        $('kpi-estatal-tablets-sub').textContent = `En Resguardo: ${Number(tr.en_resguardo || 0)} | Devolución: ${Number(tr.devolucion_pendiente || 0)} | Disp.: ${Number(tr.disponibles || 0)}`;
+      }
       if ($('kpi-estatal-almacen')) $('kpi-estatal-almacen').textContent = Number(kpis.almacen_general_stock || 0).toLocaleString();
       if ($('kpi-estatal-articulos')) $('kpi-estatal-articulos').textContent = `${Number(kpis.almacen_general_articulos || 0).toLocaleString()} artículos consumibles`;
 
@@ -5223,17 +6631,22 @@
 
       tbody.innerHTML = rows.map(r => {
         const estatus = safestr(r.estatus_uso || 'ACTIVO').toUpperCase();
+        const inSiniestro = isSiniestroActivo(r);
         let statusClass = 'status-aprobada';
         if (estatus === 'PRESTADO' || estatus === 'EN_REPARACION') statusClass = 'status-pendiente';
-        if (estatus === 'BAJA') statusClass = 'status-cancelada';
+        if (estatus === 'BAJA' || inSiniestro) statusClass = 'status-cancelada';
 
         const ofiTxt = r.oficina_nombre
           ? (r.municipio ? `${safestr(r.oficina_nombre)} (${safestr(r.municipio)})` : safestr(r.oficina_nombre))
           : '-';
 
-        return `<tr>
+        const estatusHtml = inSiniestro
+          ? `<span class="badge-siniestro">🚨 NO DISPONIBLE — EN ASEGURADORA / SINIESTRO</span>`
+          : `<span class="status-badge ${statusClass}">${escHtml(estatus)}</span>`;
+
+        return `<tr class="${inSiniestro ? 'row-siniestro' : ''}" style="${inSiniestro ? 'background-color:#fff1f2; border-left:4px solid #e11d48; color:#9f1239;' : ''}">
           <td><b>${escHtml(safestr(r.clave_bien || '-'))}</b></td>
-          <td><span style="font-size:11.5px; font-weight:600; color:var(--primary);">${escHtml(safestr(r.nombre_rubro || `Rubro ${r.rubro_id}`))}</span></td>
+          <td><span style="font-size:11.5px; font-weight:600; color:${inSiniestro ? '#9f1239' : 'var(--primary)'};">${escHtml(safestr(r.nombre_rubro || `Rubro ${r.rubro_id}`))}</span></td>
           <td>${escHtml(safestr(r.descripcion || '-'))}</td>
           <td>${escHtml(safestr(r.marca_modelo || '-'))}</td>
           <td>${escHtml(safestr(r.numero_serie_placas || '-'))}</td>
@@ -5241,7 +6654,7 @@
           <td><b>${escHtml(safestr(r.region_nombre || '-'))}</b></td>
           <td>${escHtml(ofiTxt)}</td>
           <td><span class="status-badge" style="font-size:11px;">${escHtml(safestr(r.estado_fisico || 'BUENO'))}</span></td>
-          <td><span class="status-badge ${statusClass}">${escHtml(estatus)}</span></td>
+          <td>${estatusHtml}</td>
         </tr>`;
       }).join('');
     } catch (e) {
@@ -5308,8 +6721,12 @@
       toast('Ventana bloqueada por el navegador. Permite ventanas emergentes.', false);
       return;
     }
-    const rowsHtml = ESTATAL_ROWS.map((r, i) => `
-      <tr>
+    const rowsHtml = ESTATAL_ROWS.map((r, i) => {
+      const inSiniestro = isSiniestroActivo(r);
+      const rowStyle = inSiniestro ? ' style="background:#fff1f2; color:#9f1239;"' : '';
+      const estTxt = inSiniestro ? 'NO DISPONIBLE (SINIESTRO / ASEGURADORA)' : safestr(r.estatus_uso || 'ACTIVO');
+      return `
+      <tr${rowStyle}>
         <td style="text-align:center;">${i + 1}</td>
         <td><b>${escHtml(safestr(r.clave_bien || '-'))}</b></td>
         <td>${escHtml(safestr(r.nombre_rubro || '-'))}</td>
@@ -5320,9 +6737,9 @@
         <td>${escHtml(safestr(r.region_nombre || '-'))}</td>
         <td>${escHtml(safestr(r.oficina_nombre || '-'))}</td>
         <td>${escHtml(safestr(r.estado_fisico || 'BUENO'))}</td>
-        <td>${escHtml(safestr(r.estatus_uso || 'ACTIVO'))}</td>
-      </tr>
-    `).join('');
+        <td${inSiniestro ? ' style="color:#9f1239; font-weight:700;"' : ''}>${escHtml(estTxt)}</td>
+      </tr>`;
+    }).join('');
 
     w.document.open();
     w.document.write(`<!doctype html><html><head><title>Inventario Estatal Consolidado</title>
@@ -5513,10 +6930,21 @@
     $('btn-sol-modo-prestamo')?.addEventListener('click', () => setSolicitudModo('PRESTAMO_ACTIVOS'));
     $('tipo_solicitud')?.addEventListener('change', (ev) => setSolicitudModo(ev.target.value));
 
-    $('vp_rubro_id')?.addEventListener('change', () => loadVpCatalogo());
-    $('vp_modalidad')?.addEventListener('change', () => syncVpMinDates());
+    $('vp_rubro_id')?.addEventListener('change', () => {
+      if (VP_FORM_ITEMS.length) {
+        VP_FORM_ITEMS = [];
+        renderVpFormItems();
+      }
+      loadVpCatalogo();
+    });
+    const selModChange = getTipoValeSelect();
+    selModChange?.addEventListener('change', () => {
+      syncVpMinDates();
+      syncVpQuienRecibeVisibility();
+    });
     $('vp_fecha_salida')?.addEventListener('change', () => syncVpMinDates());
     syncVpMinDates();
+    syncVpQuienRecibeVisibility();
 
     // Autocompletado de Firma 3 (RECIBE)
     $('vale-recibe-preset')?.addEventListener('change', (ev) => {
@@ -5531,13 +6959,29 @@
       if ($('vale-recibe-cargo')) $('vale-recibe-cargo').value = pCargo;
     });
     $('vp_solicitante_nombre')?.addEventListener('input', (ev) => {
-      if (!$('vale-recibe-preset')?.value && $('vale-recibe-nombre')) {
-        $('vale-recibe-nombre').value = ev.target.value;
+      const mod = getTipoValeSelect();
+      const is2Firmas = !mod || mod.value === '2_FIRMAS' || !canUserUseCuatroFirmas();
+      if (is2Firmas || !$('vale-recibe-preset')?.value) {
+        if ($('vale-recibe-nombre')) $('vale-recibe-nombre').value = ev.target.value;
       }
     });
     $('vp_solicitante_cargo')?.addEventListener('input', (ev) => {
-      if (!$('vale-recibe-preset')?.value && $('vale-recibe-cargo')) {
-        $('vale-recibe-cargo').value = ev.target.value;
+      const mod = getTipoValeSelect();
+      const is2Firmas = !mod || mod.value === '2_FIRMAS' || !canUserUseCuatroFirmas();
+      if (is2Firmas || !$('vale-recibe-preset')?.value) {
+        const val = ev.target.value;
+        const deptoNombre = $('vp_departamento_id')?.selectedOptions?.[0]?.textContent?.trim() || '';
+        if ($('vale-recibe-cargo')) $('vale-recibe-cargo').value = val || deptoNombre;
+      }
+    });
+    $('vp_departamento_id')?.addEventListener('change', () => {
+      const mod = getTipoValeSelect();
+      const is2Firmas = !mod || mod.value === '2_FIRMAS' || !canUserUseCuatroFirmas();
+      if (is2Firmas) {
+        const deptoNombre = $('vp_departamento_id')?.selectedOptions?.[0]?.textContent?.trim() || '';
+        if (!$('vp_solicitante_cargo')?.value && $('vale-recibe-cargo')) {
+          $('vale-recibe-cargo').value = deptoNombre;
+        }
       }
     });
 
@@ -5645,14 +7089,34 @@
       await guardarSolicitudEnPaso3();
     });
 
-    // Botón Aceptar y Surtir de la pestaña Consulta (Para Encargados)
+    // Botones del flujo de 4 estados en la pestaña Consulta (Para Encargado Fiol / Admin)
     $('sol_consulta_detalle')?.addEventListener('click', async (ev) => {
-      const btn = ev.target.closest('#btn-aprobar-surtir-consulta');
-      if (!btn) return;
-      btn.disabled = true;
-      const ok = await guardarTodoDetalle('sol_consulta_detalle', { goToPdf: false });
-      if (!ok) {
-        btn.disabled = false;
+      const btnEnProceso = ev.target.closest('#btn-sol-pasar-en-proceso');
+      if (btnEnProceso) {
+        btnEnProceso.disabled = true;
+        const ok = await cambiarEstadoSolicitudConsulta('EN_PROCESO');
+        if (!ok) btnEnProceso.disabled = false;
+        return;
+      }
+      const btnParaFirmas = ev.target.closest('#btn-sol-pasar-para-firmas') || ev.target.closest('#btn-aprobar-surtir-consulta');
+      if (btnParaFirmas) {
+        btnParaFirmas.disabled = true;
+        const ok = await cambiarEstadoSolicitudConsulta('PARA_FIRMAS');
+        if (!ok) btnParaFirmas.disabled = false;
+        return;
+      }
+      const btnImprimirVale = ev.target.closest('#btn-sol-imprimir-vale-firmas');
+      if (btnImprimirVale) {
+        await descargarPDF({ resetAfter: false });
+        return;
+      }
+      const btnCompletada = ev.target.closest('#btn-sol-marcar-completada');
+      if (btnCompletada) {
+        if (!confirm('¿Confirmas que el material ya fue entregado y deseas marcar la orden como COMPLETADA?')) return;
+        btnCompletada.disabled = true;
+        const ok = await cambiarEstadoSolicitudConsulta('COMPLETADA');
+        if (!ok) btnCompletada.disabled = false;
+        return;
       }
     });
 
@@ -5677,10 +7141,63 @@
     // Pestaña: Almacén (Inventario)
     $('btn-alm-apply')?.addEventListener('click', loadAlmacen);
     $('alm_q')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter') loadAlmacen(); });
+    let almSearchTimer = null;
+    $('alm_q')?.addEventListener('input', () => {
+      clearTimeout(almSearchTimer);
+      almSearchTimer = setTimeout(() => {
+        const qVal = ($('alm_q')?.value || '').trim();
+        if (!qVal) {
+          renderAlmacen(ALM_LAST_ROWS);
+        } else {
+          const filtered = ALM_LAST_ROWS.filter(r => 
+            matchFlexible(qVal, r.CLAVE, r.DESCRIPCION, nombreCategoriaFromRow(r), r.UNIDAD)
+          );
+          renderAlmacen(filtered);
+        }
+      }, 150);
+    });
     $('alm_order')?.addEventListener('change', loadAlmacen);
     $('alm_dir')?.addEventListener('change', loadAlmacen);
     $('btn-alm-crear')?.addEventListener('click', crearAlmacen);
     $('btn-alm-cancel')?.addEventListener('click', cancelEdit);
+
+    // v44: Botón "+ Nuevo Material"
+    $('btn-alm-nuevo-prod')?.addEventListener('click', () => {
+      almResetForm();
+      const descEl = $('alm_desc');
+      if (descEl) {
+        descEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setTimeout(() => descEl.focus(), 300);
+      }
+      toast('Formulario listo para nuevo material', true);
+    });
+
+    // v44: Checkbox "Seleccionar todos"
+    $('alm_check_all')?.addEventListener('change', (e) => {
+      const isChecked = e.target.checked;
+      const rowChecks = document.querySelectorAll('.alm-row-check');
+      rowChecks.forEach(chk => {
+        chk.checked = isChecked;
+        const id = chk.dataset.id;
+        if (id) {
+          if (isChecked) selectedMaterialIds.add(String(id));
+          else selectedMaterialIds.delete(String(id));
+        }
+      });
+      updateAlmSelectionUI();
+    });
+
+    // v44: Checkbox individual de fila
+    $('alm_tbody')?.addEventListener('change', (ev) => {
+      const chk = ev.target.closest('.alm-row-check');
+      if (!chk) return;
+      const id = chk.dataset.id;
+      if (!id) return;
+      if (chk.checked) selectedMaterialIds.add(String(id));
+      else selectedMaterialIds.delete(String(id));
+      updateAlmSelectionUI();
+    });
+
     $('alm_tbody')?.addEventListener('click', (ev)=>{
       const btn = ev.target.closest('button'); if (!btn) return;
       const tr = ev.target.closest('tr'); if (!tr) return;
@@ -5688,6 +7205,25 @@
       if (btn.dataset.action === 'hist')      loadProductoHistorial(tr.dataset.clave || '');
       else if (btn.dataset.action === 'edit') startEditFromRow(tr);
       else if (btn.dataset.action === 'del')  eliminarFila(id);
+    });
+
+    // v44: Alternar ver solo seleccionados
+    $('btn-alm-toggle-sel')?.addEventListener('click', () => {
+      filterOnlySelected = !filterOnlySelected;
+      renderAlmacen(ALM_LAST_ROWS);
+    });
+
+    // v44: Reportes en PDF oficial
+    $('btn-alm-pdf-sel')?.addEventListener('click', () => generarReporteAlmacenPdf(true));
+    $('btn-alm-pdf-all')?.addEventListener('click', () => generarReporteAlmacenPdf(false));
+
+    // v54: Botón Limpiar Selección y Actualizar
+    $('btn-clear-selection')?.addEventListener('click', () => {
+      selectedMaterialIds.clear();
+      filterOnlySelected = false;
+      document.querySelectorAll('.alm-row-check, #alm-check-all').forEach(cb => { cb.checked = false; });
+      updateAlmSelectionUI();
+      if (typeof loadAlmacen === 'function') loadAlmacen();
     });
 
     // Pestaña: Inventario Regional (Fase B)
@@ -5725,7 +7261,7 @@
             Array.from(byRegion.entries()).map(([regName, list]) => (
               `<optgroup label="${escHtml(regName)}">` +
               list.map(o => {
-                const label = o.municipio ? `${safestr(o.nombre)} — ${safestr(o.municipio)}` : safestr(o.nombre);
+                const label = formatRegionalOficinaOptionLabel(o);
                 return `<option value="${Number(o.id)}">${escHtml(label)}</option>`;
               }).join('') +
               '</optgroup>'
@@ -5759,11 +7295,74 @@
         if (row) openVehiculoHistorialModal(row);
         return;
       }
+      const forceBtn = ev.target.closest('[data-reg-force-return-idx]');
+      if (forceBtn) {
+        const idx = Number(forceBtn.getAttribute('data-reg-force-return-idx'));
+        const row = REGIONAL_LAST_ROWS[idx];
+        if (row && row.id) forzarRetornoRegional(row.id, row.clave_bien);
+        return;
+      }
       const pdfBtn = ev.target.closest('[data-reg-pdf-id]');
       if (pdfBtn) {
         const id = Number(pdfBtn.getAttribute('data-reg-pdf-id'));
         if (id) generarFormatoRegionalPDF(id);
       }
+    });
+    $('btn-forzar-retorno')?.addEventListener('click', () => {
+      const btn = $('btn-forzar-retorno');
+      const id = Number(btn?.dataset?.activoId || $('reg_add_id')?.value || 0);
+      const clave = safestr(btn?.dataset?.claveBien || $('reg_add_clave')?.value || '');
+      if (id) forzarRetornoRegional(id, clave);
+    });
+    $('btn-eliminar-regional')?.addEventListener('click', () => {
+      const btn = $('btn-eliminar-regional');
+      const id = Number(btn?.dataset?.activoId || $('reg_add_id')?.value || 0);
+      const clave = safestr(btn?.dataset?.claveBien || $('reg_add_clave')?.value || '');
+      if (id) eliminarActivoRegional(id, clave);
+    });
+    $('reg_add_clave')?.addEventListener('input', (e) => {
+      if (e.target) e.target.value = e.target.value.toUpperCase();
+    });
+    $('veh_resg_rfc')?.addEventListener('input', (e) => {
+      if (e.target) e.target.value = e.target.value.toUpperCase();
+    });
+    $('veh_resg_licencia')?.addEventListener('input', (e) => {
+      if (e.target) e.target.value = e.target.value.toUpperCase();
+    });
+    $('veh_resg_preset')?.addEventListener('change', (e) => {
+      const sel = e.target;
+      const opt = sel?.selectedOptions?.[0];
+      if (!opt || !opt.value) return;
+      const nom = opt.getAttribute('data-nombre') || '';
+      const rawPue = opt.getAttribute('data-puesto') || (opt.value !== 'RM' ? 'Director Regional' : '');
+      const pue = normalizeRegionalCargo(rawPue);
+      const ads = opt.getAttribute('data-adscripcion') || '';
+      if ($('veh_resg_nombre') && nom) $('veh_resg_nombre').value = nom;
+      if ($('veh_resg_puesto') && pue) $('veh_resg_puesto').value = pue;
+      if ($('veh_resg_adscripcion') && ads) $('veh_resg_adscripcion').value = ads;
+    });
+    $('btn-reg-save-and-pdf')?.addEventListener('click', (ev) => {
+      submitRegionalAddForm(ev, { downloadPdfAfter: true });
+    });
+    // v53: Botón para Ocultar / Mostrar Menú Principal
+    $('btn-toggle-menu')?.addEventListener('click', () => {
+      const sidebar = $('sidebar');
+      if (!sidebar) return;
+      const isCollapsed = sidebar.classList.toggle('sidebar-collapsed');
+      const icon = $('btn-toggle-menu-icon');
+      const text = $('btn-toggle-menu-text');
+      if (isCollapsed) {
+        if (icon) icon.textContent = '▶';
+        if (text) text.textContent = 'Mostrar Menú';
+        $('btn-toggle-menu').title = 'Mostrar Menú Lateral';
+      } else {
+        if (icon) icon.textContent = '◀';
+        if (text) text.textContent = 'Ocultar Menú';
+        $('btn-toggle-menu').title = 'Ocultar Menú Lateral';
+      }
+    });
+    $('alm_clave')?.addEventListener('input', (e) => {
+      if (e.target) e.target.value = e.target.value.toUpperCase();
     });
     $('form-add-regional')?.addEventListener('submit', submitRegionalAddForm);
     $('modal-add-regional')?.addEventListener('click', (ev) => {
@@ -5778,17 +7377,62 @@
       if (ev.target === ev.currentTarget || ev.target.closest('[data-close-modal]')) closeVehiculoHistorialModal();
     });
 
-    // Pestaña: Gestión de Usuarios (Admin)
+    // Pestaña: Gestión de Usuarios (Admin - CRUD V42 + Control Fase de Prueba Grupal v61)
+    $('btn-toggle-modo-prueba')?.addEventListener('click', () => toggleModoPruebaGrupal());
+    $('btn-purgar-pruebas')?.addEventListener('click', () => purgarRegistrosDePrueba());
     $('btn-usuarios-refresh')?.addEventListener('click', () => loadUsuariosAdmin());
+    $('btn-usuario-nuevo')?.addEventListener('click', () => openNewUsuarioModal());
+    $('btn-backup-db')?.addEventListener('click', () => downloadDatabaseBackup());
+    $('btn-ver-bitacora')?.addEventListener('click', () => openBitacoraModal());
+    $('btn-cerrar-bitacora')?.addEventListener('click', () => closeBitacoraModal());
+    $('btn-cerrar-bitacora-footer')?.addEventListener('click', () => closeBitacoraModal());
+    $('btn-bitacora-buscar')?.addEventListener('click', () => {
+      const q = $('bitacora_q')?.value || '';
+      const fecha = $('bitacora_fecha')?.value || '';
+      cargarBitacora(q, fecha);
+    });
+    $('bitacora_q')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const q = $('bitacora_q')?.value || '';
+        const fecha = $('bitacora_fecha')?.value || '';
+        cargarBitacora(q, fecha);
+      }
+    });
+    $('btn-bitacora-limpiar')?.addEventListener('click', () => {
+      if ($('bitacora_q')) $('bitacora_q').value = '';
+      if ($('bitacora_fecha')) $('bitacora_fecha').value = '';
+      cargarBitacora('', '');
+    });
+    $('modal-bitacora')?.addEventListener('click', (ev) => {
+      if (ev.target === ev.currentTarget) closeBitacoraModal();
+    });
+    $('online-users-badge')?.addEventListener('click', () => {
+      const container = $('online-users-container');
+      if (container) {
+        container.style.display = (container.style.display === 'none' || !container.style.display) ? 'block' : 'none';
+      }
+    });
+
     $('usuarios_tbody')?.addEventListener('click', (ev) => {
       const editBtn = ev.target.closest('[data-usr-edit-idx]');
-      if (!editBtn) return;
-      const idx = Number(editBtn.getAttribute('data-usr-edit-idx'));
-      const u = ADMIN_USUARIOS_ROWS[idx];
-      if (u) openEditUsuarioModal(u);
+      if (editBtn) {
+        const idx = Number(editBtn.getAttribute('data-usr-edit-idx'));
+        const u = ADMIN_USUARIOS_ROWS[idx];
+        if (u) openEditUsuarioModal(u);
+        return;
+      }
+      const delBtn = ev.target.closest('[data-usr-del-idx]');
+      if (delBtn) {
+        const idx = Number(delBtn.getAttribute('data-usr-del-idx'));
+        const u = ADMIN_USUARIOS_ROWS[idx];
+        if (u) deleteUsuarioAdmin(u);
+        return;
+      }
     });
+
     $('form-edit-usuario')?.addEventListener('submit', submitEditUsuarioForm);
-    $('modal-edit-usuario')?.addEventListener('click', (ev) => {
+    const mUserEl = $('modal-edit-user') || $('modal-edit-usuario');
+    mUserEl?.addEventListener('click', (ev) => {
       if (
         ev.target === ev.currentTarget ||
         ev.target.closest('[data-close-modal]') ||
@@ -5813,7 +7457,8 @@
         if (!$('modal-add-regional')?.classList.contains('hidden')) closeRegionalAddModal();
         if (!$('modal-transferir-regional')?.classList.contains('hidden')) closeRegionalTransferModal();
         if (!$('modal-historial-vehiculo')?.classList.contains('hidden')) closeVehiculoHistorialModal();
-        if (!$('modal-edit-usuario')?.classList.contains('hidden')) closeEditUsuarioModal();
+        const mu = $('modal-edit-user') || $('modal-edit-usuario');
+        if (mu && (!mu.classList.contains('hidden') && mu.style.display !== 'none')) closeEditUsuarioModal();
       }
     });
 
@@ -5875,6 +7520,102 @@
       }
     });
 
+    // Manejo opcional de login y cambio obligatorio de contraseña temporal si existe #login-form
+    const loginFormEl = $('login-form');
+    if (loginFormEl) {
+      const showForceChangeInLogin = (userId, username) => {
+        loginFormEl.classList.add('hidden');
+        const box = loginFormEl.closest('.login-box') || loginFormEl.parentElement;
+        const oldFc = $('force-change-form');
+        if (oldFc) oldFc.remove();
+        const fcForm = document.createElement('form');
+        fcForm.id = 'force-change-form';
+        fcForm.innerHTML = `
+          <div style="background:#fef3c7; border:1px solid #f59e0b; color:#92400e; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:14px;">
+            Cuenta: <b>${escHtml(username || '')}</b>. Por seguridad debes cambiar la contraseña temporal antes de continuar.
+          </div>
+          <div class="login-field">
+            <div class="login-input-wrap">
+              <input id="fc-new-pass" type="password" placeholder="Nueva Contraseña (mín. 6 caracteres)" autocomplete="new-password" required>
+            </div>
+          </div>
+          <div class="login-field">
+            <div class="login-input-wrap">
+              <input id="fc-confirm-pass" type="password" placeholder="Confirmar Contraseña" autocomplete="new-password" required>
+            </div>
+          </div>
+          <div class="login-actions">
+            <button id="btn-force-change" class="btn-submit" type="submit">Guardar Nueva Contraseña</button>
+          </div>
+          <div id="force-change-msg" style="margin-top:12px; font-size:13px; color:#dc2626;"></div>
+        `;
+        box.appendChild(fcForm);
+        fcForm.addEventListener('submit', async (ev) => {
+          ev.preventDefault();
+          const newPassword = ($('fc-new-pass')?.value || '').trim();
+          const confirmPassword = ($('fc-confirm-pass')?.value || '').trim();
+          const fcMsg = $('force-change-msg');
+          const fcBtn = $('btn-force-change');
+          if (newPassword.length < 6) {
+            if (fcMsg) fcMsg.textContent = 'La nueva contraseña debe tener al menos 6 caracteres.';
+            return;
+          }
+          if (newPassword === 'secreta123') {
+            if (fcMsg) fcMsg.textContent = 'La nueva contraseña debe ser diferente a la temporal.';
+            return;
+          }
+          if (newPassword !== confirmPassword) {
+            if (fcMsg) fcMsg.textContent = 'Las contraseñas no coinciden.';
+            return;
+          }
+          if (fcBtn) fcBtn.disabled = true;
+          try {
+            const res2 = await fetch('/api/login/force-change', {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ userId, newPassword })
+            });
+            const data2 = await res2.json().catch(() => ({}));
+            if (!res2.ok || !data2.ok) {
+              throw new Error(data2.error || data2.message || 'No se pudo actualizar la contraseña');
+            }
+            window.location.replace('dashboard.html');
+          } catch (err2) {
+            if (fcMsg) fcMsg.textContent = err2.message || 'Error al cambiar contraseña';
+            if (fcBtn) fcBtn.disabled = false;
+          }
+        });
+      };
+
+      loginFormEl.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const username = ($('user')?.value || '').trim();
+        const password = $('pass')?.value || '';
+        const msgEl = $('login-msg');
+        try {
+          const res = await fetch('/api/login', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.requirePasswordChange) {
+            showForceChangeInLogin(data.userId, data.username || username);
+            return;
+          }
+          if (!res.ok || !data.ok) {
+            throw new Error(data.error || data.message || 'Usuario o contraseña inválidos');
+          }
+          window.location.replace('dashboard.html');
+        } catch (err) {
+          if (msgEl) msgEl.textContent = err.message || 'No se pudo iniciar sesión';
+        }
+      });
+      return;
+    }
+
     // Arranque Inicial
     try { await ensureAPI(); } catch(e){ alert(e.message); return; }
     await me();
@@ -5888,6 +7629,10 @@
     applyPermassions();
     updateSolBadge();
     setSolicitudTab('crear');
+
+    // v42: Iniciar monitor de sesiones y comprobación de versión automática (Heartbeat)
+    checkSystemHeartbeat();
+    setInterval(checkSystemHeartbeat, 60000);
     
   }); // <-- FIN DEL EVENTO DOMContentLoaded 
 
@@ -6003,5 +7748,581 @@
       alert('Error de red al migrar vehículos foráneos: ' + (err.message || err));
     }
   };
+
+  // ==========================================================================
+  // FUNCIÓN DE CONSOLA: CONSOLIDAR Y DEDUPLICAR BODEGA RM DE JESÚS (RUBRO 3)
+  // ==========================================================================
+  window.consolidarBodegaRMJesus = async function() {
+    if (!confirm(
+      '¿Consolidar y deduplicar la bodega general de Jesús (Rubro 3 - Mobiliario) en "RM (Recursos Materiales)", asegurando 81 sillas grises en Coordinación Regional La Paz y 181 propias en RM (171 disponibles con vales activos)?'
+    )) return;
+
+    try {
+      const res = await fetch('/api/migracion/consolidar-bodega-rm-jesus', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + (localStorage.getItem('token') || '')
+        }
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) {
+        alert('Error: ' + (json.error || json.message || 'No se pudo consolidar la bodega RM de Jesús'));
+        return;
+      }
+
+      const sillas = json.sillas_grises_rm || {};
+      alert(
+        `✅ BODEGA RM DE JESÚS CONSOLIDADA EXITOSAMENTE:\n\n` +
+        `• Oficina RM (Recursos Materiales) ID: ${json.rm_oficina_id}\n` +
+        `• Oficina Coordinación Regional La Paz ID: ${json.coord_lapaz_oficina_id}\n` +
+        `• Registros duplicados eliminados: ${json.duplicados_eliminados ?? 0}\n` +
+        `• Referencias de vales vinculadas al registro maestro: ${json.referencias_vales_reasignadas ?? 0}\n` +
+        `• Sillas grises (MOB-001) en RM: ${sillas.cantidad_propia ?? 181} propias | ${sillas.prestado_activo ?? 0} en préstamo activo | ${sillas.cantidad_disponible ?? 171} disponibles`
+      );
+
+      try { await loadRegionalFilters(true); } catch (_) {}
+      try { await renderRegionalInventory(); } catch (_) {}
+      try { if (typeof loadVpCatalogo === 'function') await loadVpCatalogo(); } catch (_) {}
+      try { if (typeof loadValesProvisionales === 'function') await loadValesProvisionales(); } catch (_) {}
+    } catch (err) {
+      console.error('Error en consolidarBodegaRMJesus:', err);
+      alert('Error de red al consolidar bodega RM: ' + (err.message || err));
+    }
+  };
+
+  // ==========================================================================
+  // v56: MÓDULO DE TABLETAS DIGITALES (LUIS EDUARDO MAYORAL GERALDO)
+  // ==========================================================================
+  let TABLETAS_ACTIVE_TAB = 'EN_RESGUARDO';
+  let TABLETAS_ROWS = [];
+  let TABLETAS_LISTENERS_BOUND = false;
+
+  function syncTabletasOficinaFilterOptions() {
+    const regVal = safestr($('tab_filter_region')?.value).toUpperCase();
+    const ofiSel = $('tab_filter_oficina');
+    const wrap = $('tab_filter_oficina_wrap');
+    if (!ofiSel) return;
+
+    const currentOfi = safestr(ofiSel.value);
+    const allOpts = [
+      { v: '', label: 'Todas las oficinas/programas' },
+      { v: 'Delegación La Paz', label: 'Delegación La Paz', reg: 'LA PAZ' },
+      { v: 'Región La Paz', label: 'Región La Paz', reg: 'LA PAZ' },
+      { v: 'PCD - Programa de Discapacidad', label: 'PCD - Programa de Discapacidad', reg: 'LA PAZ' },
+      { v: 'PAM - Programa Adulto Mayor', label: 'PAM - Programa Adulto Mayor', reg: 'LA PAZ' },
+      { v: 'Región Los Cabos', label: 'Región Los Cabos', reg: 'LOS CABOS' },
+      { v: 'Región Comondú', label: 'Región Comondú', reg: 'COMONDU' },
+      { v: 'Región Mulegé', label: 'Región Mulegé', reg: 'MULEGE' },
+    ];
+
+    const filtered = regVal
+      ? allOpts.filter(o => o.v === '' || o.reg === regVal)
+      : allOpts;
+
+    ofiSel.innerHTML = filtered.map(o => `<option value="${escHtml(o.v)}">${escHtml(o.label)}</option>`).join('');
+    if (filtered.some(o => o.v === currentOfi)) {
+      ofiSel.value = currentOfi;
+    } else {
+      ofiSel.value = '';
+    }
+    if (wrap) wrap.classList.remove('hidden');
+  }
+
+  function openTabletaModal(modalId) {
+    const m = $(modalId);
+    if (m) m.classList.remove('hidden');
+  }
+
+  function closeTabletaModal(modalId) {
+    const m = $(modalId);
+    if (m) m.classList.add('hidden');
+  }
+
+  function openModalDevolucionTableta(t) {
+    if (!t) return;
+    $('tab_dev_id').value = t.id;
+    $('tab_dev_equipo_info').innerHTML = `
+      <b>Tableta No. Resguardo #${Number(t.no_resguardo)}</b> — ${escHtml(safestr(t.marca || 'Compac'))} ${escHtml(safestr(t.modelo || 'QTab LTE'))}<br>
+      <span class="muted">IMEI: <b>${escHtml(safestr(t.imei))}</b> | Serie: <b>${escHtml(safestr(t.numero_serie))}</b> | Caja: <b>${escHtml(safestr(t.no_caja || 'S/N'))}</b><br>
+      Origen: <b>${escHtml(safestr(t.region))} — ${escHtml(safestr(t.oficina_programa))}</b></span>
+    `;
+    $('tab_dev_nombre').value = safestr(t.nombre_resguardante);
+    $('tab_dev_cargo').value = safestr(t.cargo_resguardante) || 'Servidor de la nación';
+    $('tab_dev_cargador').checked = Number(t.tiene_cargador ?? 1) === 1;
+    $('tab_dev_caja').checked = Number(t.tiene_caja ?? 1) === 1;
+    $('tab_dev_estatus').value = safestr(t.estatus_fisico || 'BUENO').toUpperCase();
+    $('tab_dev_obs').value = safestr(t.observaciones);
+    openTabletaModal('modal-tab-devolucion');
+  }
+
+  function openModalAsignarTableta(t) {
+    if (!t) return;
+    $('tab_asig_id').value = t.id;
+    $('tab_asig_equipo_info').innerHTML = `
+      <b>Asignación de Tableta No. Resguardo #${Number(t.no_resguardo)}</b> — ${escHtml(safestr(t.marca || 'Compac'))} ${escHtml(safestr(t.modelo || 'QTab LTE'))}<br>
+      <span class="muted">IMEI: <b>${escHtml(safestr(t.imei))}</b> | Serie: <b>${escHtml(safestr(t.numero_serie))}</b> | Caja: <b>${escHtml(safestr(t.no_caja || 'S/N'))}</b></span>
+    `;
+    $('tab_asig_nombre').value = '';
+    $('tab_asig_cargo').value = 'Servidor de la nación';
+    $('tab_asig_region').value = safestr(t.region || 'LA PAZ').toUpperCase();
+    $('tab_asig_oficina').value = safestr(t.oficina_programa || 'Delegación La Paz');
+    $('tab_asig_cargador').checked = Number(t.tiene_cargador ?? 1) === 1;
+    $('tab_asig_caja').checked = Number(t.tiene_caja ?? 1) === 1;
+    $('tab_asig_estatus').value = safestr(t.estatus_fisico || 'BUENO').toUpperCase();
+    $('tab_asig_obs').value = safestr(t.observaciones);
+    openTabletaModal('modal-tab-asignar');
+  }
+
+  function openModalEditarTableta(t) {
+    if (!t) return;
+    const isAdm = Boolean(uiPerms().admin);
+    $('tab_edit_id').value = t.id;
+    $('tab_edit_no_resg').value = Number(t.no_resguardo || '');
+    $('tab_edit_caja_no').value = safestr(t.no_caja);
+    $('tab_edit_estatus').value = safestr(t.estatus_fisico || 'BUENO').toUpperCase();
+    $('tab_edit_imei').value = safestr(t.imei);
+    $('tab_edit_serie').value = safestr(t.numero_serie);
+    $('tab_edit_marca').value = safestr(t.marca || 'Compac');
+    $('tab_edit_modelo').value = safestr(t.modelo || 'QTab LTE');
+    $('tab_edit_region').value = safestr(t.region || 'LA PAZ').toUpperCase();
+    $('tab_edit_oficina').value = safestr(t.oficina_programa || 'Delegación La Paz');
+    $('tab_edit_nombre').value = safestr(t.nombre_resguardante);
+    $('tab_edit_cargo').value = safestr(t.cargo_resguardante || 'Servidor de la nación');
+    $('tab_edit_cargador').checked = Number(t.tiene_cargador ?? 1) === 1;
+    $('tab_edit_caja').checked = Number(t.tiene_caja ?? 1) === 1;
+    $('tab_edit_obs').value = safestr(t.observaciones);
+
+    ['tab_edit_no_resg', 'tab_edit_imei', 'tab_edit_serie'].forEach(fid => {
+      const inp = $(fid);
+      if (inp) {
+        inp.disabled = !isAdm;
+        inp.readOnly = !isAdm;
+      }
+    });
+    if ($('tab_edit_admin_only_note')) {
+      $('tab_edit_admin_only_note').classList.toggle('hidden', isAdm);
+    }
+    openTabletaModal('modal-tab-editar');
+  }
+
+  async function loadBitacoraTabletas() {
+    const tbody = $('tab_bit_tbody');
+    const meta = $('tab_bit_meta');
+    if (!tbody) return;
+    const q = safestr($('tab_bit_filter_q')?.value);
+    const accion = safestr($('tab_bit_filter_accion')?.value);
+    const usuario = safestr($('tab_bit_filter_usuario')?.value);
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (accion) params.set('accion', accion);
+    if (usuario) params.set('usuario', usuario);
+
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">Cargando bitácora de tabletas...</td></tr>';
+    try {
+      const res = await apiJSON(`/api/tabletas/bitacora?${params.toString()}`);
+      const rows = Array.isArray(res?.data) ? res.data : [];
+      if (meta) meta.textContent = `${rows.length} movimiento${rows.length === 1 ? '' : 's'}`;
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">Sin registros en la bitácora con los filtros actuales.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(r => {
+        const fecha = r.created_at ? new Date(r.created_at).toLocaleString('es-MX') : '-';
+        const resg = r.no_resguardo ? `#${Number(r.no_resguardo)}` : '-';
+        const imeiSerie = (r.imei || r.numero_serie)
+          ? `IMEI: ${escHtml(safestr(r.imei || '-'))}<br><span class="muted" style="font-size:11px;">Serie: ${escHtml(safestr(r.numero_serie || '-'))}</span>`
+          : '-';
+        return `<tr>
+          <td style="white-space:nowrap; font-size:12px;">${escHtml(fecha)}</td>
+          <td><b>${escHtml(safestr(r.usuario || '-'))}</b></td>
+          <td><span class="status-badge" style="font-size:11px;">${escHtml(safestr(r.accion || '-'))}</span></td>
+          <td style="text-align:center;"><b>${escHtml(resg)}</b></td>
+          <td style="font-size:12px;">${imeiSerie}</td>
+          <td style="font-size:12px;">${escHtml(safestr(r.detalles || '-'))}</td>
+        </tr>`;
+      }).join('');
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted" style="color:var(--danger);">${escHtml(e.message || 'Error al cargar bitácora')}</td></tr>`;
+      if (!handleAuthError(e)) toast(e.message || 'Error al cargar bitácora de tabletas', false);
+    }
+  }
+
+  function renderTabletasTable(rows) {
+    const tbody = $('tab_tbody');
+    if (!tbody) return;
+    const canEdit = Boolean(uiPerms().puedeEditarTabletas);
+
+    if (!rows || !rows.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center; padding:18px;">No hay tabletas en esta pestaña con los filtros aplicados.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = rows.map(t => {
+      const id = Number(t.id);
+      const estadoAsig = safestr(t.estado_asignacion).toUpperCase();
+      const fisico = safestr(t.estatus_fisico || 'BUENO').toUpperCase();
+      let fisicoCls = 'bueno';
+      if (fisico === 'INCOMPLETO') fisicoCls = 'incompleto';
+      if (fisico.includes('DAÑ') || fisico.includes('DAN')) fisicoCls = 'danado';
+
+      const accBadges = `
+        <span class="badge-tableta-fisico ${fisicoCls}">${escHtml(fisico)}</span>
+        <div style="font-size:11px; margin-top:4px; color:#475569;">
+          Cargador: <b>${Number(t.tiene_cargador ?? 1) ? 'Sí' : 'No'}</b> | Caja: <b>${Number(t.tiene_caja ?? 1) ? 'Sí' : 'No'}</b>
+        </div>
+      `;
+
+      let resgHtml = '';
+      if (estadoAsig === 'DISPONIBLE') {
+        resgHtml = Number(t.sin_resguardo_previo) === 1
+          ? `<span class="badge-tableta-excel-rojo">🔴 Proveniente de Excel sin resguardo (17 en rojo)</span>`
+          : `<span class="badge-tableta-devuelta">📦 Devuelta a almacén</span>`;
+      } else if (estadoAsig === 'DEVOLUCION_PENDIENTE') {
+        const devNombre = safestr(t.devolucion_nombre_persona || t.nombre_resguardante || '-');
+        const folioTxt = safestr(t.devolucion_folio || '-');
+        resgHtml = `
+          <div><b>${escHtml(devNombre)}</b></div>
+          <div style="font-size:11px; color:#b45309; font-weight:700;">⏳ Vale Devolución Folio: ${escHtml(folioTxt)}</div>
+        `;
+      } else if (estadoAsig === 'EN_PRESTAMO_PROVISIONAL') {
+        const nom = safestr(t.nombre_resguardante || 'PRÉSTAMO PROVISIONAL');
+        resgHtml = `
+          <div><b>${escHtml(nom)}</b></div>
+          <div style="font-size:11px; color:#1d4ed8; font-weight:700;">🔄 En Préstamo Provisional (Operativo)</div>
+        `;
+      } else {
+        const nom = safestr(t.nombre_resguardante);
+        const isMissing = !nom || ['RESGUARDO FISICO', 'NO TIENE TABLETA', 'DELEGACION'].includes(nom.toUpperCase());
+        resgHtml = isMissing
+          ? `<span style="color:#b45309; font-weight:700;">${escHtml(nom || 'Sin nombre asignado')}</span><div class="muted" style="font-size:11px;">Pendiente de nombre</div>`
+          : `<b>${escHtml(nom)}</b><div class="muted" style="font-size:11px;">${escHtml(safestr(t.cargo_resguardante || 'Servidor de la nación'))}</div>`;
+      }
+
+      let actionsHtml = '';
+      if (estadoAsig === 'EN_RESGUARDO') {
+        actionsHtml = `
+          <div style="display:flex; flex-wrap:wrap; gap:4px;">
+            <button type="button" class="mini btn-tab-pdf-resg" data-id="${id}" title="Descargar Resguardo Personal PDF">📄 Resguardo PDF</button>
+            ${canEdit ? `<button type="button" class="mini btn-tab-dev" data-id="${id}" title="Generar Vale de Devolución">📤 Devolución</button>` : ''}
+            ${canEdit ? `<button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos de tableta">✏️</button>` : ''}
+          </div>
+        `;
+      } else if (estadoAsig === 'DEVOLUCION_PENDIENTE') {
+        const movId = Number(t.devolucion_mov_id || 0);
+        actionsHtml = `
+          <div style="display:flex; flex-wrap:wrap; gap:4px;">
+            ${movId ? `<button type="button" class="mini btn-tab-pdf-mov" data-mov="${movId}">📄 Reimprimir Vale</button>` : ''}
+            ${canEdit && movId ? `<button type="button" class="mini btn-primary btn-tab-confirm-dev" data-mov="${movId}" data-resg="${Number(t.no_resguardo)}">✅ Confirmar Recepción Física</button>` : ''}
+            ${canEdit ? `<button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos">✏️</button>` : ''}
+          </div>
+        `;
+      } else if (estadoAsig === 'EN_PRESTAMO_PROVISIONAL') {
+        actionsHtml = `
+          <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;">
+            <span class="status-badge status-prestamo" style="font-size:11px;">En Vale Provisional</span>
+            ${canEdit ? `<button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos">✏️</button>` : ''}
+          </div>
+        `;
+      } else {
+        actionsHtml = `
+          <div style="display:flex; flex-wrap:wrap; gap:4px;">
+            ${canEdit ? `<button type="button" class="mini btn-primary btn-tab-asig" data-id="${id}">➕ Asignar y Generar Resguardo</button>` : ''}
+            ${canEdit ? `<button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos">✏️</button>` : ''}
+          </div>
+        `;
+      }
+
+      return `<tr>
+        <td><b>#${Number(t.no_resguardo)}</b></td>
+        <td>${escHtml(safestr(t.no_caja || '-'))}</td>
+        <td>
+          <b>${escHtml(safestr(t.region))}</b>
+          <div class="muted" style="font-size:11.5px;">${escHtml(safestr(t.oficina_programa))}</div>
+        </td>
+        <td>${resgHtml}</td>
+        <td>
+          <b>${escHtml(safestr(t.marca || 'Compac'))}</b>
+          <div class="muted" style="font-size:11.5px;">${escHtml(safestr(t.modelo || 'QTab LTE'))}</div>
+        </td>
+        <td style="font-family:monospace; font-size:12px;">${escHtml(safestr(t.imei))}</td>
+        <td style="font-family:monospace; font-size:12px;">${escHtml(safestr(t.numero_serie))}</td>
+        <td>${accBadges}</td>
+        <td style="font-size:12px; max-width:200px;">${escHtml(safestr(t.observaciones || '-'))}</td>
+        <td>${actionsHtml}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function loadTabletasModule() {
+    bindTabletasListeners();
+    const tbody = $('tab_tbody');
+    const meta = $('tab_meta');
+    if (!tbody) return;
+
+    const region = safestr($('tab_filter_region')?.value);
+    const oficina = safestr($('tab_filter_oficina')?.value);
+    const filtroExtra = safestr($('tab_filter_extra')?.value);
+    const q = safestr($('tab_filter_q')?.value);
+
+    const params = new URLSearchParams();
+    params.set('estado_asignacion', TABLETAS_ACTIVE_TAB);
+    if (region) params.set('region', region);
+    if (oficina) params.set('oficina_programa', oficina);
+    if (filtroExtra) params.set('filtro_extra', filtroExtra);
+    if (q) params.set('q', q);
+
+    tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center; padding:18px;">Cargando tabletas...</td></tr>';
+
+    try {
+      const res = await apiJSON(`/api/tabletas?${params.toString()}`);
+      const k = res?.kpis || {};
+      TABLETAS_ROWS = Array.isArray(res?.data) ? res.data : [];
+
+      if ($('kpi-tab-total')) $('kpi-tab-total').textContent = Number(k.total || 0);
+      if ($('kpi-tab-resguardo')) $('kpi-tab-resguardo').textContent = Number(k.en_resguardo || 0);
+      if ($('kpi-tab-devolucion')) $('kpi-tab-devolucion').textContent = Number(k.devolucion_pendiente || 0);
+      if ($('kpi-tab-disponibles')) $('kpi-tab-disponibles').textContent = Number(k.disponibles || 0);
+
+      if ($('tab-count-resguardo')) $('tab-count-resguardo').textContent = Number(k.en_resguardo || 0);
+      if ($('tab-count-devolucion')) $('tab-count-devolucion').textContent = Number(k.devolucion_pendiente || 0);
+      if ($('tab-count-disponible')) $('tab-count-disponible').textContent = Number(k.disponibles || 0);
+      if ($('tab-count-provisional')) $('tab-count-provisional').textContent = Number(k.en_prestamo_provisional || 0);
+
+      if (meta) {
+        meta.textContent = `Mostrando ${TABLETAS_ROWS.length} tableta${TABLETAS_ROWS.length === 1 ? '' : 's'} en esta vista`;
+      }
+      renderTabletasTable(TABLETAS_ROWS);
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="10" class="muted" style="color:var(--danger); text-align:center; padding:18px;">${escHtml(e.message || 'Error al cargar tabletas')}</td></tr>`;
+      if (!handleAuthError(e)) toast(e.message || 'Error al cargar tabletas', false);
+    }
+  }
+
+  function bindTabletasListeners() {
+    if (TABLETAS_LISTENERS_BOUND) return;
+    TABLETAS_LISTENERS_BOUND = true;
+
+    document.querySelectorAll('#view-tabletas .tab-pill-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('#view-tabletas .tab-pill-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        TABLETAS_ACTIVE_TAB = btn.dataset.tab || 'EN_RESGUARDO';
+        loadTabletasModule();
+      });
+    });
+
+    $('tab_filter_region')?.addEventListener('change', () => {
+      syncTabletasOficinaFilterOptions();
+      loadTabletasModule();
+    });
+    $('tab_filter_oficina')?.addEventListener('change', () => loadTabletasModule());
+    $('tab_filter_extra')?.addEventListener('change', () => loadTabletasModule());
+    $('tab_filter_q')?.addEventListener('input', () => loadTabletasModule());
+    $('btn-tab-refresh')?.addEventListener('click', () => loadTabletasModule());
+
+    // Delegación de eventos en tabla
+    $('tab_tbody')?.addEventListener('click', async (ev) => {
+      const btnResgPdf = ev.target.closest('.btn-tab-pdf-resg');
+      if (btnResgPdf) {
+        const id = Number(btnResgPdf.dataset.id);
+        window.open(`/api/tabletas/${id}/resguardo-pdf`, '_blank');
+        return;
+      }
+
+      const btnMovPdf = ev.target.closest('.btn-tab-pdf-mov');
+      if (btnMovPdf) {
+        const movId = Number(btnMovPdf.dataset.mov);
+        window.open(`/api/tabletas/movimientos/${movId}/pdf`, '_blank');
+        return;
+      }
+
+      const btnDev = ev.target.closest('.btn-tab-dev');
+      if (btnDev) {
+        const id = Number(btnDev.dataset.id);
+        const row = TABLETAS_ROWS.find(x => Number(x.id) === id);
+        openModalDevolucionTableta(row);
+        return;
+      }
+
+      const btnAsig = ev.target.closest('.btn-tab-asig');
+      if (btnAsig) {
+        const id = Number(btnAsig.dataset.id);
+        const row = TABLETAS_ROWS.find(x => Number(x.id) === id);
+        openModalAsignarTableta(row);
+        return;
+      }
+
+      const btnEdit = ev.target.closest('.btn-tab-edit');
+      if (btnEdit) {
+        const id = Number(btnEdit.dataset.id);
+        const row = TABLETAS_ROWS.find(x => Number(x.id) === id);
+        openModalEditarTableta(row);
+        return;
+      }
+
+      const btnConfirmDev = ev.target.closest('.btn-tab-confirm-dev');
+      if (btnConfirmDev) {
+        const movId = Number(btnConfirmDev.dataset.mov);
+        const noResg = Number(btnConfirmDev.dataset.resg || 0);
+        if (!confirm(`¿Confirmas que recibiste físicamente en almacén la Tableta #${noResg}?\n\nPasará a estatus DISPONIBLE para poder ser asignada a un nuevo resguardante.`)) {
+          return;
+        }
+        try {
+          const r = await apiJSON(`/api/tabletas/movimientos/${movId}/confirmar-devolucion`, { method: 'PUT' });
+          toast(r.message || 'Recepción confirmada correctamente', true);
+          loadTabletasModule();
+        } catch (err) {
+          if (!handleAuthError(err)) toast(err.message || 'Error al confirmar recepción', false);
+        }
+      }
+    });
+
+    // Botón Log de Movimientos (Tabletas) - Exclusivo Admin
+    $('btn-tab-bitacora')?.addEventListener('click', () => {
+      openTabletaModal('modal-tab-bitacora');
+      loadBitacoraTabletas();
+    });
+    $('btn-tab-bitacora-filtrar')?.addEventListener('click', () => loadBitacoraTabletas());
+    $('tab_bit_filter_accion')?.addEventListener('change', () => loadBitacoraTabletas());
+
+    // Botón Importar Nombres (Excel)
+    $('btn-tab-importar-excel')?.addEventListener('click', () => {
+      $('tab_excel_file_input')?.click();
+    });
+
+    $('tab_excel_file_input')?.addEventListener('change', async (ev) => {
+      const file = ev.target?.files?.[0];
+      if (!file) return;
+      try {
+        const fd = new FormData();
+        fd.append('archivo', file);
+        toast('Procesando archivo Excel e importando nombres...', true);
+        const res = await api('/api/tabletas/importar-nombres', {
+          method: 'POST',
+          body: fd
+        });
+        const json = await res.json();
+        if (!res.ok || !json.ok) {
+          throw new Error(json.error || 'Error al importar nombres');
+        }
+        toast(json.message || 'Nombres importados correctamente', true);
+        loadTabletasModule();
+      } catch (err) {
+        if (!handleAuthError(err)) toast(err.message || 'Error al importar archivo Excel', false);
+      } finally {
+        ev.target.value = '';
+      }
+    });
+
+    // Cerrar modales de tabletas
+    ['modal-tab-devolucion', 'modal-tab-asignar', 'modal-tab-editar', 'modal-tab-bitacora'].forEach(mid => {
+      $(mid)?.addEventListener('click', (ev) => {
+        if (ev.target === ev.currentTarget || ev.target.closest('[data-close-modal]')) {
+          closeTabletaModal(mid);
+        }
+      });
+    });
+
+    // Submit Modal Devolución
+    $('form-tab-devolucion')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const id = Number($('tab_dev_id')?.value || 0);
+      const nombre_persona = safestr($('tab_dev_nombre')?.value);
+      if (!nombre_persona) {
+        toast('Indica el nombre de quien entrega/devuelve la tableta', false);
+        return;
+      }
+      try {
+        const payload = {
+          nombre_persona,
+          cargo_persona: safestr($('tab_dev_cargo')?.value) || 'Servidor de la nación',
+          tiene_cargador: $('tab_dev_cargador')?.checked ? 1 : 0,
+          tiene_caja: $('tab_dev_caja')?.checked ? 1 : 0,
+          estatus_fisico: safestr($('tab_dev_estatus')?.value || 'BUENO'),
+          observaciones: safestr($('tab_dev_obs')?.value),
+        };
+        const r = await apiJSON(`/api/tabletas/${id}/generar-devolucion`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        closeTabletaModal('modal-tab-devolucion');
+        toast(r.message || 'Vale de devolución generado', true);
+        if (r.pdf_url) window.open(r.pdf_url, '_blank');
+        loadTabletasModule();
+      } catch (err) {
+        if (!handleAuthError(err)) toast(err.message || 'Error al generar vale de devolución', false);
+      }
+    });
+
+    // Submit Modal Asignar y Generar Resguardo
+    $('form-tab-asignar')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const id = Number($('tab_asig_id')?.value || 0);
+      const nombre_resguardante = safestr($('tab_asig_nombre')?.value);
+      if (!nombre_resguardante) {
+        toast('El nombre completo del nuevo resguardante es obligatorio', false);
+        return;
+      }
+      try {
+        const payload = {
+          nombre_resguardante,
+          cargo_resguardante: safestr($('tab_asig_cargo')?.value) || 'Servidor de la nación',
+          region: safestr($('tab_asig_region')?.value || 'LA PAZ'),
+          oficina_programa: safestr($('tab_asig_oficina')?.value || 'Delegación La Paz'),
+          tiene_cargador: $('tab_asig_cargador')?.checked ? 1 : 0,
+          tiene_caja: $('tab_asig_caja')?.checked ? 1 : 0,
+          estatus_fisico: safestr($('tab_asig_estatus')?.value || 'BUENO'),
+          observaciones: safestr($('tab_asig_obs')?.value),
+        };
+        const r = await apiJSON(`/api/tabletas/${id}/generar-resguardo`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        closeTabletaModal('modal-tab-asignar');
+        toast(r.message || 'Resguardo personal generado', true);
+        if (r.pdf_url) window.open(r.pdf_url, '_blank');
+        loadTabletasModule();
+      } catch (err) {
+        if (!handleAuthError(err)) toast(err.message || 'Error al generar resguardo', false);
+      }
+    });
+
+    // Submit Modal Editar Tableta
+    $('form-tab-editar')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const id = Number($('tab_edit_id')?.value || 0);
+      try {
+        const payload = {
+          no_resguardo: Number($('tab_edit_no_resg')?.value),
+          no_caja: safestr($('tab_edit_caja_no')?.value),
+          estatus_fisico: safestr($('tab_edit_estatus')?.value || 'BUENO'),
+          imei: safestr($('tab_edit_imei')?.value),
+          numero_serie: safestr($('tab_edit_serie')?.value),
+          marca: safestr($('tab_edit_marca')?.value) || 'Compac',
+          modelo: safestr($('tab_edit_modelo')?.value) || 'QTab LTE',
+          region: safestr($('tab_edit_region')?.value || 'LA PAZ'),
+          oficina_programa: safestr($('tab_edit_oficina')?.value || 'Delegación La Paz'),
+          nombre_resguardante: safestr($('tab_edit_nombre')?.value),
+          cargo_resguardante: safestr($('tab_edit_cargo')?.value) || 'Servidor de la nación',
+          tiene_cargador: $('tab_edit_cargador')?.checked ? 1 : 0,
+          tiene_caja: $('tab_edit_caja')?.checked ? 1 : 0,
+          observaciones: safestr($('tab_edit_obs')?.value),
+        };
+        const r = await apiJSON(`/api/tabletas/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        closeTabletaModal('modal-tab-editar');
+        toast(r.message || 'Tableta actualizada correctamente', true);
+        loadTabletasModule();
+      } catch (err) {
+        if (!handleAuthError(err)) toast(err.message || 'Error al actualizar tableta', false);
+      }
+    });
+  }
 
 })(); // <-- FIN DEL ARCHIVO APP.JS 

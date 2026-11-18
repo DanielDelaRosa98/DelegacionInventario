@@ -56,6 +56,14 @@ body {
   flex-direction: column;
   flex-shrink: 0;
   z-index: 20;
+  transition: width 0.2s ease, margin-left 0.2s ease;
+}
+
+#sidebar.sidebar-collapsed {
+  display: none !important;
+  width: 0 !important;
+  margin-left: -260px !important;
+  visibility: hidden !important;
 }
 
 .sidebar-header {
@@ -1128,4 +1136,179 @@ button.mini.danger:hover:not(:disabled) {
   color: #1d4ed8;
   border: 1px solid #bfdbfe;
 }
+
+/* v53: Semáforo de Stock (Rojo / Amarillo) */
+.stock-sin-producto {
+  background-color: #fee2e2 !important;
+  color: #991b1b !important;
+}
+
+.stock-bajo-alerta {
+  background-color: #fef3c7 !important;
+  color: #92400e !important;
+}
+
+/* v56: Módulo de Tabletas Digitales */
+.tab-tabs-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.tab-pill-btn {
+  background: var(--bg-card);
+  color: var(--text-main);
+  border: 1px solid var(--border);
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.18s ease;
+}
+
+.tab-pill-btn:hover {
+  border-color: var(--primary);
+  background: #fdf2f5;
+}
+
+.tab-pill-btn.active {
+  background: var(--primary);
+  color: #ffffff;
+  border-color: var(--primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.tab-pill-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  background: rgba(15, 23, 42, 0.08);
+  color: inherit;
+}
+
+.tab-pill-btn.active .tab-pill-count {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+}
+
+.badge-tableta-excel-rojo {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.badge-tableta-devuelta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.badge-tableta-fisico {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+}
+.badge-tableta-fisico.bueno { background: #dcfce7; color: #166534; }
+.badge-tableta-fisico.incompleto { background: #fef3c7; color: #92400e; }
+.badge-tableta-fisico.danado { background: #fee2e2; color: #991b1b; }
+
+/* v59: Alerta visual roja para vehículos/bienes en Siniestro / Aseguradora */
+tr.row-siniestro,
+tr.row-siniestro td {
+  background-color: #fff1f2 !important;
+  color: #9f1239;
+}
+tr.row-siniestro td:first-child {
+  border-left: 4px solid #e11d48;
+}
+.badge-siniestro {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #ffe4e6;
+  color: #9f1239;
+  border: 1px solid #fda4af;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  margin-top: 3px;
+}
+
+/* v61: Modo de Prueba Grupal y Flujo de 4 Estados en Solicitudes de Almacén */
+.modo-prueba-banner {
+  background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  padding: 9px 16px;
+  border-bottom: 2px solid #92400e;
+  box-shadow: 0 2px 6px rgba(146, 64, 14, 0.2);
+  position: sticky;
+  top: 0;
+  z-index: 45;
+  letter-spacing: 0.15px;
+}
+
+.badge-prueba {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #f59e0b;
+  font-size: 10.5px;
+  font-weight: 800;
+  padding: 1px 7px;
+  border-radius: 999px;
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
+.badge-status-en-proceso {
+  background: #dbeafe !important;
+  color: #1e40af !important;
+  border: 1px solid #93c5fd !important;
+}
+
+.badge-status-para-firmas {
+  background: #f3e8ff !important;
+  color: #6b21a8 !important;
+  border: 1px solid #d8b4fe !important;
+}
+
+.badge-status-completada {
+  background: #dcfce7 !important;
+  color: #166534 !important;
+  border: 1px solid #86efac !important;
+}
+
+
 

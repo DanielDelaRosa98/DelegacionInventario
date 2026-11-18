@@ -318,6 +318,96 @@
         eyeOn.classList.toggle('hidden', !isPass);
       });
 
+      function showForcePasswordChangeForm(userId, username) {
+        form.classList.add('hidden');
+        const loginBox = form.closest('.login-box') || form.parentElement;
+        const titleEl = loginBox?.querySelector('.login-title');
+        if (titleEl) titleEl.textContent = 'Cambio Obligatorio de Contraseña';
+
+        const prevForm = document.getElementById('force-change-form');
+        if (prevForm) prevForm.remove();
+
+        const fcForm = document.createElement('form');
+        fcForm.id = 'force-change-form';
+        fcForm.innerHTML = `
+          <div style="background:#fef3c7; border:1px solid #f59e0b; color:#92400e; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:20px;">
+            Tu cuenta (<b id="fc-user-label"></b>) utiliza la contraseña temporal por defecto. Por seguridad debes definir una nueva contraseña para continuar.
+          </div>
+          <div class="login-field">
+            <div class="login-input-wrap">
+              <input id="fc-new-pass" type="password" placeholder="Nueva Contraseña (mín. 6 caracteres)" autocomplete="new-password" required>
+            </div>
+          </div>
+          <div class="login-field">
+            <div class="login-input-wrap">
+              <input id="fc-confirm-pass" type="password" placeholder="Confirmar Contraseña" autocomplete="new-password" required>
+            </div>
+          </div>
+          <div class="login-actions" style="padding-left:0;">
+            <button id="btn-force-change" class="btn-submit" type="submit" style="width:100%;">Guardar y Entrar</button>
+          </div>
+          <div id="force-change-msg" style="margin-top:14px; font-size:13px; min-height:20px; color:#dc2626;"></div>
+        `;
+        loginBox.appendChild(fcForm);
+        const userLabel = document.getElementById('fc-user-label');
+        if (userLabel) userLabel.textContent = username || '';
+
+        const newPassIn = document.getElementById('fc-new-pass');
+        const confPassIn = document.getElementById('fc-confirm-pass');
+        const fcMsg = document.getElementById('force-change-msg');
+        const fcBtn = document.getElementById('btn-force-change');
+        newPassIn?.focus();
+
+        fcForm.addEventListener('submit', async (ev) => {
+          ev.preventDefault();
+          const newPassword = (newPassIn?.value || '').trim();
+          const confirmPassword = (confPassIn?.value || '').trim();
+
+          if (newPassword.length < 6) {
+            fcMsg.style.color = '#dc2626';
+            fcMsg.textContent = 'La nueva contraseña debe tener al menos 6 caracteres.';
+            return;
+          }
+          if (newPassword === 'secreta123') {
+            fcMsg.style.color = '#dc2626';
+            fcMsg.textContent = 'La nueva contraseña debe ser diferente a la temporal.';
+            return;
+          }
+          if (newPassword !== confirmPassword) {
+            fcMsg.style.color = '#dc2626';
+            fcMsg.textContent = 'Las contraseñas no coinciden.';
+            return;
+          }
+
+          fcMsg.style.color = '#621132';
+          fcMsg.textContent = 'Actualizando contraseña...';
+          fcBtn.disabled = true;
+
+          try {
+            const res2 = await fetch('/api/login/force-change', {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ userId, newPassword })
+            });
+            const data2 = await res2.json().catch(() => ({}));
+            if (!res2.ok || !data2.ok) {
+              throw new Error(data2.error || data2.message || 'No se pudo actualizar la contraseña');
+            }
+            if (rememberChk.checked) {
+              localStorage.setItem('inv_saved_user', username);
+            } else {
+              localStorage.removeItem('inv_saved_user');
+            }
+            window.location.replace('dashboard.html');
+          } catch (err2) {
+            fcMsg.style.color = '#dc2626';
+            fcMsg.textContent = err2.message || 'Error al actualizar la contraseña';
+            fcBtn.disabled = false;
+          }
+        });
+      }
+
       // Enviar formulario a la API
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -336,6 +426,13 @@
             body: JSON.stringify({ username, password })
           });
           const data = await res.json().catch(() => ({}));
+
+          if (res.ok && data.requirePasswordChange) {
+            msg.textContent = '';
+            btnLogin.disabled = false;
+            showForcePasswordChangeForm(data.userId, data.username || username);
+            return;
+          }
 
           if (!res.ok || !data.ok) {
             throw new Error(data.error || data.message || 'Usuario o contraseña inválidos');

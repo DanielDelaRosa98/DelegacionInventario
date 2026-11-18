@@ -58,6 +58,11 @@
           Vales Provisionales
         </button>
 
+        <button class="nav-item hidden" data-view="tabletas" id="nav-tabletas">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+          📱 Tabletas Digitales
+        </button>
+
         <button class="nav-item" data-view="reporte" id="nav-reportes">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
           Reportes e impresión
@@ -83,10 +88,16 @@
 
     <!-- MAIN CONTENT (Derecha) -->
     <main id="main-content">
+      <div id="modo-prueba-banner" class="modo-prueba-banner hidden" role="status">
+        🧪 <strong>FASE DE PRUEBA GRUPAL ACTIVA</strong> — Las solicitudes y vales creados son de práctica y NO descuentan ni afectan ningún inventario real.
+      </div>
       
       <!-- Topbar -->
       <header id="topbar">
-        <div class="topbar-left">
+        <div class="topbar-left" style="display:flex; align-items:center; gap:10px;">
+          <button id="btn-toggle-menu" class="btn-secondary mini" type="button" title="Ocultar o Mostrar Menú Lateral" style="display:inline-flex; align-items:center; gap:6px; font-weight:600; padding:6px 10px; cursor:pointer;">
+            <span id="btn-toggle-menu-icon">◀</span> <span id="btn-toggle-menu-text">Ocultar Menú</span>
+          </button>
           <span id="breadcrumb">Operación / <b>Panel general</b></span>
         </div>
         <div class="topbar-right">
@@ -199,8 +210,8 @@
                     <option value="Mulegé">Mulegé (Santa Rosalía / Vizcaíno / Guerrero Negro)</option>
                   </select>
                 </div>
-                <div class="field hidden" id="sol_nombre_firma_wrap">
-                  <label for="sol_nombre_firma">Nombre del Jefe / Enlace Solicitante</label>
+                <div class="field" id="sol_nombre_firma_wrap">
+                  <label for="sol_nombre_firma">Nombre del Solicitante que Firma *</label>
                   <input id="sol_nombre_firma" placeholder="Nombre de quien solicita y firma el vale">
                 </div>
               </div>
@@ -218,12 +229,12 @@
                 </div>
               </div>
 
-              <!-- Pad de Firma Digital del Solicitante (Exclusivo Regiones Foráneas) -->
-              <div id="sol_firma_card_wrap" class="sig-pad-card hidden" style="margin-top:14px;">
+              <!-- Pad de Firma Digital del Solicitante (Obligatorio para toda Solicitud de Material) -->
+              <div id="sol_firma_card_wrap" class="sig-pad-card" style="margin-top:14px;">
                 <div class="sig-pad-header">
                   <div>
-                    <div class="sig-pad-title">Firma Digital del Solicitante (Para envío inmediato a Almacén La Paz — Gabriel Fiol)</div>
-                    <div class="muted" style="font-size:12px;">Exclusivo para regiones foráneas (Los Cabos, Comondú/Loreto, Mulegé). Dibuja tu firma o sube una imagen PNG transparente.</div>
+                    <div class="sig-pad-title">✍️ Firma Digital del Solicitante * (Obligatoria para envío a Almacén — Gabriel Adán Fiol Collins)</div>
+                    <div class="muted" style="font-size:12px;">Dibuja tu firma digital en el recuadro o adjunta tu firma en imagen PNG antes de continuar.</div>
                   </div>
                   <span id="sol_firma_status_badge" class="status-badge status-pendiente">Sin firma capturada</span>
                 </div>
@@ -323,10 +334,9 @@
                   <div class="field">
                     <label for="vp_rubro_id">Rubro del Préstamo *</label>
                     <select id="vp_rubro_id">
-                      <option value="1">1. Archivo y Materiales (Gabriel Fiol)</option>
-                      <option value="2">2. Parque Vehicular (Evelia Contreras)</option>
+                      <option value="2">2. Parque Vehicular - Recursos Materiales (Evelia Contreras)</option>
                       <option value="3">3. Mobiliario y Eventos (Jesús Salvador Palacios)</option>
-                      <option value="4">4. Tablets y Starlinks (Luis Eduardo Mayoral)</option>
+                      <option value="4">4. Tabletas Digitales Disponibles Delegación (Luis Eduardo Mayoral Geraldo)</option>
                     </select>
                   </div>
                   <div class="field">
@@ -355,21 +365,20 @@
                 </div>
 
                 <!-- Configuración de Quien Recibe -->
-                <div style="background:rgba(98,17,50,0.03); border:1px solid rgba(98,17,50,0.15); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+                <div id="bloque-receptor-vale" data-legacy-id="vp_bloque_quien_recibe" style="background:rgba(98,17,50,0.03); border:1px solid rgba(98,17,50,0.15); border-radius:8px; padding:12px 14px; margin-bottom:14px; display:none;">
                   <h4 id="vale-recibe-header" style="margin:0 0 8px 0; font-size:13px; color:var(--primary); font-weight:600;">✍️ Datos de Quien Recibe (Firma Receptor / Enlace)</h4>
                   <div class="grid cols-3" style="gap:10px;">
                     <div class="field">
                       <label for="vale-recibe-preset">Seleccionar Enlace / Titular (Preset)</label>
                       <select id="vale-recibe-preset">
                         <option value="">-- Seleccionar o escribir manualmente --</option>
-                        <option value="SANDRA" data-nombre="Sandra Guadalupe Salvatierra Amador" data-cargo="Dirección Regional La Paz">Dirección Regional La Paz - Sandra Guadalupe Salvatierra Amador</option>
-                        <option value="LOS_CABOS" data-nombre="Enlace Regional Los Cabos" data-cargo="Enlace Regional Los Cabos">Enlace Regional Los Cabos</option>
-                        <option value="MULEGE" data-nombre="Diana Ramírez Hernández" data-cargo="Enlace Regional Mulegé">Enlace Regional Mulegé - Diana Ramírez Hernández</option>
-                        <option value="COMONDU" data-nombre="Enlace Regional Comondú / Loreto" data-cargo="Enlace Regional Comondú / Loreto">Enlace Regional Comondú / Loreto</option>
+                        <option value="LOS_CABOS" data-nombre="Samir Savin Ruiz" data-cargo="Director Regional">Enlace Regional Los Cabos - Samir Savin Ruiz</option>
+                        <option value="MULEGE" data-nombre="Diana Ramírez Hernández" data-cargo="Director Regional">Enlace Regional Mulegé - Diana Ramírez Hernández</option>
+                        <option value="COMONDU" data-nombre="Humberto Arce Cordero" data-cargo="Director Regional">Enlace Regional Comondú / Loreto - Humberto Arce Cordero</option>
                         <option value="INFORMATICA" data-nombre="Víctor Manuel Higuera Ruiz" data-cargo="Informática">Informática - Víctor Manuel Higuera Ruiz</option>
                         <option value="COMUNICACION" data-nombre="Ericka Peralta Preciado" data-cargo="Comunicación Social">Comunicación Social - Ericka Peralta Preciado</option>
                         <option value="SALUD" data-nombre="Juan Carlos Cuadros Espinoza" data-cargo="Salud Casa por Casa">Salud Casa por Casa - Juan Carlos Cuadros Espinoza</option>
-                        <option value="JURIDICO" data-nombre="Mayra Cruz Salazar Escobosa" data-cargo="Asuntos Juriddicos">Asuntos Jurídicos - Mayra Cruz Salazar Escobosa</option>
+                        <option value="JURIDICO" data-nombre="Mayra Cruz Salazar Escobosa" data-cargo="Asuntos Jurídicos">Asuntos Jurídicos - Mayra Cruz Salazar Escobosa</option>
                         <option value="NINOS" data-nombre="María de los Ángeles Valenzuela López" data-cargo="Niñas y Niños">Niñas y Niños - María de los Ángeles Valenzuela López</option>
                         <option value="JCF" data-nombre="Juan Daniel Carrera Villaseca" data-cargo="Jóvenes Construyendo el Futuro">Jóvenes Construyendo el Futuro - Juan Daniel Carrera Villaseca</option>
                         <option value="DISCAPACIDAD" data-nombre="Olga Camarillo Martínez" data-cargo="Programa de Discapacidad">Programa de Discapacidad - Olga Camarillo Martínez</option>
@@ -394,8 +403,8 @@
                     <input id="vp_lugar_comision" placeholder="Ej. Los Planes / Cd. Constitución / Mulegé">
                   </div>
                   <div class="field">
-                    <label for="vp_modalidad">Tipo de Vale / Modalidad *</label>
-                    <select id="vp_modalidad">
+                    <label for="vp_tipo_vale">Tipo de Vale / Modalidad *</label>
+                    <select id="vp_tipo_vale" name="vp_modalidad">
                       <option value="2_FIRMAS">Vale Provisional Delegación (2 Firmas)</option>
                       <option value="4_FIRMAS">Vale Préstamo Regional / Especial (4 Firmas - Indefinido u Opcional)</option>
                     </select>
@@ -614,11 +623,24 @@
           </div>
 
           <div class="card">
-            <div class="muted" style="margin-bottom:8px;">Resultados - <span id="alm_meta">-</span></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+              <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <div class="muted">Resultados - <span id="alm_meta">-</span></div>
+                <span id="alm_sel_counter" style="font-weight:600; color:#621132; background:#fdf2f4; border:1px solid #fbcfe8; padding:3px 10px; border-radius:12px; font-size:12.5px;">0 seleccionados</span>
+                <button id="btn-clear-selection" class="btn btn-sm btn-secondary mini" style="margin-left: 10px;" type="button" title="Limpiar selección y actualizar vista">🔄 Limpiar / Actualizar</button>
+                <button id="btn-alm-toggle-sel" class="btn-secondary mini" type="button" title="Filtrar u ocultar materiales no marcados">🔍 Ver solo seleccionados (0)</button>
+              </div>
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <button id="btn-alm-pdf-sel" class="btn-secondary mini" type="button" title="Exportar a PDF solo los materiales con casilla seleccionada">📄 PDF Seleccionados</button>
+                <button id="btn-alm-pdf-all" class="btn-primary mini" type="button" title="Exportar el inventario completo del almacén a formato PDF oficial">📑 PDF Todo el Inventario</button>
+                <button id="btn-alm-nuevo-prod" class="btn-primary mini" type="button" style="background:#0f766e; border-color:#0f766e;">➕ Nuevo Material</button>
+              </div>
+            </div>
             <div class="table-scroll">
               <table>
                 <thead>
                   <tr>
+                    <th style="width:38px; text-align:center;"><input type="checkbox" id="alm_check_all" title="Seleccionar/Deseleccionar todos los visibles"></th>
                     <th>CLAVE</th><th>DESCRIPCIÓN</th><th>Categoría</th><th>Unidad</th><th>Stock</th><th>Stock Mín.</th><th>Origen / Control</th><th>Estatus</th><th>Acciones</th>
                   </tr>
                 </thead>
@@ -631,8 +653,8 @@
             <h3>Alta / edición de producto</h3>
             <div class="grid cols-4">
               <div class="field">
-                <label for="alm_clave">CLAVE (Automática)</label>
-                <input id="alm_clave" placeholder="CL-001" readonly class="readonly">
+                <label for="alm_clave">CLAVE (Personalizada o Automática)</label>
+                <input id="alm_clave" placeholder="Auto: MAT-001">
               </div>
               <div class="field">
                 <label for="alm_desc">DESCRIPCIÓN</label>
@@ -782,7 +804,7 @@
                   </div>
                   <div class="field">
                     <label for="reg_add_clave">Clave del Bien *</label>
-                    <input id="reg_add_clave" name="clave_bien" type="text" maxlength="60" placeholder="Ej. AT-001 / MT-001" required>
+                    <input id="reg_add_clave" name="clave_bien" type="text" maxlength="60" placeholder="Ej. AT-001 / MT-001" required style="text-transform: uppercase;">
                   </div>
                   <div class="field">
                     <label for="reg_add_desc">Descripción *</label>
@@ -798,7 +820,7 @@
                   </div>
                   <div class="field">
                     <label for="reg_add_cantidad">Cantidad</label>
-                    <input id="reg_add_cantidad" name="cantidad_propia" type="number" min="1" step="1" value="1">
+                    <input id="reg_add_cantidad" name="cantidad_propia" type="number" min="0" step="1" value="1">
                   </div>
                   <div class="field">
                     <label for="reg_add_estado">Estado Físico</label>
@@ -806,6 +828,8 @@
                       <option value="BUENO">BUENO</option>
                       <option value="REGULAR">REGULAR</option>
                       <option value="MALO">MALO</option>
+                      <option value="SINIESTRO / EN ASEGURADORA">SINIESTRO / EN ASEGURADORA</option>
+                      <option value="NO DISPONIBLE (SINIESTRO)">NO DISPONIBLE (SINIESTRO)</option>
                       <option value="BAJA">BAJA</option>
                     </select>
                   </div>
@@ -815,6 +839,8 @@
                       <option value="ACTIVO">ACTIVO</option>
                       <option value="PRESTADO">PRESTADO</option>
                       <option value="EN_REPARACION">EN REPARACIÓN</option>
+                      <option value="SINIESTRO / EN ASEGURADORA">SINIESTRO / EN ASEGURADORA</option>
+                      <option value="NO DISPONIBLE (SINIESTRO)">NO DISPONIBLE (SINIESTRO)</option>
                       <option value="BAJA">BAJA</option>
                     </select>
                   </div>
@@ -823,12 +849,50 @@
                 <!-- SECCIÓN EXCLUSIVA PARA PARQUE_VEHICULAR (Esquema Híbrido) -->
                 <div id="reg_vehiculo_section" class="hidden">
                   <div class="veh-section" style="border-left-color: var(--accent);">
-                    <div class="veh-section-title" style="margin-bottom:4px;">
-                      <span>A) Datos del Resguardante (Llenado manual en formato impreso)</span>
+                    <div class="veh-section-title" style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                      <span>A) Datos del Resguardante / Conductor (Para PDF de Resguardo)</span>
+                      <div style="display:flex; align-items:center; gap:6px; font-weight:normal; font-size:12px;">
+                        <label for="veh_resg_preset" style="margin:0; font-size:11.5px; color:var(--primary);">Autocompletar Enlace / Titular:</label>
+                        <select id="veh_resg_preset" style="padding:3px 8px; font-size:12px; min-width:210px;">
+                          <option value="">-- Captura manual o elegir enlace --</option>
+                          <option value="LA_PAZ" data-nombre="Sandra Guadalupe Salvatierra Amador" data-puesto="Director Regional" data-adscripcion="Coordinación Regional La Paz">La Paz — Sandra Guadalupe Salvatierra Amador</option>
+                          <option value="MULEGE" data-nombre="Diana Ramírez Hernández" data-puesto="Director Regional" data-adscripcion="Coordinación Regional Mulegé">Mulegé — Diana Ramírez Hernández</option>
+                          <option value="LOS_CABOS" data-nombre="Samir Savin Ruiz" data-puesto="Director Regional" data-adscripcion="Coordinación Regional Los Cabos">Los Cabos — Samir Savin Ruiz</option>
+                          <option value="COMONDU" data-nombre="Humberto Arce Cordero" data-puesto="Director Regional" data-adscripcion="Coordinación Regional Comondú">Comondú / Loreto — Humberto Arce Cordero</option>
+                          <option value="RM" data-nombre="Jorge Luis Patrón Murillo" data-puesto="Coordinador Operativo de Recursos Materiales" data-adscripcion="Recursos Materiales (Delegación)">RM — Jorge Luis Patrón Murillo</option>
+                        </select>
+                      </div>
                     </div>
-                    <p class="muted" style="margin:0; font-size:12.5px;">
-                      En el PDF generado se imprimirá en blanco la sección <b>DATOS DEL RESGUARDANTE</b> (Nombre Completo, RFC, Puesto, Adscripción/Región, Programa/Operativo, Licencia No. y Vigencia de Licencia) para su llenado a mano al momento de la firma.
-                    </p>
+                    <div class="grid cols-4" style="gap:10px;">
+                      <div class="field" style="grid-column: span 2;">
+                        <label for="veh_resg_nombre">Nombre Completo del Resguardante</label>
+                        <input id="veh_resg_nombre" type="text" placeholder="Ej. Diana Ramírez Hernández">
+                      </div>
+                      <div class="field">
+                        <label for="veh_resg_rfc">RFC</label>
+                        <input id="veh_resg_rfc" type="text" placeholder="Ej. NIFJ800101XXX" style="text-transform:uppercase;">
+                      </div>
+                      <div class="field">
+                        <label for="veh_resg_puesto">Puesto / Cargo</label>
+                        <input id="veh_resg_puesto" type="text" placeholder="Ej. Director Regional">
+                      </div>
+                      <div class="field">
+                        <label for="veh_resg_adscripcion">Adscripción / Región</label>
+                        <input id="veh_resg_adscripcion" type="text" placeholder="Se autocompleta con oficina si se deja vacío">
+                      </div>
+                      <div class="field">
+                        <label for="veh_resg_programa">Programa / Operativo</label>
+                        <input id="veh_resg_programa" type="text" placeholder="Ej. Pensión Adulto Mayor / Operativo">
+                      </div>
+                      <div class="field">
+                        <label for="veh_resg_licencia">Licencia No.</label>
+                        <input id="veh_resg_licencia" type="text" placeholder="Número de licencia" style="text-transform:uppercase;">
+                      </div>
+                      <div class="field">
+                        <label for="veh_resg_vigencia">Vigencia de Licencia</label>
+                        <input id="veh_resg_vigencia" type="text" placeholder="Ej. 2028 / PERMANENTE / DD/MM/AAAA">
+                      </div>
+                    </div>
                   </div>
 
                   <div class="veh-section">
@@ -982,6 +1046,9 @@
                 <div id="reg_add_msg" class="msg"></div>
                 <div class="modal-actions">
                   <button type="button" class="btn-secondary" data-close-modal="modal-add-regional">Cancelar</button>
+                  <button type="button" id="btn-eliminar-regional" class="btn btn-danger" style="display:none; background:#dc2626; color:#ffffff; border-color:#dc2626; font-weight:600;">🗑️ Eliminar</button>
+                  <button type="button" id="btn-forzar-retorno" class="btn-secondary hidden" style="border-color:#d97706; color:#b45309; background:#fffbeb; font-weight:600;" title="Restaurar stock disponible al 100% y limpiar préstamos retenidos">🔄 Forzar Retorno (Restaurar Stock)</button>
+                  <button type="button" id="btn-reg-save-and-pdf" class="btn-secondary hidden" style="border-color:var(--primary); color:var(--primary); font-weight:600;">🖨️ Guardar y Descargar PDF Resguardo</button>
                   <button type="submit" id="btn-reg-add-save" class="btn-primary">Guardar Activo</button>
                 </div>
               </form>
@@ -1088,9 +1155,9 @@
                 <div class="muted" style="font-size:11px;">Bienes en oficinas</div>
               </div>
               <div class="card" style="padding:14px; border-left:4px solid #9333ea; margin:0;">
-                <div class="muted" style="font-size:12px;">Tablets y Starlinks</div>
+                <div class="muted" style="font-size:12px;">Tabletas Digitales (Luis Mayoral)</div>
                 <div id="kpi-estatal-tablets" style="font-size:24px; font-weight:700; color:#9333ea;">0</div>
-                <div class="muted" style="font-size:11px;">Equipos de conectividad</div>
+                <div id="kpi-estatal-tablets-sub" class="muted" style="font-size:11px;">En Resguardo: 0 | Devolución: 0 | Disp.: 0</div>
               </div>
               <div class="card" style="padding:14px; border-left:4px solid #ea580c; margin:0;">
                 <div class="muted" style="font-size:12px;">Almacén Central (Stock)</div>
@@ -1115,10 +1182,10 @@
                 <label for="estatal_filter_rubro">Rubro de Inventario</label>
                 <select id="estatal_filter_rubro">
                   <option value="">Todos los Rubros</option>
-                  <option value="1">1. Archivo y Materiales (Gabriel Fiol)</option>
+                  <option value="1">1. Archivo y Materiales (Gabriel Adán Fiol Collins)</option>
                   <option value="2">2. Parque Vehicular (Evelia Contreras)</option>
                   <option value="3">3. Mobiliario y Eventos (Jesús Salvador)</option>
-                  <option value="4">4. Tablets y Starlinks (Luis Eduardo)</option>
+                  <option value="4">4. Tabletas Digitales (Luis Mayoral)</option>
                 </select>
               </div>
             </div>
@@ -1194,10 +1261,9 @@
               <div style="min-width:180px;">
                 <select id="vp_filter_rubro" style="width:100%;">
                   <option value="0">Todos los Rubros</option>
-                  <option value="1">1. Archivo y Materiales</option>
-                  <option value="2">2. Parque Vehicular</option>
+                  <option value="2">2. Parque Vehicular (Recursos Materiales)</option>
                   <option value="3">3. Mobiliario y Eventos</option>
-                  <option value="4">4. Tablets y Starlinks</option>
+                  <option value="4">4. Tabletas Digitales (Disponibles Delegación)</option>
                 </select>
               </div>
               <div style="min-width:180px;">
@@ -1420,14 +1486,51 @@
 
         <!-- 8. VISTA: Gestión de Perfiles de Usuarios (Exclusivo Admin) -->
         <section id="view-usuarios" class="view-section" style="display: none;">
+          <!-- Control de Fase de Prueba Grupal (v61) -->
+          <div class="card" id="card-control-prueba-grupal" style="margin-bottom:16px; border:2px solid #f59e0b; background:linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+              <div>
+                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                  <h3 style="margin:0; color:#92400e;">🧪 Control de Fase de Prueba Grupal</h3>
+                  <span id="badge-modo-prueba-estado" class="badge" style="background:#f59e0b; color:#fff; font-weight:700; padding:4px 10px; border-radius:999px;">MODO PRUEBA ACTIVO</span>
+                </div>
+                <p style="margin:6px 0 0 0; font-size:13px; color:#78350f; max-width:780px;">
+                  Mientras el <strong>Modo de Prueba Grupal</strong> esté activo, todas las nuevas <strong>Solicitudes de Almacén</strong> y <strong>Vales Provisionales</strong> se etiquetan con <code>🧪 PRUEBA</code> y <strong>NO descuentan ni bloquean existencias reales</strong> en Almacén, Parque Vehicular, Mobiliario ni Tabletas. El Vale real <strong>#3 (Víctor Huerta)</strong> permanece protegido y excluido de la purga.
+                </p>
+              </div>
+              <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <button id="btn-toggle-modo-prueba" class="btn-primary" type="button" style="background:#b45309; border-color:#92400e;">
+                  🔄 Cambiar Estado Modo Prueba
+                </button>
+                <button id="btn-purgar-pruebas" class="btn-secondary" type="button" style="background:#fee2e2; color:#991b1b; border:1px solid #f87171; font-weight:700;">
+                  🧹 Purgar todos los registros de prueba (Conservar Vale #3)
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
               <div>
                 <h3 style="margin:0;">Gestión de Usuarios y Perfiles</h3>
-                <p class="muted" style="margin:4px 0 0 0; font-size:13px;">Edita el nombre completo, región asignada, departamento/oficialía y restablece contraseñas con cifrado seguro.</p>
+                <p class="muted" style="margin:4px 0 0 0; font-size:13px;">Administra los usuarios del sistema, asigna roles, cargos para PDFs, regiones, restablece contraseñas y genera respaldos de la base de datos.</p>
               </div>
-              <button id="btn-usuarios-refresh" class="btn-secondary" type="button">Actualizar lista</button>
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <button id="btn-usuario-nuevo" class="btn-primary" type="button">➕ Nuevo Usuario</button>
+                <button id="btn-backup-db" class="btn-secondary" type="button">💾 Descargar Respaldo BD</button>
+                <button id="btn-ver-bitacora" class="btn-secondary" type="button">📋 Bitácora de Movimientos</button>
+                <button id="btn-usuarios-refresh" class="btn-secondary" type="button">🔄 Actualizar lista</button>
+                <span id="online-users-badge" class="badge" style="background:#e0f2fe; color:#0369a1; padding:6px 12px; border-radius:16px; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:6px;" title="Clic para ver detalle de usuarios conectados">
+                  🟢 En línea: <strong id="online-users-count">1</strong>
+                </span>
+              </div>
             </div>
+
+            <div id="online-users-container" style="display:none; margin:12px 0; padding:10px 14px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:6px;">
+              <strong>🟢 Monitor de Sesiones Activas (últimos 3 minutos):</strong>
+              <div id="online-users-list" style="margin-top:6px; font-size:13px; color:#0c4a6e; display:flex; flex-wrap:wrap; gap:8px;"></div>
+            </div>
+
             <div class="table-scroll">
               <table>
                 <thead>
@@ -1436,8 +1539,8 @@
                     <th>Usuario</th>
                     <th>Nombre Completo</th>
                     <th>Rol</th>
-                    <th>Región Asignada</th>
-                    <th>Departamento / Oficialía</th>
+                    <th>Cargo (PDF)</th>
+                    <th>Región / Depto</th>
                     <th>Acciones</th>
                   </tr>
                 </thead>
@@ -1448,22 +1551,22 @@
             </div>
           </div>
 
-          <!-- Modal: Editar Perfil de Usuario (Solo Admin) -->
-          <div id="modal-edit-usuario" class="modal-overlay hidden" role="dialog" aria-modal="true">
-            <div class="modal-box" style="max-width:620px;">
+          <!-- Modal: Crear y Editar Perfil de Usuario (Solo Admin) -->
+          <div id="modal-edit-user" class="modal-overlay hidden" role="dialog" aria-modal="true">
+            <div class="modal-box" style="max-width:640px;">
               <div class="modal-header">
-                <h3 style="margin:0; color:var(--primary);">Editar Perfil de Usuario</h3>
-                <button type="button" class="btn-icon modal-close" id="btn-x-edit-usuario" data-close-modal="modal-edit-usuario" data-close-usr-modal="true" data-bs-dismiss="modal" title="Cerrar">&times;</button>
+                <h3 id="modal-user-title" style="margin:0; color:var(--primary);">Editar Perfil de Usuario</h3>
+                <button type="button" class="btn-icon modal-close" id="btn-x-edit-usuario" data-close-modal="modal-edit-user" data-close-usr-modal="true" data-bs-dismiss="modal" title="Cerrar">&times;</button>
               </div>
               <form id="form-edit-usuario" novalidate>
                 <input type="hidden" id="usr_edit_id" value="">
                 <div class="grid cols-2">
                   <div class="field">
-                    <label for="usr_edit_username">Usuario (Login)</label>
-                    <input id="usr_edit_username" type="text" readonly class="readonly">
+                    <label for="usr_edit_username">Usuario (Login) *</label>
+                    <input id="usr_edit_username" type="text" placeholder="ej. jnieves" required>
                   </div>
                   <div class="field">
-                    <label for="usr_edit_rol">Rol en el Sistema</label>
+                    <label for="usr_edit_rol">Rol en el Sistema *</label>
                     <select id="usr_edit_rol">
                       <option value="USUARIO">USUARIO (Departamento / Enlace Regional)</option>
                       <option value="ENCARGADO">ENCARGADO (Rubro Regional / Almacén)</option>
@@ -1487,37 +1590,502 @@
                 </div>
                 <div class="grid cols-2" style="margin-top:12px;">
                   <div class="field">
+                    <label for="usr_edit_cargo">Cargo / Puesto (para PDFs)</label>
+                    <input id="usr_edit_cargo" name="cargo" type="text" placeholder="ej. Director Regional">
+                  </div>
+                  <div class="field">
                     <label for="usr_edit_region">Región Asignada</label>
                     <select id="usr_edit_region">
                       <option value="">La Paz (Delegación Central por defecto)</option>
                     </select>
                   </div>
+                </div>
+                <div class="grid cols-2" style="margin-top:12px;">
                   <div class="field">
                     <label for="usr_edit_oficialia">Departamento / Oficialía</label>
                     <select id="usr_edit_oficialia">
                       <option value="">- Sin oficialía asignada -</option>
                     </select>
                   </div>
+                  <div class="field">
+                    <label for="usr_edit_oficina">Oficina Específica</label>
+                    <select id="usr_edit_oficina">
+                      <option value="">- Ninguna -</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="grid cols-2" style="margin-top:12px;">
+                  <div class="field">
+                    <label for="usr_edit_licencia">No. de Licencia</label>
+                    <input id="usr_edit_licencia" name="licencia" type="text" placeholder="Opcional">
+                  </div>
+                  <div class="field">
+                    <label for="usr_edit_vigencia_licencia">Vigencia Licencia</label>
+                    <input id="usr_edit_vigencia_licencia" name="vigencia_licencia" type="text" placeholder="ej. Permanente / 2027">
+                  </div>
                 </div>
                 <div class="field" style="margin-top:12px;">
-                  <label for="usr_edit_password">Nueva Contraseña (dejar en blanco para mantener la actual)</label>
-                  <input id="usr_edit_password" type="password" autocomplete="new-password" placeholder="Escribe nueva contraseña solo si deseas cambiarla">
+                  <label for="usr_edit_password" id="usr_edit_password_label">Nueva Contraseña (dejar en blanco para mantener la actual)</label>
+                  <input id="usr_edit_password" type="password" autocomplete="new-password" placeholder="Escribe nueva contraseña">
                 </div>
                 <div id="usr_edit_msg" class="msg"></div>
                 <div class="modal-actions">
-                  <button type="button" class="btn-secondary" id="btn-cancelar-edit-usuario" data-close-modal="modal-edit-usuario" data-close-usr-modal="true" data-bs-dismiss="modal">Cancelar</button>
-                  <button type="submit" id="btn-usr-edit-save" class="btn-primary">Guardar Cambios</button>
+                  <button type="button" class="btn-secondary" id="btn-cancelar-edit-usuario" data-close-modal="modal-edit-user" data-close-usr-modal="true" data-bs-dismiss="modal">Cancelar</button>
+                  <button type="submit" id="btn-usr-edit-save" class="btn-primary">Guardar</button>
                 </div>
               </form>
             </div>
           </div>
         </section>
 
+        <!-- 11. VISTA: Control de Tabletas Digitales (Luis Eduardo Mayoral Geraldo) -->
+        <section id="view-tabletas" class="view-section hidden" style="display:none;">
+          <div class="view-header">
+            <div class="view-title">
+              <h3>Recursos Materiales / Almacén</h3>
+              <h1>📱 Control de Tabletas Digitales</h1>
+              <p>Padrón oficial de 276 tabletas Compac QTab LTE, devoluciones y resguardos personales — Encargado: <b>Luis Eduardo Mayoral Geraldo (Encargado de Almacén)</b>.</p>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+              <input type="file" id="tab_excel_file_input" accept=".xlsx,.xls" style="display:none;">
+              <button type="button" id="btn-tab-bitacora" class="btn-secondary hidden" title="Consultar bitácora de movimientos de tabletas (Solo Administrador)">📜 Log de Movimientos (Tabletas)</button>
+              <button type="button" id="btn-tab-importar-excel" class="btn-secondary" title="Subir Excel actualizado para completar nombres de resguardantes por No. de Resguardo o IMEI">📥 Importar Nombres (Excel)</button>
+              <button type="button" id="btn-tab-refresh" class="btn-primary">🔄 Actualizar</button>
+            </div>
+          </div>
+
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <div class="kpi-title">Total Padrón Oficial</div>
+              <div class="kpi-value" id="kpi-tab-total">0</div>
+              <div class="kpi-desc">Tabletas Compac registradas</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-title">En Resguardo</div>
+              <div class="kpi-value" id="kpi-tab-resguardo" style="color:var(--primary);">0</div>
+              <div class="kpi-desc">Asignadas en regiones y delegación</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-title">En Proceso de Devolución</div>
+              <div class="kpi-value" id="kpi-tab-devolucion" style="color:#d97706;">0</div>
+              <div class="kpi-desc">Con vale impreso, por recibir físicamente</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-title">Disponibles para Asignar</div>
+              <div class="kpi-value" id="kpi-tab-disponibles" style="color:#15803d;">0</div>
+              <div class="kpi-desc">Sin resguardo previo (17) o devueltas</div>
+            </div>
+          </div>
+
+          <div class="tab-tabs-bar" role="tablist">
+            <button type="button" class="tab-pill-btn active" data-tab="EN_RESGUARDO" id="tab-btn-en-resguardo">
+              📋 En Resguardo (Regiones y Delegación)
+              <span class="tab-pill-count" id="tab-count-resguardo">0</span>
+            </button>
+            <button type="button" class="tab-pill-btn" data-tab="DEVOLUCION_PENDIENTE" id="tab-btn-devolucion">
+              ⏳ En Proceso de Devolución
+              <span class="tab-pill-count" id="tab-count-devolucion">0</span>
+            </button>
+            <button type="button" class="tab-pill-btn" data-tab="DISPONIBLE" id="tab-btn-disponible">
+              📦 Disponibles (Listas para Asignar)
+              <span class="tab-pill-count" id="tab-count-disponible">0</span>
+            </button>
+            <button type="button" class="tab-pill-btn" data-tab="EN_PRESTAMO_PROVISIONAL" id="tab-btn-provisional">
+              🔄 En Préstamo Provisional
+              <span class="tab-pill-count" id="tab-count-provisional">0</span>
+            </button>
+          </div>
+
+          <div class="card">
+            <div class="grid cols-4" style="gap:10px; margin-bottom:12px; align-items:flex-end;">
+              <div class="field" style="margin:0;">
+                <label for="tab_filter_region">Filtrar por Región</label>
+                <select id="tab_filter_region">
+                  <option value="">Todas las Regiones</option>
+                  <option value="LA PAZ">LA PAZ</option>
+                  <option value="LOS CABOS">LOS CABOS</option>
+                  <option value="COMONDU">COMONDU</option>
+                  <option value="MULEGE">MULEGE</option>
+                </select>
+              </div>
+              <div class="field" style="margin:0;" id="tab_filter_oficina_wrap">
+                <label for="tab_filter_oficina">Oficina / Programa</label>
+                <select id="tab_filter_oficina">
+                  <option value="">Todas las oficinas/programas</option>
+                  <option value="Delegación La Paz">Delegación La Paz</option>
+                  <option value="Región La Paz">Región La Paz</option>
+                  <option value="PCD - Programa de Discapacidad">PCD - Programa de Discapacidad</option>
+                  <option value="PAM - Programa Adulto Mayor">PAM - Programa Adulto Mayor</option>
+                  <option value="Región Los Cabos">Región Los Cabos</option>
+                  <option value="Región Comondú">Región Comondú</option>
+                  <option value="Región Mulegé">Región Mulegé</option>
+                </select>
+              </div>
+              <div class="field" style="margin:0;">
+                <label for="tab_filter_extra">Filtro rápido</label>
+                <select id="tab_filter_extra">
+                  <option value="">Todos los equipos</option>
+                  <option value="CON_NOMBRE">Con nombre asignado</option>
+                  <option value="SIN_NOMBRE">Sin nombre / Resguardo Físico</option>
+                  <option value="DANADAS_INCOMPLETAS">Dañadas o sin cargador/caja</option>
+                </select>
+              </div>
+              <div class="field" style="margin:0;">
+                <label for="tab_filter_q">Buscador (Resguardo, IMEI, Serie, Nombre, Caja)</label>
+                <input id="tab_filter_q" type="text" placeholder="Ej. 177, 356149..., DANITZA, 1913...">
+              </div>
+            </div>
+
+            <div class="muted" style="margin-bottom:8px; font-size:12.5px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+              <span id="tab_meta">Cargando tabletas...</span>
+              <span id="tab_msg"></span>
+            </div>
+
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:76px;">No. Resg.</th>
+                    <th style="width:65px;">Caja</th>
+                    <th>Región / Oficina-Programa</th>
+                    <th>Resguardante / Origen</th>
+                    <th>Equipo</th>
+                    <th>IMEI</th>
+                    <th>No. de Serie</th>
+                    <th>Estado Físico / Accesorios</th>
+                    <th>Observaciones</th>
+                    <th style="min-width:210px;">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody id="tab_tbody">
+                  <tr><td colspan="10" class="muted" style="text-align:center; padding:18px;">Cargando inventario de tabletas...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Modal 1: Generar Vale de Devolución -->
+          <div id="modal-tab-devolucion" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-tab-devolucion-title">
+            <div class="modal-box" style="max-width:650px;">
+              <div class="modal-header">
+                <h3 id="modal-tab-devolucion-title" style="margin:0; color:var(--primary);">📤 Generar Vale de Devolución de Tableta</h3>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-tab-devolucion" title="Cerrar">&times;</button>
+              </div>
+              <form id="form-tab-devolucion" novalidate>
+                <input type="hidden" id="tab_dev_id" value="">
+                <div id="tab_dev_equipo_info" style="background:#F9F2F4; border:1px solid var(--border); padding:10px 12px; border-radius:6px; margin-bottom:12px; font-size:13px;"></div>
+                <div class="grid cols-2" style="gap:10px;">
+                  <div class="field">
+                    <label for="tab_dev_nombre">Nombre de quien entrega / devuelve *</label>
+                    <input id="tab_dev_nombre" type="text" required placeholder="Nombre completo">
+                  </div>
+                  <div class="field">
+                    <label for="tab_dev_cargo">Cargo / Puesto</label>
+                    <input id="tab_dev_cargo" type="text" value="Servidor de la nación" placeholder="Servidor de la nación">
+                  </div>
+                </div>
+                <div class="grid cols-3" style="gap:10px; margin-top:8px; align-items:center;">
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="tab_dev_cargador" checked> ¿Entrega con cargador?
+                  </label>
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="tab_dev_caja" checked> ¿Entrega con caja?
+                  </label>
+                  <div class="field" style="margin:0;">
+                    <label for="tab_dev_estatus">Estado Físico</label>
+                    <select id="tab_dev_estatus">
+                      <option value="BUENO">BUENO</option>
+                      <option value="INCOMPLETO">INCOMPLETO</option>
+                      <option value="DAÑADO">DAÑADO</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field" style="margin-top:10px;">
+                  <label for="tab_dev_obs">Observaciones de recepción / falla</label>
+                  <textarea id="tab_dev_obs" rows="3" placeholder="Detalles físicos o motivos de devolución..."></textarea>
+                </div>
+                <div class="modal-actions">
+                  <button type="button" class="btn-secondary" data-close-modal="modal-tab-devolucion">Cancelar</button>
+                  <button type="submit" class="btn-primary" id="btn-tab-dev-submit">📄 Generar Vale de Devolución y Abrir PDF</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <!-- Modal 2: Asignar y Generar Resguardo Personal -->
+          <div id="modal-tab-asignar" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-tab-asignar-title">
+            <div class="modal-box" style="max-width:680px;">
+              <div class="modal-header">
+                <h3 id="modal-tab-asignar-title" style="margin:0; color:var(--primary);">➕ Asignar Tableta y Generar Resguardo Personal</h3>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-tab-asignar" title="Cerrar">&times;</button>
+              </div>
+              <form id="form-tab-asignar" novalidate>
+                <input type="hidden" id="tab_asig_id" value="">
+                <div id="tab_asig_equipo_info" style="background:#F0FDF4; border:1px solid #BBF7D0; padding:10px 12px; border-radius:6px; margin-bottom:12px; font-size:13px;"></div>
+                <div class="grid cols-2" style="gap:10px;">
+                  <div class="field">
+                    <label for="tab_asig_nombre">Nombre completo del nuevo resguardante *</label>
+                    <input id="tab_asig_nombre" type="text" required placeholder="Ej. María Fernanda López Pérez">
+                  </div>
+                  <div class="field">
+                    <label for="tab_asig_cargo">Cargo / Puesto</label>
+                    <input id="tab_asig_cargo" type="text" value="Servidor de la nación" placeholder="Servidor de la nación">
+                  </div>
+                  <div class="field">
+                    <label for="tab_asig_region">Región Destino *</label>
+                    <select id="tab_asig_region" required>
+                      <option value="LA PAZ">LA PAZ</option>
+                      <option value="LOS CABOS">LOS CABOS</option>
+                      <option value="COMONDU">COMONDU</option>
+                      <option value="MULEGE">MULEGE</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="tab_asig_oficina">Oficina / Programa Destino *</label>
+                    <select id="tab_asig_oficina" required>
+                      <option value="Delegación La Paz">Delegación La Paz</option>
+                      <option value="Región La Paz">Región La Paz</option>
+                      <option value="PCD - Programa de Discapacidad">PCD - Programa de Discapacidad</option>
+                      <option value="PAM - Programa Adulto Mayor">PAM - Programa Adulto Mayor</option>
+                      <option value="Región Los Cabos">Región Los Cabos</option>
+                      <option value="Región Comondú">Región Comondú</option>
+                      <option value="Región Mulegé">Región Mulegé</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="grid cols-3" style="gap:10px; margin-top:8px; align-items:center;">
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="tab_asig_cargador" checked> Entrega con cargador
+                  </label>
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="tab_asig_caja" checked> Entrega con caja
+                  </label>
+                  <div class="field" style="margin:0;">
+                    <label for="tab_asig_estatus">Estado Físico</label>
+                    <select id="tab_asig_estatus">
+                      <option value="BUENO">BUENO</option>
+                      <option value="INCOMPLETO">INCOMPLETO</option>
+                      <option value="DAÑADO">DAÑADO</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field" style="margin-top:10px;">
+                  <label for="tab_asig_obs">Observaciones</label>
+                  <textarea id="tab_asig_obs" rows="2" placeholder="Observaciones opcionales para el resguardo..."></textarea>
+                </div>
+                <div class="modal-actions">
+                  <button type="button" class="btn-secondary" data-close-modal="modal-tab-asignar">Cancelar</button>
+                  <button type="submit" class="btn-primary" id="btn-tab-asig-submit">📄 Asignar y Generar PDF de Resguardo</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <!-- Modal 3: Editar Datos de Tableta -->
+          <div id="modal-tab-editar" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-tab-editar-title">
+            <div class="modal-box" style="max-width:740px;">
+              <div class="modal-header">
+                <h3 id="modal-tab-editar-title" style="margin:0; color:var(--primary);">✏️ Editar Registro de Tableta</h3>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-tab-editar" title="Cerrar">&times;</button>
+              </div>
+              <form id="form-tab-editar" novalidate>
+                <input type="hidden" id="tab_edit_id" value="">
+                <div id="tab_edit_admin_only_note" class="hidden" style="margin-bottom:10px; padding:8px 12px; border-radius:8px; background:#fef3c7; border:1px solid #f59e0b; color:#92400e; font-size:12.5px;">
+                  🔒 Solo el Administrador puede modificar No. Resguardo, IMEI y Serie.
+                </div>
+                <div class="grid cols-3" style="gap:10px;">
+                  <div class="field">
+                    <label for="tab_edit_no_resg">No. Resguardo *</label>
+                    <input id="tab_edit_no_resg" type="number" min="1" required>
+                  </div>
+                  <div class="field">
+                    <label for="tab_edit_caja_no">No. Caja</label>
+                    <input id="tab_edit_caja_no" type="text">
+                  </div>
+                  <div class="field">
+                    <label for="tab_edit_estatus">Estado Físico</label>
+                    <select id="tab_edit_estatus">
+                      <option value="BUENO">BUENO</option>
+                      <option value="INCOMPLETO">INCOMPLETO</option>
+                      <option value="DAÑADO">DAÑADO</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="tab_edit_imei">IMEI *</label>
+                    <input id="tab_edit_imei" type="text" required>
+                  </div>
+                  <div class="field">
+                    <label for="tab_edit_serie">Número de Serie *</label>
+                    <input id="tab_edit_serie" type="text" required>
+                  </div>
+                  <div class="field">
+                    <label for="tab_edit_marca">Marca / Modelo</label>
+                    <div style="display:flex; gap:6px;">
+                      <input id="tab_edit_marca" type="text" placeholder="Compac" style="width:45%;">
+                      <input id="tab_edit_modelo" type="text" placeholder="QTab LTE" style="width:55%;">
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label for="tab_edit_region">Región *</label>
+                    <select id="tab_edit_region">
+                      <option value="LA PAZ">LA PAZ</option>
+                      <option value="LOS CABOS">LOS CABOS</option>
+                      <option value="COMONDU">COMONDU</option>
+                      <option value="MULEGE">MULEGE</option>
+                    </select>
+                  </div>
+                  <div class="field" style="grid-column: span 2;">
+                    <label for="tab_edit_oficina">Oficina / Programa *</label>
+                    <select id="tab_edit_oficina">
+                      <option value="Delegación La Paz">Delegación La Paz</option>
+                      <option value="Región La Paz">Región La Paz</option>
+                      <option value="PCD - Programa de Discapacidad">PCD - Programa de Discapacidad</option>
+                      <option value="PAM - Programa Adulto Mayor">PAM - Programa Adulto Mayor</option>
+                      <option value="Región Los Cabos">Región Los Cabos</option>
+                      <option value="Región Comondú">Región Comondú</option>
+                      <option value="Región Mulegé">Región Mulegé</option>
+                    </select>
+                  </div>
+                  <div class="field" style="grid-column: span 2;">
+                    <label for="tab_edit_nombre">Nombre del Resguardante</label>
+                    <input id="tab_edit_nombre" type="text" placeholder="Nombre del servidor de la nación">
+                  </div>
+                  <div class="field">
+                    <label for="tab_edit_cargo">Cargo</label>
+                    <input id="tab_edit_cargo" type="text" value="Servidor de la nación">
+                  </div>
+                </div>
+                <div class="grid cols-2" style="gap:10px; margin-top:6px;">
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="tab_edit_cargador" checked> Incluye Cargador
+                  </label>
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="tab_edit_caja" checked> Incluye Caja Original
+                  </label>
+                </div>
+                <div class="field" style="margin-top:10px;">
+                  <label for="tab_edit_obs">Observaciones</label>
+                  <textarea id="tab_edit_obs" rows="2"></textarea>
+                </div>
+                <div class="modal-actions">
+                  <button type="button" class="btn-secondary" data-close-modal="modal-tab-editar">Cancelar</button>
+                  <button type="submit" class="btn-primary" id="btn-tab-edit-submit">💾 Guardar Cambios</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <!-- Modal 4: Log de Movimientos de Tabletas (Exclusivo Administrador) -->
+          <div id="modal-tab-bitacora" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-tab-bitacora-title">
+            <div class="modal-box" style="max-width:980px;">
+              <div class="modal-header">
+                <h3 id="modal-tab-bitacora-title" style="margin:0; color:var(--primary);">📜 Log de Movimientos — Tabletas Digitales</h3>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-tab-bitacora" title="Cerrar">&times;</button>
+              </div>
+              <div class="grid cols-3" style="gap:10px; margin-bottom:10px;">
+                <div class="field">
+                  <label for="tab_bit_filter_q">Buscar (No. Resguardo, IMEI, Serie, Detalles)</label>
+                  <input id="tab_bit_filter_q" type="text" placeholder="Ej. 145, IMEI, Juan...">
+                </div>
+                <div class="field">
+                  <label for="tab_bit_filter_accion">Acción</label>
+                  <select id="tab_bit_filter_accion">
+                    <option value="">Todas</option>
+                    <option value="GENERAR_DEVOLUCION">GENERAR_DEVOLUCION</option>
+                    <option value="CONFIRMAR_RECIBIDO">CONFIRMAR_RECIBIDO</option>
+                    <option value="ASIGNAR_RESGUARDO">ASIGNAR_RESGUARDO</option>
+                    <option value="EDITAR_TABLETA">EDITAR_TABLETA</option>
+                    <option value="IMPORTAR_NOMBRES">IMPORTAR_NOMBRES</option>
+                    <option value="PRESTAMO_PROVISIONAL">PRESTAMO_PROVISIONAL</option>
+                    <option value="REINTEGRO_PROVISIONAL">REINTEGRO_PROVISIONAL</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="tab_bit_filter_usuario">Usuario</label>
+                  <input id="tab_bit_filter_usuario" type="text" placeholder="Ej. luismayoral, admin...">
+                </div>
+              </div>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span class="muted" id="tab_bit_meta" style="font-size:12px;">0 registros</span>
+                <button type="button" id="btn-tab-bitacora-filtrar" class="btn-secondary">🔍 Filtrar</button>
+              </div>
+              <div class="table-scroll" style="max-height:420px; overflow-y:auto;">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Fecha / Hora</th>
+                      <th>Usuario</th>
+                      <th>Acción</th>
+                      <th>No. Resg.</th>
+                      <th>IMEI / Serie</th>
+                      <th>Detalles</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tab_bit_tbody">
+                    <tr><td colspan="6" class="muted">Sin registros cargados.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="modal-actions">
+                <button type="button" class="btn-secondary" data-close-modal="modal-tab-bitacora">Cerrar</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Modal: Bitácora de Movimientos (Exclusivo Administrador) -->
+        <div id="modal-bitacora" class="modal" style="display:none;">
+          <div class="modal-dialog modal-xl" style="max-width:1050px; width:95%; max-height:90vh; display:flex; flex-direction:column;">
+            <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+              <h3 style="margin:0; display:flex; align-items:center; gap:8px;">
+                <span>📋</span> Bitácora de Movimientos del Inventario
+              </h3>
+              <button type="button" class="btn-secondary mini" id="btn-cerrar-bitacora" style="font-size:16px; padding:2px 8px;">✕</button>
+            </div>
+            <div class="modal-body" style="padding-top:14px; overflow-y:auto; flex:1;">
+              <div class="grid cols-3" style="gap:10px; margin-bottom:14px; align-items:flex-end;">
+                <div class="field" style="margin:0;">
+                  <label for="bitacora_q">Buscar en movimientos</label>
+                  <input id="bitacora_q" placeholder="Usuario, acción, producto o detalle...">
+                </div>
+                <div class="field" style="margin:0;">
+                  <label for="bitacora_fecha">Filtrar por fecha</label>
+                  <input id="bitacora_fecha" type="date">
+                </div>
+                <div style="display:flex; gap:8px;">
+                  <button id="btn-bitacora-buscar" class="btn-primary" type="button" style="flex:1;">Buscar</button>
+                  <button id="btn-bitacora-limpiar" class="btn-secondary" type="button">Limpiar</button>
+                </div>
+              </div>
+              <div class="muted" style="margin-bottom:8px; font-size:12.5px;">
+                <span id="bitacora_meta">Cargando movimientos...</span>
+              </div>
+              <div class="table-scroll" style="max-height:480px; overflow-y:auto;">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style="width:145px;">Fecha / Hora</th>
+                      <th style="width:150px;">Usuario</th>
+                      <th style="width:100px;">Módulo</th>
+                      <th style="width:140px;">Acción</th>
+                      <th>Detalles</th>
+                    </tr>
+                  </thead>
+                  <tbody id="bitacora_tbody"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="modal-footer" style="margin-top:12px; border-top:1px solid #e2e8f0; padding-top:10px; text-align:right;">
+              <button type="button" class="btn-secondary" id="btn-cerrar-bitacora-footer">Cerrar</button>
+            </div>
+          </div>
+        </div>
+
       </div>
     </main>
   </div>
  
-  <script src="/app.js?v=33"></script>
+  <script src="/app.js?v=62"></script>
 
   <script>
     // Filtro de seguridad rápido para evitar parpadeos si no hay sesión

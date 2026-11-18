@@ -4,6 +4,11 @@ node_modules/
 # Variables de entorno y secretos
 .env
 
+# Respaldos del sistema y volcados SQL
+respaldos_sistema/
+inventario-api/respaldos_sistema/
+*.sql
+
 # Archivos de base de datos local y volúmenes Docker
 db_data/
 mysql_data/
