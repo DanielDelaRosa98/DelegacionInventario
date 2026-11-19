@@ -748,6 +748,23 @@ function canEditTabletas(userOrReq) {
   return false;
 }
 
+function buildCleanFullName(nombre, ap1, ap2) {
+  const n = String(nombre || "").trim();
+  const a1 = String(ap1 || "").trim();
+  const a2 = String(ap2 || "").trim();
+  if (!n) return [a1, a2].filter(Boolean).join(" ").trim();
+  const normCmp = (s) =>
+    String(s || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+  const nNorm = normCmp(n);
+  const parts = [n];
+  if (a1 && !nNorm.includes(normCmp(a1))) parts.push(a1);
+  if (a2 && !nNorm.includes(normCmp(a2))) parts.push(a2);
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
 // ---------------------------------------------------------------------------
 // Matriz de permisos (Reunión 29/10/26)
 // ---------------------------------------------------------------------------
@@ -1861,14 +1878,14 @@ async function ensureSchemaAndUsers() {
       { id: 30030004, nombre: "Niñas y Niños", responsable: "María de los Ángeles Valenzuela López" },
       { id: 30030005, nombre: "Salud Casa por Casa", responsable: "Juan Carlos Cuadros Espinoza" },
       { id: 30030006, nombre: "Comunicación Social", responsable: "Ericka Peralta Preciado" },
-      { id: 30030007, nombre: "Programa de Adulto Mayor", responsable: "Elizabeth González Wendy" },
+      { id: 30030007, nombre: "Programa de Adulto Mayor", responsable: "Elizabeth Alvarez Trasviña" },
       { id: 30030008, nombre: "Encargado de Archivos y Materiales", responsable: "Gabriel Adán Fiol Collins" },
       { id: 30030009, nombre: "Enlace Regional Los Cabos", responsable: "Samir Savin Ruiz" },
       { id: 30030010, nombre: "Enlace Regional Mulegé", responsable: "Diana Ramírez Hernández" },
       { id: 30030011, nombre: "Enlace Regional Comondú / Loreto", responsable: "Humberto Arce Cordero" },
       { id: 30030012, nombre: "Asuntos Jurídicos", responsable: "Mayra Cruz Salazar Escobosa" },
       { id: 30030013, nombre: "Jóvenes Construyendo el Futuro", responsable: "Juan Daniel Carrera Villaseca" },
-      { id: 30030014, nombre: "Programa de Discapacidad", responsable: "Olga Camarillo Martínez" },
+      { id: 30030014, nombre: "Programa de Discapacidad", responsable: "Anais Murillo Arce" },
       { id: 30030015, nombre: "Dirección Regional La Paz", responsable: "Sandra Guadalupe Salvatierra Amador" },
       { id: 30030016, nombre: "Jefatura", responsable: "Jefatura de Delegación" },
     ];
@@ -2322,9 +2339,9 @@ async function ensureSchemaAndUsers() {
       },
       {
         username: "discapacidad",
-        nombre: "Olga Camarillo Martínez",
-        primer_ap: "Camarillo",
-        segundo_ap: "Martínez",
+        nombre: "Anais",
+        primer_ap: "Murillo",
+        segundo_ap: "Arce",
         rol: "departamento",
         id_oficialia: 30030014,
         departamento: "Programa de Discapacidad",
@@ -2334,9 +2351,9 @@ async function ensureSchemaAndUsers() {
       },
       {
         username: "adultomayor",
-        nombre: "Elizabeth González Wendy",
-        primer_ap: "González",
-        segundo_ap: "Wendy",
+        nombre: "Elizabeth",
+        primer_ap: "Alvarez",
+        segundo_ap: "Trasviña",
         rol: "departamento",
         id_oficialia: 30030007,
         departamento: "Programa de Adulto Mayor",
@@ -2659,7 +2676,8 @@ async function ensureSchemaAndUsers() {
          ('MIGRACION_V61_APLICADA', '0'),
          ('MIGRACION_V62_APLICADA', '0'),
          ('MIGRACION_RECALCULO_ID_ESTRICTO_V1', '0'),
-         ('MIGRACION_FIX_TABLETAS_Y_MOB024_V1', '0')`
+         ('MIGRACION_FIX_TABLETAS_Y_MOB024_V1', '0'),
+         ('MIGRACION_COORD_PCD_PAM_V1', '0')`
     ).catch(() => {});
 
     try {
@@ -3090,6 +3108,102 @@ async function ensureSchemaAndUsers() {
       console.warn("[WARN] MIGRACION_FIX_TABLETAS_Y_MOB024_V1:", errMigFix?.message || errMigFix);
     }
 
+    // ========================================================================
+    // MIGRACION_COORD_PCD_PAM_V1:
+    // Actualizar responsables de Programa de Discapacidad (Anais Murillo Arce)
+    // y Programa Adulto Mayor (Elizabeth Alvarez Trasviña) sin tocar psw.
+    // ========================================================================
+    try {
+      const [[migCoordRow]] = await poolRead.query(
+        `SELECT valor FROM configuracion_sistema WHERE clave = 'MIGRACION_COORD_PCD_PAM_V1' LIMIT 1`
+      ).catch(() => [[]]);
+
+      if (String(migCoordRow?.valor || "0").trim() !== "1") {
+        const coordUpdates = [
+          {
+            username: "discapacidad",
+            nombre: "Anais",
+            primer_ap: "Murillo",
+            segundo_ap: "Arce",
+            fullName: "Anais Murillo Arce",
+            ofiId: 30030014,
+            ofiNombre: "Programa de Discapacidad",
+            likePattern: "%DISCAPACIDAD%",
+          },
+          {
+            username: "adultomayor",
+            nombre: "Elizabeth",
+            primer_ap: "Alvarez",
+            segundo_ap: "Trasviña",
+            fullName: "Elizabeth Alvarez Trasviña",
+            ofiId: 30030007,
+            ofiNombre: "Programa de Adulto Mayor",
+            likePattern: "%ADULTO MAYOR%",
+          },
+        ];
+
+        for (const c of coordUpdates) {
+          // 1. Actualizar tabla usuario (sin tocar psw)
+          await poolOps.query(
+            `UPDATE usuario
+             SET nombre = ?, PRIMER_APELLIDO = ?, SEGUNDO_APELLIDO = ?
+             WHERE LOWER(TRIM(username)) = ?`,
+            [c.nombre, c.primer_ap, c.segundo_ap, c.username]
+          ).catch((e) => console.warn(`[MIGRACION_COORD_PCD_PAM_V1] usuario ${c.username}:`, e?.message || e));
+
+          // 2. Actualizar tabla espejo usuarios si existe (sin tocar psw/password)
+          await poolOps.query(
+            `UPDATE usuarios
+             SET nombre = ?, PRIMER_APELLIDO = ?, SEGUNDO_APELLIDO = ?
+             WHERE LOWER(TRIM(username)) = ?`,
+            [c.nombre, c.primer_ap, c.segundo_ap, c.username]
+          ).catch(async () => {
+            await poolOps.query(
+              `UPDATE usuarios SET nombre = ? WHERE LOWER(TRIM(username)) = ?`,
+              [c.fullName, c.username]
+            ).catch(() => {});
+          });
+
+          // 3. Actualizar oficial_reponsable en oficialias
+          await poolOps.query(
+            `UPDATE oficialias
+             SET oficial_reponsable = ?
+             WHERE id = ? OR UPPER(TRIM(nombre)) LIKE ?`,
+            [c.fullName, c.ofiId, c.likePattern]
+          ).catch((e) => console.warn(`[MIGRACION_COORD_PCD_PAM_V1] oficialias ${c.ofiId}:`, e?.message || e));
+
+          // 4. Asegurar y actualizar responsable / oficial_reponsable en departamentos
+          await poolOps.query(
+            `INSERT INTO departamentos (id, nombre, responsable)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE responsable = VALUES(responsable)`,
+            [c.ofiId, c.ofiNombre, c.fullName]
+          ).catch(() => {});
+          await poolOps.query(
+            `UPDATE departamentos
+             SET responsable = ?
+             WHERE id = ? OR UPPER(TRIM(nombre)) LIKE ?`,
+            [c.fullName, c.ofiId, c.likePattern]
+          ).catch(() => {});
+          await poolOps.query(
+            `UPDATE departamentos
+             SET oficial_reponsable = ?
+             WHERE id = ? OR UPPER(TRIM(nombre)) LIKE ?`,
+            [c.fullName, c.ofiId, c.likePattern]
+          ).catch(() => {});
+        }
+
+        await poolOps.query(
+          `INSERT INTO configuracion_sistema (clave, valor) VALUES ('MIGRACION_COORD_PCD_PAM_V1', '1')
+           ON DUPLICATE KEY UPDATE valor = '1'`
+        ).catch(() => {});
+
+        console.log("[MIGRACION] MIGRACION_COORD_PCD_PAM_V1 completada exitosamente.");
+      }
+    } catch (errCoord) {
+      console.warn("[WARN] MIGRACION_COORD_PCD_PAM_V1:", errCoord?.message || errCoord);
+    }
+
     SCHEMA_MIGRATED = true;
     return true;
   } catch (err) {
@@ -3512,7 +3626,7 @@ app.get("/api/auth/me", authRequired, async (req, res) => {
       nombre: r.nombre,
       primer_ap: r.PRIMER_APELLIDO,
       segundo_ap: r.SEGUNDO_APELLIDO,
-      nombre_completo: [r.nombre, r.PRIMER_APELLIDO, r.SEGUNDO_APELLIDO].filter(Boolean).join(" "),
+      nombre_completo: buildCleanFullName(r.nombre, r.PRIMER_APELLIDO, r.SEGUNDO_APELLIDO),
       rol: userRole,
       rubro_id: resolvedRubroId,
       id_oficialia: deptoId,
@@ -3768,9 +3882,11 @@ app.get("/api/usuarios", authRequired, async (req, res) => {
       const mapped = rows
         .map((r) => {
           const rolNorm = normalizeRol(r.rol, r.username);
-          const areaNombre = String(r.oficialia_nombre || r.departamento || r.nombre_completo || r.username || "").trim();
+          const cleanFull = buildCleanFullName(r.nombre, r.PRIMER_APELLIDO, r.SEGUNDO_APELLIDO) || r.nombre_completo || r.username || "";
+          const areaNombre = String(r.oficialia_nombre || r.departamento || cleanFull || r.username || "").trim();
           return {
             ...r,
+            nombre_completo: cleanFull,
             rol: rolNorm,
             oficialia_nombre: r.oficialia_nombre || r.departamento || null,
             area_nombre: areaNombre,
@@ -3812,9 +3928,11 @@ app.get("/api/usuarios", authRequired, async (req, res) => {
     );
     const mapped = rows.map((r) => {
       const rolNorm = normalizeRol(r.rol, r.username);
-      const areaNombre = String(r.oficialia_nombre || r.departamento || r.nombre_completo || r.username || "").trim();
+      const cleanFull = buildCleanFullName(r.nombre, r.PRIMER_APELLIDO, r.SEGUNDO_APELLIDO) || r.nombre_completo || r.username || "";
+      const areaNombre = String(r.oficialia_nombre || r.departamento || cleanFull || r.username || "").trim();
       return {
         ...r,
+        nombre_completo: cleanFull,
         rol: rolNorm,
         oficialia_nombre: r.oficialia_nombre || r.departamento || null,
         area_nombre: areaNombre,
@@ -3861,7 +3979,7 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil", "/api/admin/usuarios/:
     let existing = null;
     if (userId > 0) {
       const [rowsById] = await poolRead.query(
-        `SELECT id, username, rol, ID_OFICIALIA, region_id, oficina_id
+        `SELECT id, username, rol, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, departamento_id, region_id, oficina_id
          FROM usuario
          WHERE id = ? OR (id <= 0 AND LOWER(TRIM(username)) = ?)
          ORDER BY (id = ?) DESC
@@ -3871,7 +3989,7 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil", "/api/admin/usuarios/:
       existing = rowsById && rowsById[0] ? rowsById[0] : null;
     } else if (cleanBodyUsername) {
       const [rowsByUser] = await poolRead.query(
-        `SELECT id, username, rol, ID_OFICIALIA, region_id, oficina_id
+        `SELECT id, username, rol, nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO, ID_OFICIALIA, OFICIALIA_ID, departamento_id, region_id, oficina_id
          FROM usuario
          WHERE (id = ? OR ((id <= 0 OR id IS NULL) AND LOWER(TRIM(username)) = ?)) OR LOWER(TRIM(username)) = ?
          ORDER BY (id <= 0 OR id IS NULL) DESC
@@ -4005,34 +4123,59 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil", "/api/admin/usuarios/:
       [...params, origId, origId, existingUsername]
     );
 
+    // Calcular nombre completo limpio (sin duplicar apellidos) para sincronización
+    const cleanNombre = nombre !== undefined ? String(nombre || "").trim() : String(existing.nombre || "").trim();
+    const cleanAp1 = primer_apellido !== undefined ? String(primer_apellido || "").trim() : String(existing.PRIMER_APELLIDO || "").trim();
+    const cleanAp2 = segundo_apellido !== undefined ? String(segundo_apellido || "").trim() : String(existing.SEGUNDO_APELLIDO || "").trim();
+    const fullName = buildCleanFullName(cleanNombre, cleanAp1, cleanAp2);
+    const cleanCargo = cargo !== undefined ? String(cargo || "").trim() : null;
+    const nameWasEdited = nombre !== undefined || primer_apellido !== undefined || segundo_apellido !== undefined;
+
     // Sincronizar en tabla usuarios si existe
     await poolOps.query(
       `UPDATE usuarios SET ${updates.join(", ")} WHERE (id = ? AND ? > 0) OR (id <= 0 AND username = ?) LIMIT 1`,
       [...params, origId, origId, existingUsername]
-    ).catch(() => {});
-
-    // Sincronizar nombre/cargo con oficialias, regiones y oficinas si aplica
-    const cleanNombre = nombre !== undefined ? String(nombre || "").trim() : "";
-    const cleanAp1 = primer_apellido !== undefined ? String(primer_apellido || "").trim() : "";
-    const cleanAp2 = segundo_apellido !== undefined ? String(segundo_apellido || "").trim() : "";
-    const fullName = [cleanNombre, cleanAp1, cleanAp2].filter(Boolean).join(" ");
-    const cleanCargo = cargo !== undefined ? String(cargo || "").trim() : null;
-
-    if (fullName) {
-      const finalOfiId = ofiNum || existing.ID_OFICIALIA;
-      if (finalOfiId) {
-        await poolOps.query(`UPDATE oficialias SET oficial_reponsable = ? WHERE id = ?`, [fullName, finalOfiId]).catch(() => {});
+    ).catch(async () => {
+      if (fullName && nameWasEdited) {
+        await poolOps.query(
+          `UPDATE usuarios SET nombre = ? WHERE (id = ? AND ? > 0) OR LOWER(TRIM(username)) = LOWER(?) LIMIT 1`,
+          [fullName, origId, origId, existingUsername]
+        ).catch(() => {});
       }
-      if (finalRegNum) {
+    });
+
+    // Sincronizar nombre/cargo con oficialias, departamentos, regiones y oficinas si aplica
+    const effectiveRolLower = String(rol || existing.rol || "").trim().toLowerCase();
+    const isRegionalUser =
+      effectiveRolLower === "regional" ||
+      ["loscabos", "comondu", "mulege", "guerreronegro", "direccionregional"].includes(existingUsername.toLowerCase());
+
+    if (fullName && (nameWasEdited || rawOfiId !== undefined)) {
+      const finalOfiId = ofiNum || existing.ID_OFICIALIA || existing.OFICIALIA_ID || existing.departamento_id || null;
+      if (finalOfiId) {
+        await poolOps.query(
+          `UPDATE oficialias SET oficial_reponsable = ? WHERE id = ?`,
+          [fullName, finalOfiId]
+        ).catch(() => {});
+        await poolOps.query(
+          `UPDATE departamentos SET responsable = ? WHERE id = ?`,
+          [fullName, finalOfiId]
+        ).catch(() => {});
+        await poolOps.query(
+          `UPDATE departamentos SET oficial_reponsable = ? WHERE id = ?`,
+          [fullName, finalOfiId]
+        ).catch(() => {});
+      }
+      if (finalRegNum && isRegionalUser) {
         await poolOps.query(
           `UPDATE regiones SET titular = ?, cargo_titular = COALESCE(?, cargo_titular, 'Director Regional') WHERE id = ?`,
           [fullName, cleanCargo, finalRegNum]
         ).catch(() => {});
       }
-      if (finalOfiRegNum) {
+      if (finalOfiRegNum && isRegionalUser) {
         await poolOps.query(`UPDATE oficinas_regionales SET responsable = ? WHERE id = ?`, [fullName, finalOfiRegNum]).catch(() => {});
       }
-    } else if (cleanCargo && finalRegNum) {
+    } else if (cleanCargo && finalRegNum && isRegionalUser) {
       await poolOps.query(`UPDATE regiones SET cargo_titular = ? WHERE id = ?`, [cleanCargo, finalRegNum]).catch(() => {});
     }
 
@@ -4073,9 +4216,10 @@ app.put(["/api/usuarios/:id", "/api/usuarios/:id/perfil", "/api/admin/usuarios/:
 
     const updatedUser = updatedRows && updatedRows[0] ? {
       ...updatedRows[0],
+      nombre_completo: buildCleanFullName(updatedRows[0].nombre, updatedRows[0].PRIMER_APELLIDO, updatedRows[0].SEGUNDO_APELLIDO) || updatedRows[0].nombre_completo || updatedRows[0].username,
       rol: normalizeRol(updatedRows[0].rol, updatedRows[0].username),
       oficialia_nombre: updatedRows[0].oficialia_nombre || updatedRows[0].departamento || null,
-      area_nombre: String(updatedRows[0].oficialia_nombre || updatedRows[0].departamento || updatedRows[0].nombre_completo || updatedRows[0].username || "").trim(),
+      area_nombre: String(updatedRows[0].oficialia_nombre || updatedRows[0].departamento || buildCleanFullName(updatedRows[0].nombre, updatedRows[0].PRIMER_APELLIDO, updatedRows[0].SEGUNDO_APELLIDO) || updatedRows[0].username || "").trim(),
     } : null;
 
     return res.json({
@@ -4210,18 +4354,21 @@ app.post(["/api/usuarios", "/api/admin/usuarios"], authRequired, async (req, res
       ]
     ).catch(() => {});
 
-    // Sincronizar nombre/cargo con oficialias, regiones y oficinas si aplica
-    const fullName = [cleanNombre, cleanAp1, cleanAp2].filter(Boolean).join(" ");
-    if (ofiNum && (cleanCargo || fullName)) {
-      await poolOps.query(`UPDATE oficialias SET oficial_reponsable = ? WHERE id = ?`, [fullName || cleanNombre, ofiNum]).catch(() => {});
+    // Sincronizar nombre/cargo con oficialias, departamentos, regiones y oficinas si aplica
+    const fullName = buildCleanFullName(cleanNombre, cleanAp1, cleanAp2);
+    const isRegionalNew = String(rol || "").trim().toLowerCase() === "regional";
+    if (ofiNum && fullName) {
+      await poolOps.query(`UPDATE oficialias SET oficial_reponsable = ? WHERE id = ?`, [fullName, ofiNum]).catch(() => {});
+      await poolOps.query(`UPDATE departamentos SET responsable = ? WHERE id = ?`, [fullName, ofiNum]).catch(() => {});
+      await poolOps.query(`UPDATE departamentos SET oficial_reponsable = ? WHERE id = ?`, [fullName, ofiNum]).catch(() => {});
     }
-    if (regNum && (cleanCargo || fullName)) {
+    if (regNum && isRegionalNew && (cleanCargo || fullName)) {
       await poolOps.query(
         `UPDATE regiones SET titular = ?, cargo_titular = ? WHERE id = ?`,
         [fullName || cleanNombre, cleanCargo || "Director Regional", regNum]
       ).catch(() => {});
     }
-    if (ofiRegNum && (cleanCargo || fullName)) {
+    if (ofiRegNum && isRegionalNew && (cleanCargo || fullName)) {
       await poolOps.query(`UPDATE oficinas_regionales SET responsable = ? WHERE id = ?`, [fullName || cleanNombre, ofiRegNum]).catch(() => {});
     }
 
@@ -4757,13 +4904,28 @@ async function handleGetOficialias(req, res) {
   try {
     const nameCol = await detectOficialiaNameCol();
     if (!nameCol) return res.json({ ok: true, data: [] });
-    const [rows] = await poolRead.query(
-      `SELECT id, ${qi(nameCol)} AS nombre, oficial_reponsable
-       FROM oficialias
-       WHERE activo IS NULL OR activo = 1 OR activo = b'1'
-       ORDER BY ${qi(nameCol)} ASC
-       LIMIT 500`
-    );
+    let rows = [];
+    try {
+      const [r] = await poolRead.query(
+        `SELECT o.id, o.${qi(nameCol)} AS nombre,
+                COALESCE(NULLIF(TRIM(o.oficial_reponsable), ''), NULLIF(TRIM(d.responsable), '')) AS oficial_reponsable
+         FROM oficialias o
+         LEFT JOIN departamentos d ON d.id = o.id
+         WHERE o.activo IS NULL OR o.activo = 1 OR o.activo = b'1'
+         ORDER BY o.${qi(nameCol)} ASC
+         LIMIT 500`
+      );
+      rows = r;
+    } catch {
+      const [r] = await poolRead.query(
+        `SELECT id, ${qi(nameCol)} AS nombre, oficial_reponsable
+         FROM oficialias
+         WHERE activo IS NULL OR activo = 1 OR activo = b'1'
+         ORDER BY ${qi(nameCol)} ASC
+         LIMIT 500`
+      );
+      rows = r;
+    }
 
     const canSelectAny = canSelectAnyDepartment(req);
     let filtered = rows;
@@ -5497,14 +5659,43 @@ const regionKey = regionRaw.toUpperCase().replace(/[\s\/-]+/g, "_");
 const isForanea = scope.es_region_foranea || (isAdmin(req) && REGIONES_FORANEAS.has(regionKey));
 
 const cleanRegion = regionRaw ? regionRaw.slice(0, 50) : "La Paz";
+let defaultResponsableNombre = null;
+if (!nombre_solicitante_firma || !String(nombre_solicitante_firma).trim()) {
+  if (ofi) {
+    const [ofiRespRows] = await poolRead.query(
+      `SELECT COALESCE(NULLIF(TRIM(o.oficial_reponsable), ''), NULLIF(TRIM(d.responsable), '')) AS resp
+       FROM oficialias o
+       LEFT JOIN departamentos d ON d.id = o.id
+       WHERE o.id = ? LIMIT 1`,
+      [ofi]
+    ).catch(() => [[]]);
+    if (ofiRespRows?.[0]?.resp) {
+      defaultResponsableNombre = String(ofiRespRows[0].resp).trim();
+    }
+  }
+  if (!defaultResponsableNombre && uid) {
+    const [uFreshRows] = await poolRead.query(
+      `SELECT nombre, PRIMER_APELLIDO, SEGUNDO_APELLIDO FROM usuario WHERE id = ? LIMIT 1`,
+      [uid]
+    ).catch(() => [[]]);
+    if (uFreshRows?.[0]) {
+      defaultResponsableNombre = buildCleanFullName(
+        uFreshRows[0].nombre,
+        uFreshRows[0].PRIMER_APELLIDO,
+        uFreshRows[0].SEGUNDO_APELLIDO
+      );
+    }
+  }
+}
 const defaultUserFullName =
+  defaultResponsableNombre ||
   req.user?.nombre_completo ||
-  [req.user?.nombre, req.user?.primer_ap, req.user?.segundo_ap].filter(Boolean).join(" ") ||
+  buildCleanFullName(req.user?.nombre, req.user?.primer_ap, req.user?.segundo_ap) ||
   req.user?.username ||
   null;
 const cleanNombreFirma = nombre_solicitante_firma && String(nombre_solicitante_firma).trim()
   ? String(nombre_solicitante_firma).trim().slice(0, 150)
-  : defaultUserFullName;
+  : (defaultUserFullName ? String(defaultUserFullName).slice(0, 150) : null);
 const rawFirmaInput = firma_solicitante || firma_solicitante_data || null;
 const esForaneo = isRegionForaneaObligatoriaFirma(cleanRegion);
 
@@ -8113,20 +8304,47 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
     let solicitud;
     {
       const deptoCol = await detectUsuarioDepartamentoCol();
-      const [r] = await poolRead.query(
-        `SELECT s.*,
-          s.id_oficialia AS id_oficialia,
-          u.username,
-          ${deptoCol ? `u.${qi(deptoCol)} AS departamento,` : `NULL AS departamento,`}
-          CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_usuario,
-          COALESCE(o.nombre, 'Sin Área') AS oficialia_nombre,
-          COALESCE(o.oficial_reponsable, '') AS encargado_area
-        FROM solicitudes s
-        LEFT JOIN oficialias o ON o.id = s.id_oficialia
-        LEFT JOIN usuario u ON u.id = s.usuario_id
-        WHERE s.id = ? LIMIT 1`,
-        [id]
-      );
+      let r = [];
+      try {
+        const [rowsPdf] = await poolRead.query(
+          `SELECT s.*,
+            s.id_oficialia AS id_oficialia,
+            u.username,
+            u.nombre AS usuario_nombre,
+            u.PRIMER_APELLIDO AS usuario_primer_apellido,
+            u.SEGUNDO_APELLIDO AS usuario_segundo_apellido,
+            ${deptoCol ? `u.${qi(deptoCol)} AS departamento,` : `NULL AS departamento,`}
+            CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_usuario,
+            COALESCE(o.nombre, 'Sin Área') AS oficialia_nombre,
+            COALESCE(NULLIF(TRIM(o.oficial_reponsable), ''), NULLIF(TRIM(dep.responsable), ''), '') AS encargado_area
+          FROM solicitudes s
+          LEFT JOIN oficialias o ON o.id = s.id_oficialia
+          LEFT JOIN departamentos dep ON dep.id = s.id_oficialia
+          LEFT JOIN usuario u ON u.id = s.usuario_id
+          WHERE s.id = ? LIMIT 1`,
+          [id]
+        );
+        r = rowsPdf;
+      } catch {
+        const [rowsPdf] = await poolRead.query(
+          `SELECT s.*,
+            s.id_oficialia AS id_oficialia,
+            u.username,
+            u.nombre AS usuario_nombre,
+            u.PRIMER_APELLIDO AS usuario_primer_apellido,
+            u.SEGUNDO_APELLIDO AS usuario_segundo_apellido,
+            ${deptoCol ? `u.${qi(deptoCol)} AS departamento,` : `NULL AS departamento,`}
+            CONCAT_WS(' ', u.nombre, u.PRIMER_APELLIDO, u.SEGUNDO_APELLIDO) AS nombre_usuario,
+            COALESCE(o.nombre, 'Sin Área') AS oficialia_nombre,
+            COALESCE(o.oficial_reponsable, '') AS encargado_area
+          FROM solicitudes s
+          LEFT JOIN oficialias o ON o.id = s.id_oficialia
+          LEFT JOIN usuario u ON u.id = s.usuario_id
+          WHERE s.id = ? LIMIT 1`,
+          [id]
+        );
+        r = rowsPdf;
+      }
       if (!r.length) return httpError(res, 404, "Solicitud no encontrada");
       solicitud = r[0];
       if (!solicitud.oficialia_nombre) {
@@ -8194,8 +8412,18 @@ app.get("/api/solicitudes/:id/pdf", authRequired, async (req, res) => {
     const solicitaDepto = regionSolicitante
       ? `${solicitaDeptoBase} - ${regionSolicitante}`
       : solicitaDeptoBase;
+    const nombreUsuarioLimpio = buildCleanFullName(
+      solicitud.usuario_nombre,
+      solicitud.usuario_primer_apellido,
+      solicitud.usuario_segundo_apellido
+    );
     const solicitaEncargado = String(
-      solicitud.nombre_solicitante_firma || solicitud.encargado_area || solicitud.nombre_usuario || pickUsuarioServer(solicitud) || ""
+      solicitud.nombre_solicitante_firma ||
+      solicitud.encargado_area ||
+      nombreUsuarioLimpio ||
+      solicitud.nombre_usuario ||
+      pickUsuarioServer(solicitud) ||
+      ""
     ).trim();
 
     // Datos para las 5 firmas de Vale de Suministro:

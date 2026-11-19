@@ -169,18 +169,20 @@
     if (uName === 'GABRIELFIOL' || uName === 'FIOL' || uName === 'ENCARGADO') {
       return 'Gabriel Adán Fiol Collins';
     }
-    const full = safestr(
-      CURRENT_USER.nombre_completo ||
-      [
-        CURRENT_USER.nombre || CURRENT_USER.NOMBRE,
-        CURRENT_USER.PRIMER_APELLIDO || CURRENT_USER.primer_apellido || CURRENT_USER.primer_ap,
-        CURRENT_USER.SEGUNDO_APELLIDO || CURRENT_USER.segundo_apellido || CURRENT_USER.segundo_ap
-      ].filter(Boolean).join(' ') ||
-      CURRENT_USER.nombre ||
-      CURRENT_USER.username ||
-      ''
-    );
-    return full;
+    const n = safestr(CURRENT_USER.nombre || CURRENT_USER.NOMBRE);
+    const a1 = safestr(CURRENT_USER.PRIMER_APELLIDO || CURRENT_USER.primer_apellido || CURRENT_USER.primer_ap);
+    const a2 = safestr(CURRENT_USER.SEGUNDO_APELLIDO || CURRENT_USER.segundo_apellido || CURRENT_USER.segundo_ap);
+    let built = '';
+    if (n) {
+      const nNorm = norm(n);
+      const parts = [n];
+      if (a1 && !nNorm.includes(norm(a1))) parts.push(a1);
+      if (a2 && !nNorm.includes(norm(a2))) parts.push(a2);
+      built = parts.join(' ').replace(/\s+/g, ' ').trim();
+    } else {
+      built = [a1, a2].filter(Boolean).join(' ').trim();
+    }
+    return safestr(built || CURRENT_USER.nombre_completo || CURRENT_USER.username || '');
   }
 
   function renderPruebaBadge(esPrueba) {
@@ -5560,11 +5562,21 @@
 
       toast(isEditing ? '✓ Perfil de usuario actualizado correctamente' : '✓ Usuario creado exitosamente', true);
       closeEditUsuarioModal();
-      await loadUsuariosAdmin();
+      await Promise.all([
+        loadUsuariosAdmin(),
+        loadSolicitudUsers(),
+        loadSolicitudOficialias()
+      ]);
 
       if (isEditing && ((id > 0 && Number(CURRENT_USER?.id) === id) || (username && norm(CURRENT_USER?.username) === norm(username)))) {
+        if (res?.user) {
+          CURRENT_USER = { ...CURRENT_USER, ...res.user };
+        }
         await fetchUiConfig();
         applyPermassions();
+      }
+      if (!SOL_ID && !SOL_DRAFT_ACTIVE) {
+        syncDefaultNombreFirmaFromOficialia(true);
       }
     } catch (e) {
       if (msg) {
