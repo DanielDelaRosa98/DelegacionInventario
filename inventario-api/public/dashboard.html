@@ -226,12 +226,12 @@
                 </div>
               </div>
 
-              <!-- Pad de Firma Digital del Solicitante (Obligatorio para toda Solicitud de Material) -->
+              <!-- Pad de Firma Digital del Solicitante (Obligatoria solo para Regiones Foráneas; Opcional para el resto) -->
               <div id="sol_firma_card_wrap" class="sig-pad-card" style="margin-top:14px;">
                 <div class="sig-pad-header">
                   <div>
-                    <div class="sig-pad-title">✍️ Firma Digital del Solicitante * (Obligatoria para envío a Almacén — Gabriel Adán Fiol Collins)</div>
-                    <div class="muted" style="font-size:12px;">Dibuja tu firma digital en el recuadro o adjunta tu firma en imagen PNG antes de continuar.</div>
+                    <div id="sol_firma_title" class="sig-pad-title">✍️ Firma Digital del Solicitante (Opcional)</div>
+                    <div id="sol_firma_subtitle" class="muted" style="font-size:12px;">Puedes dibujar tu firma digital o adjuntar una imagen PNG si lo deseas, o continuar sin firmar.</div>
                   </div>
                   <span id="sol_firma_status_badge" class="status-badge status-pendiente">Sin firma capturada</span>
                 </div>
@@ -2167,7 +2167,7 @@
     </main>
   </div>
  
-  <script src="/app.js?v=62"></script>
+  <script src="/app.js?v=63"></script>
 
   <script>
     // Filtro de seguridad rápido para evitar parpadeos si no hay sesión

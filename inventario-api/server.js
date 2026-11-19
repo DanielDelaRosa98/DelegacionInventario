@@ -3653,10 +3653,14 @@ res.json({ ok: true });
 
 app.get("/api/stock", authRequired, async (req, res) => {
   try {
+    const admin = isAdminDemo(req);
+    const canAlmacen = hasAlmacenAccess(req);
+    const isNormalUser = !admin && !canAlmacen;
+
     const { q = "", page = 1, limit = 500 } = req.query;
     const off = (Math.max(parseInt(page) || 1, 1) - 1) * (parseInt(limit) || 500);
     const like = `%${q}%`;
-    const [rows] = await poolRead.query(
+    const [rawRows] = await poolRead.query(
       `SELECT 
          a.ID AS id,
          a.ID AS producto_id,
@@ -3684,6 +3688,17 @@ app.get("/api/stock", authRequired, async (req, res) => {
        LIMIT ? OFFSET ?`,
       [q, like, like, like, parseInt(limit) || 500, off]
     );
+    const rows = isNormalUser
+      ? rawRows.map((r) => ({
+          ...r,
+          stock: null,
+          stock_almacen: null,
+          exist_calc: null,
+          cantidad_disponible: null,
+          existencia: null,
+          disponible: true,
+        }))
+      : rawRows;
     return res.json({ ok: true, data: rows });
   } catch (e) {
     return httpError(res, e.statusCode || 500, e.message);
@@ -5534,6 +5549,27 @@ function isRegionForaneaObligatoriaFirma(regionStr) {
   return normStr.includes("los cabos") || normStr.includes("mulege") || normStr.includes("comondu");
 }
 
+function isAuthenticatedUserRegionalForaneo(req, scope = null) {
+  const uRol = normalizeRol(req.user?.rol, req.user?.username);
+  const uName = String(req.user?.username || "").trim().toLowerCase();
+  if (uRol === "ADMIN" || ["admin", "gabrielfiol", "fiol", "encargado"].includes(uName)) {
+    return false;
+  }
+  if (["loscabos", "mulege", "comondu", "guerreronegro"].includes(uName)) {
+    return true;
+  }
+  const regClave = String(scope?.region_clave || req.user?.region_clave || "").trim().toUpperCase();
+  if (["LOS_CABOS", "MULEGE", "COMONDU", "COMONDU_LORETO"].includes(regClave)) {
+    return true;
+  }
+  const regId = Number(scope?.region_id || req.user?.region_id || 0);
+  if ([2, 3, 4].includes(regId)) {
+    return true;
+  }
+  const regNombre = String(scope?.region_nombre || req.user?.region_nombre || req.user?.region || "").trim();
+  return Boolean(scope?.es_region_foranea || isRegionForaneaObligatoriaFirma(regNombre));
+}
+
 app.post("/api/solicitudes", authRequired, async (req, res) => {
 try {
 await ensureSchemaAndUsers();
@@ -5697,7 +5733,7 @@ const cleanNombreFirma = nombre_solicitante_firma && String(nombre_solicitante_f
   ? String(nombre_solicitante_firma).trim().slice(0, 150)
   : (defaultUserFullName ? String(defaultUserFullName).slice(0, 150) : null);
 const rawFirmaInput = firma_solicitante || firma_solicitante_data || null;
-const esForaneo = isRegionForaneaObligatoriaFirma(cleanRegion);
+const esForaneo = isAuthenticatedUserRegionalForaneo(req, scope);
 
 let cleanFirmaData = null;
 if (rawFirmaInput && String(rawFirmaInput).trim()) {
@@ -5760,25 +5796,7 @@ try {
       throw new Error(`Producto no encontrado para clave: ${it.clave || it.producto_id || 'desconocida'}`);
     }
 
-    // Validar disponibilidad real en almacén
-    if (tipo_solicitud === "CONSUMIBLES" || !tipo_solicitud) {
-      let almRow = null;
-      if (it.clave) {
-        const [ar] = await conn.query(`SELECT CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil WHERE CLAVE = ? LIMIT 1`, [it.clave]);
-        if (ar.length) almRow = ar[0];
-      }
-      if (!almRow && prodId) {
-        const [pr] = await conn.query(`SELECT CLAVE, DESCRIPCION FROM productos WHERE id = ? LIMIT 1`, [prodId]);
-        if (pr.length && pr[0].CLAVE) {
-          const [ar] = await conn.query(`SELECT CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil WHERE CLAVE = ? LIMIT 1`, [pr[0].CLAVE]);
-          if (ar.length) almRow = ar[0];
-        }
-      }
-      if (almRow && Number(almRow.STOCK || 0) < cantidad) {
-        throw new Error(`La cantidad solicitada para "${almRow.DESCRIPCION}" supera la disponibilidad actual.`);
-      }
-    }
-
+    // Permitir solicitar cualquier producto activo independientemente de su existencia actual en almacén (la validación estricta ocurre al surtir/entregar).
     const itemObs = it.observaciones || null;
 
     await conn.query(
@@ -5837,7 +5855,8 @@ app.post("/api/solicitudes/:id/firma", authRequired, async (req, res) => {
     const cleanRegion = region_solicitante != null && String(region_solicitante).trim() !== ""
       ? String(region_solicitante).trim().slice(0, 50)
       : (sol.region_solicitante || req.user?.region || "");
-    const esForaneo = isRegionForaneaObligatoriaFirma(cleanRegion);
+    const scopeFirma = await getUserScope(req);
+    const esForaneo = isAuthenticatedUserRegionalForaneo(req, scopeFirma);
 
     const rawFirma = firma_solicitante || firma_solicitante_data || null;
     let cleanFirmaData = null;
@@ -6147,10 +6166,10 @@ async function surtirSolicitudHandler(req, res) {
 
         if (rawAt > 0 && Number(sol.inventario_descontado || 0) === 0 && (!almInfo || curStock < rawAt)) {
           await conn.rollback();
-          if (curStock <= 0) {
-            return httpError(res, 400, `No hay stock disponible para ${nombre} (Existencia actual: 0)`);
+          if (!almInfo || curStock <= 0) {
+            return httpError(res, 400, `No hay existencia en inventario para ${nombre} (Existencia actual: 0). Agrega stock en Almacén primero o coloca 0 en cantidad surtida.`);
           } else {
-            return httpError(res, 400, `Stock insuficiente para ${nombre}. Solicitado a surtir: ${rawAt}, Existencia disponible: ${curStock}`);
+            return httpError(res, 400, `Stock insuficiente para ${nombre}. Solicitado a surtir: ${rawAt}, Existencia disponible: ${curStock}.`);
           }
         }
         plan.push({ item, targetDet, nombre, clave, almInfo, curStock, nextAtendida: rawAt });
@@ -6159,11 +6178,6 @@ async function surtirSolicitudHandler(req, res) {
       if (!plan.length && detRows.length > 0) {
         await conn.rollback();
         return httpError(res, 400, "Ninguno de los renglones enviados pertenece a esta solicitud.");
-      }
-
-      if (plan.length > 0 && ["PARA_FIRMAS", "COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus) && plan.every(p => p.nextAtendida === 0)) {
-        await conn.rollback();
-        return httpError(res, 400, "Todas las cantidades a surtir están en 0. Ingresa al menos 1 artículo a entregar.");
       }
 
       // Actualizar y congelar cantidad_surtida y observaciones en detalles_solicitud ÚNICAMENTE al cerrar el Paso 2 (hacia PARA_FIRMAS)
@@ -6183,6 +6197,7 @@ async function surtirSolicitudHandler(req, res) {
       // En producción solo se descuenta stock cuando pasa a estatus final de entrega
       const isFinalDeliveredStatus = ["COMPLETADA", "SURTIDA", "ENTREGADA", "ENTREGADO", "SURTIDO"].includes(String(nextStatus).toUpperCase());
       const shouldDeductNow = isFinalDeliveredStatus && Number(sol.inventario_descontado || 0) === 0;
+      let deductedTotal = 0;
 
       if (shouldDeductNow) {
         for (const p of plan) {
@@ -6190,6 +6205,7 @@ async function surtirSolicitudHandler(req, res) {
           if (nextAtendida > 0 && clave && almInfo) {
             const newStock = Math.max(0, almInfo.stock - nextAtendida);
             almInfo.stock = newStock;
+            deductedTotal += nextAtendida;
             await conn.query("UPDATE almacen_dregcivil SET STOCK = ? WHERE ID = ?", [newStock, almInfo.id]);
             try {
               await conn.query("UPDATE productos SET STOCK = GREATEST(0, COALESCE(STOCK, 0) - ?) WHERE CLAVE = ?", [nextAtendida, clave]);
@@ -6211,10 +6227,12 @@ async function surtirSolicitudHandler(req, res) {
             });
           }
         }
-        await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
+        if (deductedTotal > 0) {
+          await syncAlmacenCentralToInventarioRegional(conn).catch(() => {});
+        }
       }
 
-      const nextInvDescontado = shouldDeductNow ? 1 : Number(sol.inventario_descontado || 0);
+      const nextInvDescontado = (shouldDeductNow && deductedTotal > 0) ? 1 : Number(sol.inventario_descontado || 0);
       if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus)) {
         await conn.query(
           "UPDATE solicitudes SET status = ?, inventario_descontado = ?, fecha_surtido = CURDATE() WHERE id = ?",
@@ -6370,6 +6388,7 @@ res.json({
   status: result.status,
   restored_qty: result.restoredQty || 0,
   deducted_qty: result.deductedQty || 0,
+  inventario_descontado: result.inventarioDescontado ? 1 : 0,
   es_prueba: result.esPrueba ? 1 : 0,
 });
 } catch (e) {
@@ -6803,7 +6822,7 @@ const pk = await detectProductosPK();
 const whereSolicitud = solicitudId == null ? "" : " AND ds.solicitud_id=?";
 const params = solicitudId == null ? [detalleId] : [detalleId, solicitudId];
 const [rows] = await conn.query(
-`SELECT ds.id, ds.solicitud_id, ds.producto_id, ds.cantidad, ds.cantidad_surtida, ds.atendida, p.CLAVE AS clave
+`SELECT ds.id, ds.solicitud_id, ds.producto_id, ds.cantidad, ds.cantidad_surtida, ds.atendida, p.CLAVE AS clave, p.DESCRIPCION AS descripcion
 FROM detalles_solicitud ds
 LEFT JOIN productos p ON p.${qi(pk)} = ds.producto_id
 WHERE ds.id=?${whereSolicitud}
@@ -6849,10 +6868,36 @@ const prevAtendida = Number(row.cantidad_surtida ?? row.atendida ?? 0);
 const rawNext = "cantidad_surtida" in data ? data.cantidad_surtida : ("atendida" in data ? data.atendida : prevAtendida);
 const nextAtendida = Number(rawNext);
 const cantidadSolicitada = Number(row.cantidad || 0);
+if (!Number.isInteger(nextAtendida) || nextAtendida < 0) {
+  const err = new Error("La cantidad surtida debe ser un número entero mayor o igual a 0.");
+  err.statusCode = 400;
+  throw err;
+}
 if (nextAtendida > cantidadSolicitada) {
-const err = new Error(`La cantidad surtida no puede ser mayor que la solicitada (${cantidadSolicitada})`);
-err.statusCode = 400;
-throw err;
+  const err = new Error(`La cantidad surtida no puede ser mayor que la solicitada (${cantidadSolicitada})`);
+  err.statusCode = 400;
+  throw err;
+}
+
+// Validar existencia real en almacén cuando cantidad_surtida > 0 (si es 0 se permite siempre)
+if (nextAtendida > 0 && row.clave) {
+  const [almRows] = await conn.query(
+    `SELECT ID, CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil WHERE CLAVE = ? LIMIT 1 FOR UPDATE`,
+    [row.clave]
+  );
+  const almRow = almRows[0] || null;
+  const curStock = almRow ? Number(almRow.STOCK ?? 0) : 0;
+  const nombre = row.descripcion || almRow?.DESCRIPCION || row.clave || `renglón ${row.id}`;
+  if (!almRow || curStock <= 0) {
+    const err = new Error(`No hay existencia en inventario para ${nombre} (Existencia actual: 0). Agrega stock en Almacén primero o coloca 0 en cantidad surtida.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  if (nextAtendida > curStock) {
+    const err = new Error(`Stock insuficiente para ${nombre}. Solicitado a surtir: ${nextAtendida}, Existencia disponible: ${curStock}.`);
+    err.statusCode = 400;
+    throw err;
+  }
 }
 
 // Lógica Físico Estricto (Almacén General Fiol): No se descuenta stock en Paso 1, 2 ni 3.
@@ -6936,10 +6981,12 @@ let deductedQty = 0;
 let nextInvDescontado = Number(sol.inventario_descontado || 0);
 
 const pk = await detectProductosPK();
-const isFinalDelivered = ["COMPLETADA", "SURTIDA", "ENTREGADA", "ENTREGADO", "SURTIDO"].includes(String(nextStatus).toUpperCase());
+const nextStatusUpper = String(nextStatus).toUpperCase();
+const isStep3ParaFirmas = ["PARA_FIRMAS", "PASO_3"].includes(nextStatusUpper);
+const isFinalDelivered = ["COMPLETADA", "SURTIDA", "ENTREGADA", "ENTREGADO", "SURTIDO"].includes(nextStatusUpper);
 
-// Si pasa a COMPLETADA / SURTIDA / ENTREGADA y aún no se ha descontado inventario (Modelo Físico Estricto)
-if (isFinalDelivered && nextInvDescontado === 0) {
+// Validar stock en tiempo real tanto al pasar a Paso 3 (PARA_FIRMAS) como al entregar en Paso 4 (COMPLETADA/SURTIDA/ENTREGADA)
+if ((isStep3ParaFirmas || isFinalDelivered) && nextInvDescontado === 0) {
   const [detRows] = await conn.query(
     `SELECT ds.id, ds.cantidad, ds.cantidad_surtida, ds.atendida, p.CLAVE AS clave, p.DESCRIPCION AS descripcion
      FROM detalles_solicitud ds
@@ -6949,32 +6996,64 @@ if (isFinalDelivered && nextInvDescontado === 0) {
     [solicitudId]
   );
 
+  // 1. Validación estricta previa de existencias para cada renglón con cantidad_surtida > 0 (si es 0 se permite siempre)
+  const rowsPlan = [];
   for (const row of detRows) {
     const cantSurtir = Number(
       row.cantidad_surtida !== null && row.cantidad_surtida !== undefined
         ? row.cantidad_surtida
-        : (Number(row.atendida || 0) > 0 ? row.atendida : row.cantidad || 0)
+        : (row.atendida !== null && row.atendida !== undefined ? row.atendida : (row.cantidad || 0))
     );
-    if (!(cantSurtir > 0)) continue;
+    if (!(cantSurtir > 0)) {
+      rowsPlan.push({ row, cantSurtir: 0 });
+      continue;
+    }
     if (!row.clave) {
       const err = new Error("No se pudo resolver la CLAVE del detalle");
       err.statusCode = 400;
       throw err;
     }
-    await applySolicitudStockDeltaForClave(conn, {
-      clave: row.clave,
-      delta: cantSurtir,
-      responsable: username,
-      referencia: `SOL-${solicitudId}`,
-      observaciones: observaciones || "Entrega completada de solicitud",
-    });
-    deductedQty += cantSurtir;
-    await conn.query(
-      `UPDATE detalles_solicitud SET cantidad_surtida = COALESCE(cantidad_surtida, ?), atendida = ? WHERE id = ?`,
-      [cantSurtir, cantSurtir, row.id]
+    const [almRows] = await conn.query(
+      `SELECT ID, CLAVE, DESCRIPCION, STOCK FROM almacen_dregcivil WHERE CLAVE = ? LIMIT 1 FOR UPDATE`,
+      [row.clave]
     );
+    const almRow = almRows[0] || null;
+    const curStock = almRow ? Number(almRow.STOCK ?? 0) : 0;
+    const nombre = row.descripcion || almRow?.DESCRIPCION || row.clave || `renglón ${row.id}`;
+    if (!almRow || curStock <= 0) {
+      const err = new Error(`No hay existencia en inventario para ${nombre} (Existencia actual: 0). Agrega stock en Almacén primero o coloca 0 en cantidad surtida.`);
+      err.statusCode = 400;
+      throw err;
+    }
+    if (cantSurtir > curStock) {
+      const err = new Error(`Stock insuficiente para ${nombre}. Solicitado a surtir: ${cantSurtir}, Existencia disponible: ${curStock}.`);
+      err.statusCode = 400;
+      throw err;
+    }
+    rowsPlan.push({ row, cantSurtir });
   }
-  nextInvDescontado = 1;
+
+  // 2. Descontar del inventario SOLO al completar/entregar (Paso 4) y únicamente renglones con cantSurtir > 0
+  if (isFinalDelivered) {
+    for (const { row, cantSurtir } of rowsPlan) {
+      if (!(cantSurtir > 0)) continue;
+      await applySolicitudStockDeltaForClave(conn, {
+        clave: row.clave,
+        delta: cantSurtir,
+        responsable: username,
+        referencia: `SOL-${solicitudId}`,
+        observaciones: observaciones || "Entrega completada de solicitud",
+      });
+      deductedQty += cantSurtir;
+      await conn.query(
+        `UPDATE detalles_solicitud SET cantidad_surtida = COALESCE(cantidad_surtida, ?), atendida = ? WHERE id = ?`,
+        [cantSurtir, cantSurtir, row.id]
+      );
+    }
+    if (deductedQty > 0) {
+      nextInvDescontado = 1;
+    }
+  }
 }
 
 if (nextStatus === cancelStatus && prevStatus !== cancelStatus) {
@@ -7029,7 +7108,7 @@ if (["COMPLETADA", "SURTIDA", "ENTREGADA"].includes(nextStatus)) {
 }
 
 await conn.commit();
-return { status: nextStatus, restoredQty, deductedQty, esPrueba: false };
+return { status: nextStatus, restoredQty, deductedQty, inventarioDescontado: nextInvDescontado === 1, esPrueba: false };
 } catch (e) {
 await conn.rollback();
 throw e;
@@ -7094,7 +7173,7 @@ async function getNextAlmacenClave(connOrPool = poolRead) {
 
 // GET /api/almacen: LECTURA abierta a CUALQUIER usuario autenticado (USUARIO, REGIONAL, ENCARGADO, ADMIN).
 // La usa buscarProductos() para llenar el selector de materiales al crear una solicitud.
-// Para usuarios sin acceso de almacén solo se devuelven materiales activos con existencia (STOCK > 0).
+// Para usuarios sin acceso de almacén se devuelven TODOS los materiales activos (incluyendo STOCK = 0) sin exponer existencias.
 // Las rutas de escritura (POST/PATCH/DELETE) siguen restringidas a admin / encargados de almacén.
 app.get("/api/almacen", authRequired, async (req, res) => {
 try {
@@ -7124,7 +7203,7 @@ if (!isNormalUser) {
 
 let extraWhere = clave ? " AND a.CLAVE = ?" : "";
 if (isNormalUser) {
-  extraWhere += " AND a.STOCK > 0" + (hasEstado && almStatusCol ? ` AND (a.${qi(almStatusCol)} IS NULL OR a.${qi(almStatusCol)} = 'ACTIVO')` : "");
+  extraWhere += (hasEstado && almStatusCol ? ` AND (a.${qi(almStatusCol)} IS NULL OR a.${qi(almStatusCol)} = 'ACTIVO')` : "");
 }
 const extraParam = clave ? [clave] : [];
 
@@ -7181,11 +7260,19 @@ LIMIT ? OFFSET ?`,
 );
 const rows = rawRows.map((r) => {
   const resolvedCat = resolveCategoriaTexto(r.CATEGORIA, r.CATEGORIA_NOMBRE, catMap);
-  return {
+  const baseRow = {
     ...r,
     CATEGORIA_NOMBRE: resolvedCat,
     CATEGORIA: /^\d+$/.test(String(r.CATEGORIA ?? "").trim()) ? resolvedCat : r.CATEGORIA,
   };
+  if (isNormalUser) {
+    baseRow.STOCK = null;
+    baseRow.stock = null;
+    baseRow.existencia = null;
+    baseRow.cantidad_disponible = null;
+    baseRow.disponible = true;
+  }
+  return baseRow;
 });
 return res.json({ ok: true, data: rows, next_clave: nextClave });
 } catch (e) {

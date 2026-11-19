@@ -500,6 +500,30 @@
     return normStr.includes("los cabos") || normStr.includes("mulege") || normStr.includes("comondu");
   }
 
+  function isCurrentUserRegionalForaneo() {
+    const p = uiPerms();
+    const scope = UI_PERMISOS?.scope || {};
+    const uName = String(CURRENT_USER?.username || UI_PERMISOS?.user || '').trim().toLowerCase();
+    const uRol = String(CURRENT_USER?.rol || UI_PERMISOS?.rol || '').trim().toUpperCase();
+    // Admin, encargados y departamentos de La Paz NO están obligados a firmar digitalmente
+    if (p.admin || uRol === 'ADMIN' || ['admin', 'gabrielfiol', 'fiol', 'encargado'].includes(uName)) {
+      return false;
+    }
+    if (['loscabos', 'mulege', 'comondu', 'guerreronegro'].includes(uName)) {
+      return true;
+    }
+    const regCod = String(scope.region_clave || scope.region_codigo || p.region_codigo || '').trim().toUpperCase();
+    if (['LOS_CABOS', 'MULEGE', 'COMONDU', 'COMONDU_LORETO'].includes(regCod)) {
+      return true;
+    }
+    const regId = Number(scope.region_id || p.region_id || CURRENT_USER?.region_id || 0);
+    if ([2, 3, 4].includes(regId)) {
+      return true;
+    }
+    const regName = String(scope.region_nombre || CURRENT_USER?.region_nombre || '').trim();
+    return Boolean(scope.es_region_foranea || isRegionForaneaObligatoriaFirma(regName));
+  }
+
   function syncSolicitudFirmaVisibility() {
     const p = uiPerms();
     const scope = UI_PERMISOS?.scope || {};
@@ -525,10 +549,20 @@
 
     const selectedRegion = safestr(regSel?.value || userRegionLabel);
     const isSelectedForeign = ['los cabos', 'mulegé', 'mulege', 'comondú / loreto', 'comondu / loreto'].includes(selectedRegion.toLowerCase());
+    const isUserForaneo = isCurrentUserRegionalForaneo();
 
-    // v61: Firma digital SIEMPRE visible y obligatoria para TODOS los usuarios al crear una solicitud de almacén
     if (firmaCard) firmaCard.classList.remove('hidden');
     if (nombreWrap) nombreWrap.classList.remove('hidden');
+
+    const firmaTitle = $('sol_firma_title') || firmaCard?.querySelector('.sig-pad-title');
+    const firmaSubtitle = $('sol_firma_subtitle') || firmaCard?.querySelector('.sig-pad-header .muted');
+    if (isUserForaneo) {
+      if (firmaTitle) firmaTitle.textContent = '✍️ Firma Digital del Solicitante * (Obligatoria para envío a Almacén — Gabriel Adán Fiol Collins)';
+      if (firmaSubtitle) firmaSubtitle.textContent = 'Dibuja tu firma digital en el recuadro o adjunta tu firma en imagen PNG antes de continuar.';
+    } else {
+      if (firmaTitle) firmaTitle.textContent = '✍️ Firma Digital del Solicitante (Opcional)';
+      if (firmaSubtitle) firmaSubtitle.textContent = 'Puedes dibujar tu firma digital o adjuntar una imagen PNG si lo deseas, o continuar sin firmar.';
+    }
 
     const nameIn = $('sol_nombre_firma');
     if (nameIn) {
@@ -1747,7 +1781,7 @@
       $('sol_nombre_firma')?.focus();
       return;
     }
-    const esForaneo = isRegionForaneaObligatoriaFirma(regionSol);
+    const esForaneo = isCurrentUserRegionalForaneo();
     const hasSig = Boolean(SOL_SIG_PAD && SOL_SIG_PAD.hasSignature());
     const firmaData = hasSig ? (SOL_SIG_PAD.getDataUrl() || null) : null;
     if (esForaneo && (!firmaData || !hasSig)) {
@@ -1790,42 +1824,33 @@
         almRows = ja.data || [];
       } catch {}
 
-      almRows.filter(r => (Number(r.STOCK ?? r.stock ?? r.existencia ?? r.cantidad_disponible ?? 0) > 0) || r.disponible === true).forEach(r=>{
-        const stock = Number(r.STOCK ?? r.stock ?? r.existencia ?? r.cantidad_disponible ?? 0);
-        const uniTxt = (r.UNIDAD ?? r.unidad) ? ` (${r.UNIDAD ?? r.unidad})` : '';
-        const catTxt = (r.CATEGORIA_NOMBRE ?? r.CATEGORIA ?? r.categoria) ? ` [${r.CATEGORIA_NOMBRE ?? r.CATEGORIA ?? r.categoria}]` : '';
-        const txt = `${r.DESCRIPCION ?? r.descripcion ?? ''}${catTxt}${uniTxt}`;
+      const isActiveRow = (r) => {
+        const st = String(r.status ?? r.STATUS ?? r.estado ?? r.ESTADO ?? 'ACTIVO').trim().toUpperCase();
+        return !st || st === 'ACTIVO';
+      };
+
+      const appendProductOption = (r) => {
+        const descClean = String(r.DESCRIPCION ?? r.descripcion ?? '').trim();
+        const uniClean = String(r.UNIDAD ?? r.unidad ?? '').trim();
+        const txt = uniClean ? `${descClean} (${uniClean})` : descClean;
         const opt = document.createElement('option');
-        opt.value = r.CLAVE ?? r.clave ?? ''; opt.textContent = txt;
+        opt.value = r.CLAVE ?? r.clave ?? '';
+        opt.textContent = txt;
         opt.dataset.source = 'almacen';
         opt.dataset.clave = r.CLAVE ?? r.clave ?? '';
-        opt.dataset.desc = r.DESCRIPCION ?? r.descripcion ?? '';
+        opt.dataset.desc = descClean;
         opt.dataset.cat = r.CATEGORIA_NOMBRE ?? r.CATEGORIA ?? r.categoria ?? '';
-        opt.dataset.unidad = r.UNIDAD ?? r.unidad ?? '';
+        opt.dataset.unidad = uniClean;
         opt.dataset.prodId = r.producto_id ?? r.PRODUCTO_ID ?? '';
-        opt.dataset.stock = String(stock);
         sel.appendChild(opt);
-      });
+      };
+
+      almRows.filter(isActiveRow).forEach(appendProductOption);
 
       if (!sel.options.length || sel.options.length <= 1){
         try{
           const js = await apiJSON(`/api/stock?q=${encodeURIComponent(q)}&page=1&limit=500`);
-          (js.data||[]).filter(r => (Number(r.stock_almacen ?? r.stock_producto ?? r.exist_calc ?? r.stock ?? r.existencia ?? r.cantidad_disponible ?? 0) > 0) || r.disponible === true).forEach(r=>{
-            const stock = Number(r.stock_almacen ?? r.stock_producto ?? r.exist_calc ?? r.stock ?? r.existencia ?? r.cantidad_disponible ?? 0);
-            const uniTxt = (r.unidad ?? r.UNIDAD) ? ` (${r.unidad ?? r.UNIDAD})` : '';
-            const catTxt = (r.categoria ?? r.CATEGORIA_NOMBRE ?? r.CATEGORIA) ? ` [${r.categoria ?? r.CATEGORIA_NOMBRE ?? r.CATEGORIA}]` : '';
-            const txt = `${r.DESCRIPCION ?? r.descripcion ?? ''}${catTxt}${uniTxt}`;
-            const opt = document.createElement('option');
-            opt.value = r.CLAVE ?? r.clave ?? ''; opt.textContent = txt;
-            opt.dataset.source = 'almacen';
-            opt.dataset.clave = r.CLAVE ?? r.clave ?? '';
-            opt.dataset.desc = r.DESCRIPCION ?? r.descripcion ?? '';
-            opt.dataset.cat = r.categoria ?? r.CATEGORIA_NOMBRE ?? r.CATEGORIA ?? '';
-            opt.dataset.unidad = r.unidad ?? r.UNIDAD ?? '';
-            opt.dataset.prodId = r.producto_id ?? r.PRODUCTO_ID ?? '';
-            opt.dataset.stock = String(stock);
-            sel.appendChild(opt);
-          });
+          (js.data||[]).filter(isActiveRow).forEach(appendProductOption);
         }catch{}
       }
 
@@ -1856,17 +1881,9 @@
     const cat = opt.dataset.cat || '';
     const unidad = opt.dataset.unidad || '';
     const prodId = opt.dataset.prodId ? Number(opt.dataset.prodId) : null;
-    const stockAvailable = opt.dataset.stock !== undefined ? Number(opt.dataset.stock) : null;
 
-    // Verificar si el producto ya fue agregado a la lista en memoria
+    // Verificar si el producto ya fue agregado a la lista en memoria (se permite pedir cualquier producto activo aunque su existencia sea 0)
     const existingIdx = DET_ROWS.findIndex(r => (clave && r.clave === clave) || (prodId && r.producto_id === prodId));
-    const currentInList = existingIdx >= 0 ? Number(DET_ROWS[existingIdx].cantidad || 0) : 0;
-    if (stockAvailable !== null && !isNaN(stockAvailable) && stockAvailable >= 0) {
-      if (currentInList + cant > stockAvailable) {
-        toast(`La cantidad solicitada para "${desc}" supera la disponibilidad actual.`, false);
-        return;
-      }
-    }
 
     if (existingIdx >= 0) {
       DET_ROWS[existingIdx].cantidad = Number(DET_ROWS[existingIdx].cantidad || 0) + cant;
@@ -2264,7 +2281,6 @@
                 : `<span style="${stockStyle}">${stockAlm}</span>`;
 
               if (puedeSurtir) {
-                const maxPermitido = Math.min(cant, Math.max(stockAlm, defaultAtend));
                 return `<tr data-det="${escHtml(detId)}" data-clave="${escHtml(clave)}" data-desc="${escHtml(desc)}" data-cant="${cant}" data-stock="${stockAlm}">
                   <td><b>${escHtml(clave)}</b></td>
                   <td>${escHtml(desc)}</td>
@@ -2274,7 +2290,7 @@
                   <td>${stockBadge}</td>
                   <td>${
                     allowEditQty
-                      ? `<input class="mini-in in-atendida" type="number" min="0" max="${maxPermitido}" step="1" value="${defaultAtend}" style="width:80px; font-weight:700;">`
+                      ? `<input class="mini-in in-atendida" type="number" min="0" max="${cant}" step="1" value="${defaultAtend}" style="width:80px; font-weight:700;">`
                       : (isLockedFromStep3
                           ? `<input class="mini-in in-atendida readonly" type="number" value="${defaultAtend}" disabled readonly tabindex="-1" style="width:80px; font-weight:700; background:#f1f5f9; color:#334155; cursor:not-allowed;" title="Cantidad bloqueada desde el Paso 3 (Para Firmas)">`
                           : `<b>${defaultAtend}</b> <span class="muted" style="font-size:11px;">(Acepta la orden para editar)</span>`)
@@ -2632,7 +2648,7 @@
     const obs  = $('obs_sol')?.value?.trim() || SOL_DRAFT?.observaciones || null;
     const regEl = $('sol_region') || $('sol_region_solicitante');
     const regionSol = safestr(regEl?.value) || SOL_DRAFT?.region_solicitante || 'La Paz';
-    const esForaneo = isRegionForaneaObligatoriaFirma(regionSol);
+    const esForaneo = isCurrentUserRegionalForaneo();
     const nombreFirma = safestr($('sol_nombre_firma')?.value) || SOL_DRAFT?.nombre_solicitante_firma || getLoggedUserFullName() || null;
 
     let firmaData = null;
@@ -2752,9 +2768,9 @@
         validationError = `La cantidad a surtir (${atendida}) no puede superar la cantidad solicitada (${cant}) para ${nombre}.`;
         return;
       }
-      if (atendida > stock) {
+      if (atendida > 0 && atendida > stock) {
         if (stock <= 0) {
-          validationError = `No hay stock disponible para ${nombre} (Existencia actual: 0).`;
+          validationError = `No hay existencia en inventario para ${nombre} (Existencia actual: 0). Agrega stock en Almacén primero o coloca 0 en cantidad surtida.`;
         } else {
           validationError = `Stock insuficiente para ${nombre}. Solicitado a surtir: ${atendida}, Existencia disponible: ${stock}.`;
         }
