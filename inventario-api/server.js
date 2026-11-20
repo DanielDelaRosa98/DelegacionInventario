@@ -729,9 +729,6 @@ function canEditTabletas(userOrReq) {
   if (uname === "gabrielfiol" || uname === "fiol" || uname === "encargado" || fullName.includes("fiol")) {
     return false;
   }
-  if (["jorge", "jorgepatron", "rodrigo"].includes(uname)) {
-    return false;
-  }
 
   // 1. Admin
   if (role === "ADMIN" || uname === "admin") return true;
@@ -741,6 +738,15 @@ function canEditTabletas(userOrReq) {
     ["luiseduardo", "luismayoral"].includes(uname) ||
     fullName.includes("luis eduardo") ||
     fullName.includes("mayoral geraldo")
+  ) {
+    return true;
+  }
+
+  // 3. Jorge Patrón y Rodrigo Molina (mismo nivel operativo en Tabletas; campos maestros exclusivos de Admin)
+  if (
+    ["jorge", "jorgepatron", "rodrigo"].includes(uname) ||
+    fullName.includes("jorge luis patron") ||
+    fullName.includes("rodrigo molina")
   ) {
     return true;
   }
@@ -816,6 +822,19 @@ function detectImageMagicFormat(buf) {
   return null;
 }
 
+function removeEvidenciaFilenameFromDisk(filename) {
+  if (!filename) return;
+  try {
+    const safeFile = path.basename(String(filename).trim());
+    if (!safeFile) return;
+    const baseDir = path.resolve(TABLETAS_EVIDENCIAS_DIR);
+    const fullPath = path.resolve(baseDir, safeFile);
+    if (fullPath.startsWith(baseDir + path.sep) && fs.existsSync(fullPath)) {
+      fs.unlinkSync(fullPath);
+    }
+  } catch {}
+}
+
 function cleanupTabletaEvidenciaFiles(filesObj) {
   if (!filesObj || typeof filesObj !== "object") return;
   for (const key of Object.keys(filesObj)) {
@@ -861,7 +880,7 @@ async function uploadTabletaEvidenciasMiddleware(req, res, next) {
 
     const bodyBuf = Buffer.concat(chunks);
     const boundaryBuf = Buffer.from(`--${boundaryStr}`);
-    const safeTabId = String(Number(req.params?.id || 0) || "0").replace(/[^0-9]/g, "");
+    const safeTabId = String(Number(req.params?.id || req.params?.movimientoId || 0) || "0").replace(/[^0-9]/g, "");
 
     let pos = bodyBuf.indexOf(boundaryBuf);
     while (pos !== -1) {
@@ -2792,18 +2811,12 @@ async function ensureSchemaAndUsers() {
         tiene_caja TINYINT(1) DEFAULT 1,
         observaciones TEXT,
         sin_resguardo_previo TINYINT(1) DEFAULT 0,
-        estado_asignacion ENUM('EN_RESGUARDO', 'DEVOLUCION_PENDIENTE', 'DISPONIBLE', 'EN_PRESTAMO_PROVISIONAL') NOT NULL DEFAULT 'EN_RESGUARDO',
+        estado_asignacion VARCHAR(45) NOT NULL DEFAULT 'EN_RESGUARDO',
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
     ).catch((errTab) => {
       console.warn("[WARN] CREATE inventario_tabletas:", errTab?.message || errTab);
     });
-
-    // v58: Asegurar estado EN_PRESTAMO_PROVISIONAL en inventario_tabletas existente
-    await poolOps.query(
-      `ALTER TABLE inventario_tabletas
-       MODIFY COLUMN estado_asignacion ENUM('EN_RESGUARDO', 'DEVOLUCION_PENDIENTE', 'DISPONIBLE', 'EN_PRESTAMO_PROVISIONAL') NOT NULL DEFAULT 'EN_RESGUARDO'`
-    ).catch(() => {});
 
     await poolOps.query(
       `CREATE TABLE IF NOT EXISTS movimientos_tabletas (
@@ -2820,7 +2833,7 @@ async function ensureSchemaAndUsers() {
         tiene_caja TINYINT(1) DEFAULT 1,
         estatus_fisico VARCHAR(50) DEFAULT 'BUENO',
         observaciones TEXT,
-        estado ENUM('EN_PROCESO', 'CONFIRMADO', 'CANCELADO') DEFAULT 'EN_PROCESO',
+        estado VARCHAR(40) NOT NULL DEFAULT 'EN_PROCESO',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         confirmed_at DATETIME NULL,
         KEY idx_movtab_tableta (tableta_id),
@@ -2830,14 +2843,29 @@ async function ensureSchemaAndUsers() {
       console.warn("[WARN] CREATE movimientos_tabletas:", errMovTab?.message || errMovTab);
     });
 
-    // Asegurar columnas idempotentes para Firma Digital Remota y Evidencia Fotográfica en movimientos_tabletas e inventario_tabletas
+    // Asegurar columnas e índices idempotentes para Firma Digital Remota, Evidencias y Asignación Regional en 3 pasos
     try {
       const [movTabCols] = await poolRead.query(
-        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        `SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS
          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'movimientos_tabletas'`,
         [DB_NAME]
       );
-      const movTabColSet = new Set((movTabCols || []).map((c) => String(c.COLUMN_NAME || "").toLowerCase()));
+      const movTabColMap = new Map(
+        (movTabCols || []).map((c) => [String(c.COLUMN_NAME || "").toLowerCase(), c])
+      );
+
+      // Asegurar movimientos_tabletas.estado como VARCHAR(40) para admitir PENDIENTE_REGION, PENDIENTE_REVISION, etc.
+      const movEstadoCol = movTabColMap.get("estado");
+      if (
+        movEstadoCol &&
+        (String(movEstadoCol.DATA_TYPE || "").toLowerCase() !== "varchar" ||
+          Number(movEstadoCol.CHARACTER_MAXIMUM_LENGTH || 0) < 40)
+      ) {
+        await poolOps.query(
+          `ALTER TABLE movimientos_tabletas MODIFY COLUMN estado VARCHAR(40) NOT NULL DEFAULT 'EN_PROCESO'`
+        ).catch((e) => console.warn("[WARN] MODIFY movimientos_tabletas.estado:", e?.message || e));
+      }
+
       const requiredMovTabCols = [
         { name: "estado_firma", ddl: "VARCHAR(30) NOT NULL DEFAULT 'NO_APLICA'" },
         { name: "region_firma_destino", ddl: "VARCHAR(30) NULL" },
@@ -2849,9 +2877,16 @@ async function ensureSchemaAndUsers() {
         { name: "foto_ine_frente", ddl: "VARCHAR(255) NULL" },
         { name: "foto_ine_reverso", ddl: "VARCHAR(255) NULL" },
         { name: "foto_entrega", ddl: "VARCHAR(255) NULL" },
+        { name: "firma_asignacion_data", ddl: "MEDIUMTEXT NULL" },
+        { name: "fecha_firma_asignacion", ddl: "DATETIME NULL" },
+        { name: "folio_firma_asignacion", ddl: "VARCHAR(64) NULL" },
+        { name: "motivo_rechazo_asignacion", ddl: "VARCHAR(255) NULL" },
+        { name: "asignacion_enviada_por_id", ddl: "INT NULL" },
+        { name: "asignacion_autorizada_por_id", ddl: "INT NULL" },
+        { name: "fecha_autorizacion_asignacion", ddl: "DATETIME NULL" },
       ];
       for (const col of requiredMovTabCols) {
-        if (!movTabColSet.has(col.name.toLowerCase())) {
+        if (!movTabColMap.has(col.name.toLowerCase())) {
           await poolOps.query(
             `ALTER TABLE movimientos_tabletas ADD COLUMN ${qi(col.name)} ${col.ddl}`
           ).catch((e) => console.warn(`[WARN] ALTER movimientos_tabletas.${col.name}:`, e?.message || e));
@@ -2874,20 +2909,37 @@ async function ensureSchemaAndUsers() {
           `CREATE INDEX idx_mov_tab_tableta ON movimientos_tabletas (tableta_id)`
         ).catch((e) => console.warn("[WARN] CREATE INDEX idx_mov_tab_tableta:", e?.message || e));
       }
+      if (!movTabIdxSet.has("idx_mov_tab_tipo_estado_region")) {
+        await poolOps.query(
+          `CREATE INDEX idx_mov_tab_tipo_estado_region ON movimientos_tabletas (tipo, region_firma_destino, estado)`
+        ).catch((e) => console.warn("[WARN] CREATE INDEX idx_mov_tab_tipo_estado_region:", e?.message || e));
+      }
 
       const [invTabCols] = await poolRead.query(
-        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        `SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS
          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'inventario_tabletas'`,
         [DB_NAME]
       );
-      const invTabColSet = new Set((invTabCols || []).map((c) => String(c.COLUMN_NAME || "").toLowerCase()));
-      if (!invTabColSet.has("ultimo_movimiento_asignacion_id")) {
+      const invTabColMap = new Map(
+        (invTabCols || []).map((c) => [String(c.COLUMN_NAME || "").toLowerCase(), c])
+      );
+      const invEstadoCol = invTabColMap.get("estado_asignacion");
+      if (
+        invEstadoCol &&
+        (String(invEstadoCol.DATA_TYPE || "").toLowerCase() !== "varchar" ||
+          Number(invEstadoCol.CHARACTER_MAXIMUM_LENGTH || 0) < 40)
+      ) {
+        await poolOps.query(
+          `ALTER TABLE inventario_tabletas MODIFY COLUMN estado_asignacion VARCHAR(45) NOT NULL DEFAULT 'EN_RESGUARDO'`
+        ).catch((e) => console.warn("[WARN] MODIFY inventario_tabletas.estado_asignacion:", e?.message || e));
+      }
+      if (!invTabColMap.has("ultimo_movimiento_asignacion_id")) {
         await poolOps.query(
           `ALTER TABLE inventario_tabletas ADD COLUMN ultimo_movimiento_asignacion_id INT NULL`
         ).catch((e) => console.warn("[WARN] ALTER inventario_tabletas.ultimo_movimiento_asignacion_id:", e?.message || e));
       }
     } catch (errTabSchema) {
-      console.warn("[WARN] Migración columnas firma/evidencias tabletas:", errTabSchema?.message || errTabSchema);
+      console.warn("[WARN] Migración columnas firma/evidencias/asignación tabletas:", errTabSchema?.message || errTabSchema);
     }
 
     await poolOps.query(
@@ -16078,7 +16130,7 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
     cargo: cargoPersona || "Servidor de la nación",
   });
 
-  // Incrustar firma digital remota en Vale de Devolución firmado (estrictamente en 1 sola página)
+  // Incrustar firma digital remota en Vale de Devolución firmado o Resguardo de Asignación Regional firmado (estrictamente en 1 sola página)
   if (
     isDevolucion &&
     String(movimiento?.estado_firma || "").toUpperCase() === "FIRMADO" &&
@@ -16109,6 +16161,33 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
         );
     } catch (errSigPdf) {
       console.warn("[WARN] Error incrustando firma digital en PDF de devolución:", errSigPdf?.message || errSigPdf);
+    }
+  } else if (!isDevolucion && movimiento?.firma_asignacion_data) {
+    try {
+      const rawSig = String(movimiento.firma_asignacion_data).trim();
+      const b64Match = rawSig.match(/^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/i);
+      if (b64Match && b64Match[1]) {
+        const sigBuf = Buffer.from(b64Match[1].replace(/\s+/g, ""), "base64");
+        doc.image(sigBuf, leftX + 10, botSigY + 13, {
+          fit: [botSigW - 20, 26],
+          align: "center",
+          valign: "center",
+        });
+      }
+      const dFirma = movimiento.fecha_firma_asignacion ? new Date(movimiento.fecha_firma_asignacion) : new Date();
+      const fechaFirmaTxt = isNaN(dFirma.getTime())
+        ? fechaStr
+        : `${String(dFirma.getDate()).padStart(2, "0")}/${String(dFirma.getMonth() + 1).padStart(2, "0")}/${dFirma.getFullYear()} ${String(dFirma.getHours()).padStart(2, "0")}:${String(dFirma.getMinutes()).padStart(2, "0")}`;
+      const selloTxt = String(movimiento.folio_firma_asignacion || "").trim();
+      doc.fillColor("#166534").font("Helvetica-Bold").fontSize(6)
+        .text(
+          `Firmado digitalmente el ${fechaFirmaTxt} - Sello: ${selloTxt}`,
+          leftX,
+          botSigY + botSigH + 4,
+          { width: contentWidth, align: "left", lineBreak: false }
+        );
+    } catch (errSigAsigPdf) {
+      console.warn("[WARN] Error incrustando firma digital en PDF de resguardo:", errSigAsigPdf?.message || errSigAsigPdf);
     }
   }
 
@@ -16347,6 +16426,8 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
         SUM(CASE WHEN t.estado_asignacion = 'EN_RESGUARDO' THEN 1 ELSE 0 END) AS en_resguardo,
         SUM(CASE WHEN t.estado_asignacion = 'DEVOLUCION_PENDIENTE' THEN 1 ELSE 0 END) AS devolucion_pendiente,
         SUM(CASE WHEN t.estado_asignacion = 'DISPONIBLE' THEN 1 ELSE 0 END) AS disponibles,
+        SUM(CASE WHEN t.estado_asignacion IN ('PENDIENTE_ASIGNACION_REGIONAL', 'PENDIENTE_REVISION_ASIGNACION') THEN 1 ELSE 0 END) AS en_asignacion_regional,
+        SUM(CASE WHEN t.estado_asignacion = 'PENDIENTE_REVISION_ASIGNACION' THEN 1 ELSE 0 END) AS por_revisar_asignacion,
         SUM(CASE WHEN t.estado_asignacion = 'EN_PRESTAMO_PROVISIONAL' AND EXISTS (
           SELECT 1
           FROM vales_prestamo_detalle vpd
@@ -16364,6 +16445,8 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
       en_resguardo: Number(kpiRows[0]?.en_resguardo || 0),
       devolucion_pendiente: Number(kpiRows[0]?.devolucion_pendiente || 0),
       disponibles: Number(kpiRows[0]?.disponibles || 0),
+      en_asignacion_regional: Number(kpiRows[0]?.en_asignacion_regional || 0),
+      por_revisar_asignacion: Number(kpiRows[0]?.por_revisar_asignacion || 0),
       en_prestamo_provisional: Number(kpiRows[0]?.en_prestamo_provisional || 0),
       sin_nombre: Number(kpiRows[0]?.sin_nombre || 0),
     };
@@ -16384,6 +16467,8 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
                        AND vp.estado IN ('PENDIENTE', 'AUTORIZADO_EN_PRESTAMO', 'EN_PRESTAMO')
                        AND COALESCE(vpd.estado_devolucion, 'PENDIENTE') NOT IN ('DEVUELTO', 'CANCELADO')
                    )`;
+      } else if (st === "EN_PROCESO_ASIGNACION") {
+        where += " AND t.estado_asignacion IN ('PENDIENTE_ASIGNACION_REGIONAL', 'PENDIENTE_REVISION_ASIGNACION')";
       } else {
         where += " AND t.estado_asignacion = ?";
         params.push(st);
@@ -16433,6 +16518,16 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
               (mp.firma_devolucion_data IS NOT NULL) AS devolucion_tiene_firma,
               ma.id AS ultimo_asig_mov_id,
               ma.folio AS ultimo_asig_folio,
+              ma.estado AS asig_pend_estado,
+              COALESCE(ma.estado_firma, 'NO_APLICA') AS asig_pend_estado_firma,
+              ma.region_firma_destino AS asig_pend_region,
+              ma.nombre_persona AS asig_pend_nombre,
+              ma.cargo_persona AS asig_pend_cargo,
+              ma.motivo_rechazo_asignacion AS asig_pend_motivo_rechazo,
+              ma.fecha_firma_asignacion AS asig_pend_fecha_firma,
+              ma.folio_firma_asignacion AS asig_pend_folio_firma,
+              ma.created_at AS asig_pend_created_at,
+              (ma.firma_asignacion_data IS NOT NULL) AS asig_pend_tiene_firma,
               CASE WHEN ma.foto_ine_frente IS NOT NULL AND ma.foto_ine_reverso IS NOT NULL AND ma.foto_entrega IS NOT NULL THEN 1 ELSE 0 END AS tiene_evidencias,
               CASE WHEN ma.foto_ine_frente IS NOT NULL AND ma.foto_ine_reverso IS NOT NULL AND ma.foto_entrega IS NOT NULL THEN ma.id ELSE NULL END AS evidencias_mov_id
        FROM inventario_tabletas t
@@ -16447,7 +16542,7 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
            t.ultimo_movimiento_asignacion_id,
            (
              SELECT m2.id FROM movimientos_tabletas m2
-             WHERE m2.tableta_id = t.id AND m2.tipo = 'ASIGNACION' AND m2.estado = 'CONFIRMADO'
+             WHERE m2.tableta_id = t.id AND m2.tipo = 'ASIGNACION' AND m2.estado IN ('CONFIRMADO', 'PENDIENTE_REVISION', 'PENDIENTE_REGION')
              ORDER BY m2.id DESC LIMIT 1
            )
          )
@@ -16492,14 +16587,14 @@ app.get("/api/tabletas/bitacora", authRequired, async (req, res) => {
 
     const [rows] = await poolRead.query(
       `SELECT b.id, b.tableta_id, b.no_resguardo, b.imei, b.numero_serie, b.usuario, b.accion, b.detalles, b.created_at,
-              CASE WHEN b.accion = 'ASIGNAR_RESGUARDO' THEN (
+              CASE WHEN b.accion IN ('ASIGNAR_RESGUARDO', 'SUBIR_EVIDENCIAS', 'AUTORIZAR_ASIGNACION_REGIONAL') THEN (
                 SELECT m.id FROM movimientos_tabletas m
                 WHERE m.tableta_id = b.tableta_id
                   AND m.tipo = 'ASIGNACION'
                   AND m.foto_ine_frente IS NOT NULL
                   AND m.foto_ine_reverso IS NOT NULL
                   AND m.foto_entrega IS NOT NULL
-                  AND (b.detalles LIKE CONCAT('%Folio ', m.folio, '%') OR m.created_at <= DATE_ADD(b.created_at, INTERVAL 1 MINUTE))
+                  AND (b.detalles LIKE CONCAT('%Folio ', m.folio, '%') OR m.created_at <= DATE_ADD(b.created_at, INTERVAL 2 MINUTE))
                 ORDER BY (b.detalles LIKE CONCAT('%Folio ', m.folio, '%')) DESC, m.id DESC
                 LIMIT 1
               ) ELSE NULL END AS evidencias_mov_id
@@ -16520,39 +16615,52 @@ app.get("/api/tabletas/bitacora", authRequired, async (req, res) => {
 });
 
 // ============================================================================
-// BLOQUE 2: FIRMA DIGITAL REMOTA DE DEVOLUCIONES DE TABLETAS (REGIONES FORÁNEAS)
+// BLOQUE 2: FIRMA DIGITAL REMOTA DE DEVOLUCIONES Y ASIGNACIONES REGIONALES
 // ============================================================================
 
-// GET /api/tabletas/devoluciones/badge — Polling ultraligero cada 60s
+// GET /api/tabletas/devoluciones/badge — Polling ultraligero único cada 60s
 app.get("/api/tabletas/devoluciones/badge", authRequired, async (req, res) => {
   try {
     const regScope = getRegionalSignatureScope(req.user);
-    const isLuisOrAdmin = canEditTabletas(req);
-    if (!regScope && !isLuisOrAdmin) {
-      return res.json({ ok: true, total: 0, pendientes: 0, firmadas: 0, rechazadas: 0 });
+    const isAlmacenStaff = canEditTabletas(req);
+    if (!regScope && !isAlmacenStaff) {
+      return res.json({
+        ok: true,
+        total: 0,
+        pendientes: 0,
+        devoluciones_pendientes: 0,
+        asignaciones_pendientes: 0,
+        firmadas: 0,
+        rechazadas: 0,
+        asignaciones_revision: 0,
+      });
     }
     await ensureSchemaAndUsers();
 
     if (regScope) {
       const [[row]] = await poolRead.query(
-        `SELECT COUNT(*) AS pendientes
+        `SELECT
+           COALESCE(SUM(CASE WHEN tipo = 'DEVOLUCION' AND estado = 'EN_PROCESO' AND estado_firma = 'PENDIENTE_FIRMA' THEN 1 ELSE 0 END), 0) AS devoluciones_pendientes,
+           COALESCE(SUM(CASE WHEN tipo = 'ASIGNACION' AND estado = 'PENDIENTE_REGION' THEN 1 ELSE 0 END), 0) AS asignaciones_pendientes
          FROM movimientos_tabletas
-         WHERE region_firma_destino = ?
-           AND estado_firma = 'PENDIENTE_FIRMA'
-           AND estado = 'EN_PROCESO'`,
+         WHERE region_firma_destino = ?`,
         [regScope]
       );
-      const pendientes = Number(row?.pendientes || 0);
+      const devolucionesPend = Number(row?.devoluciones_pendientes || 0);
+      const asignacionesPend = Number(row?.asignaciones_pendientes || 0);
+      const total = devolucionesPend + asignacionesPend;
       return res.json({
         ok: true,
         scope: "regional",
         region: regScope,
-        pendientes,
-        total: pendientes,
+        devoluciones_pendientes: devolucionesPend,
+        asignaciones_pendientes: asignacionesPend,
+        pendientes: total,
+        total,
       });
     }
 
-    const [[row]] = await poolRead.query(
+    const [[rowDev]] = await poolRead.query(
       `SELECT
          COALESCE(SUM(CASE WHEN m.estado_firma = 'FIRMADO' THEN 1 ELSE 0 END), 0) AS firmadas,
          COALESCE(SUM(CASE WHEN m.estado_firma = 'RECHAZADO' THEN 1 ELSE 0 END), 0) AS rechazadas,
@@ -16563,17 +16671,32 @@ app.get("/api/tabletas/devoluciones/badge", authRequired, async (req, res) => {
          AND m.estado = 'EN_PROCESO'
          AND t.estado_asignacion = 'DEVOLUCION_PENDIENTE'`
     );
-    const firmadas = Number(row?.firmadas || 0);
-    const rechazadas = Number(row?.rechazadas || 0);
-    const pendientesFirma = Number(row?.pendientes_firma || 0);
+    const [[rowAsig]] = await poolRead.query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN m.estado = 'PENDIENTE_REVISION' AND t.estado_asignacion = 'PENDIENTE_REVISION_ASIGNACION' THEN 1 ELSE 0 END), 0) AS asignaciones_revision,
+         COALESCE(SUM(CASE WHEN m.estado = 'PENDIENTE_REGION' AND t.estado_asignacion = 'PENDIENTE_ASIGNACION_REGIONAL' THEN 1 ELSE 0 END), 0) AS asignaciones_pendientes
+       FROM movimientos_tabletas m
+       INNER JOIN inventario_tabletas t ON t.id = m.tableta_id
+       WHERE m.tipo = 'ASIGNACION'
+         AND m.estado IN ('PENDIENTE_REVISION', 'PENDIENTE_REGION')`
+    );
+
+    const firmadas = Number(rowDev?.firmadas || 0);
+    const rechazadas = Number(rowDev?.rechazadas || 0);
+    const pendientesFirma = Number(rowDev?.pendientes_firma || 0);
+    const asignacionesRevision = Number(rowAsig?.asignaciones_revision || 0);
+    const asignacionesPendientes = Number(rowAsig?.asignaciones_pendientes || 0);
     return res.json({
       ok: true,
       scope: "almacen",
       firmadas,
       rechazadas,
+      asignaciones_revision: asignacionesRevision,
+      devoluciones_pendientes: isAdmin(req) ? pendientesFirma : 0,
+      asignaciones_pendientes: isAdmin(req) ? asignacionesPendientes : 0,
       pendientes_firma: pendientesFirma,
-      pendientes: isAdmin(req) ? pendientesFirma : 0,
-      total: firmadas + rechazadas,
+      pendientes: isAdmin(req) ? (pendientesFirma + asignacionesPendientes) : 0,
+      total: firmadas + rechazadas + asignacionesRevision,
     });
   } catch (e) {
     return httpError(res, 500, e.message || "Error al consultar alertas de tabletas");
@@ -16944,6 +17067,872 @@ app.get("/api/tabletas/evidencias/:movimientoId/:tipo", authRequired, async (req
     return res.sendFile(fullPath);
   } catch (e) {
     return httpError(res, 500, e.message || "Error al consultar evidencia fotográfica");
+  }
+});
+
+// POST /api/tabletas/:id/evidencias — Subir o actualizar las 3 fotografías de evidencia en tabletas ya EN_RESGUARDO o DEVOLUCION_PENDIENTE
+app.post(
+  "/api/tabletas/:id/evidencias",
+  authRequired,
+  (req, res, next) => {
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para subir o actualizar evidencias fotográficas de tabletas.");
+    }
+    return next();
+  },
+  uploadTabletaEvidenciasMiddleware,
+  async (req, res) => {
+    try {
+      await ensureSchemaAndUsers();
+      if (!canEditTabletas(req)) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 403, "No tienes permiso para subir o actualizar evidencias fotográficas de tabletas.");
+      }
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 400, "ID de tableta inválido.");
+      }
+
+      const fIneFrente = req.files?.foto_ine_frente?.[0] || null;
+      const fIneReverso = req.files?.foto_ine_reverso?.[0] || null;
+      const fEntrega = req.files?.foto_entrega?.[0] || null;
+
+      if (!fIneFrente && !fIneReverso && !fEntrega) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 400, "Debes adjuntar al menos una fotografía válida (JPG, PNG o WEBP).");
+      }
+
+      const conn = await poolOps.getConnection();
+      let movId = null;
+      let tabRow = null;
+      let isUpdate = false;
+      const oldFilesToDelete = [];
+
+      try {
+        await conn.beginTransaction();
+        const [[tab]] = await conn.query(
+          `SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+          [id]
+        );
+        if (!tab) {
+          await conn.rollback();
+          cleanupTabletaEvidenciaFiles(req.files);
+          return httpError(res, 404, "Tableta no encontrada.");
+        }
+        const estAsig = String(tab.estado_asignacion || "").toUpperCase();
+        if (!["EN_RESGUARDO", "DEVOLUCION_PENDIENTE"].includes(estAsig)) {
+          await conn.rollback();
+          cleanupTabletaEvidenciaFiles(req.files);
+          return httpError(
+            res,
+            409,
+            `Solo se pueden subir evidencias a tabletas en EN_RESGUARDO o DEVOLUCION_PENDIENTE (estado actual: ${estAsig}).`
+          );
+        }
+        tabRow = tab;
+
+        let curMov = null;
+        if (Number(tab.ultimo_movimiento_asignacion_id || 0) > 0) {
+          const [[m]] = await conn.query(
+            `SELECT * FROM movimientos_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+            [tab.ultimo_movimiento_asignacion_id]
+          );
+          if (m && String(m.tipo || "").toUpperCase() === "ASIGNACION") {
+            curMov = m;
+          }
+        }
+
+        const alreadyHasAll3 = Boolean(
+          curMov && curMov.foto_ine_frente && curMov.foto_ine_reverso && curMov.foto_entrega
+        );
+
+        if (!alreadyHasAll3) {
+          const finalFrente = fIneFrente?.filename || curMov?.foto_ine_frente || null;
+          const finalReverso = fIneReverso?.filename || curMov?.foto_ine_reverso || null;
+          const finalEntrega = fEntrega?.filename || curMov?.foto_entrega || null;
+          if (!finalFrente || !finalReverso || !finalEntrega) {
+            await conn.rollback();
+            cleanupTabletaEvidenciaFiles(req.files);
+            return httpError(
+              res,
+              400,
+              "Para completar el expediente fotográfico por primera vez debes adjuntar obligatoriamente las 3 fotografías (INE Frente, INE Reverso y Foto de Entrega)."
+            );
+          }
+        }
+
+        if (curMov) {
+          isUpdate = alreadyHasAll3;
+          const nextFrente = fIneFrente ? fIneFrente.filename : curMov.foto_ine_frente;
+          const nextReverso = fIneReverso ? fIneReverso.filename : curMov.foto_ine_reverso;
+          const nextEntrega = fEntrega ? fEntrega.filename : curMov.foto_entrega;
+
+          if (fIneFrente && curMov.foto_ine_frente && curMov.foto_ine_frente !== nextFrente) {
+            oldFilesToDelete.push(curMov.foto_ine_frente);
+          }
+          if (fIneReverso && curMov.foto_ine_reverso && curMov.foto_ine_reverso !== nextReverso) {
+            oldFilesToDelete.push(curMov.foto_ine_reverso);
+          }
+          if (fEntrega && curMov.foto_entrega && curMov.foto_entrega !== nextEntrega) {
+            oldFilesToDelete.push(curMov.foto_entrega);
+          }
+
+          await conn.query(
+            `UPDATE movimientos_tabletas
+             SET foto_ine_frente = ?, foto_ine_reverso = ?, foto_entrega = ?
+             WHERE id = ?`,
+            [nextFrente, nextReverso, nextEntrega, curMov.id]
+          );
+          movId = curMov.id;
+        } else {
+          // Tableta histórica importada del Excel sin ultimo_movimiento_asignacion_id: crear ASIGNACION CONFIRMADO
+          const folio = await generateNextTabletaFolio(conn);
+          const [ins] = await conn.query(
+            `INSERT INTO movimientos_tabletas
+               (tipo, folio, tableta_id, no_resguardo, region, oficina_programa,
+                nombre_persona, cargo_persona, tiene_cargador, tiene_caja, estatus_fisico, observaciones,
+                estado, confirmed_at, foto_ine_frente, foto_ine_reverso, foto_entrega)
+             VALUES ('ASIGNACION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMADO', NOW(), ?, ?, ?)`,
+            [
+              folio,
+              tab.id,
+              tab.no_resguardo,
+              tab.region || "LA PAZ",
+              tab.oficina_programa || "Delegación La Paz",
+              String(tab.nombre_resguardante || "SIN NOMBRE ASIGNADO").trim() || "SIN NOMBRE ASIGNADO",
+              String(tab.cargo_resguardante || "Servidor de la nación").trim() || "Servidor de la nación",
+              Number(tab.tiene_cargador ?? 1) ? 1 : 0,
+              Number(tab.tiene_caja ?? 1) ? 1 : 0,
+              String(tab.estatus_fisico || "BUENO").trim().toUpperCase(),
+              tab.observaciones || null,
+              fIneFrente.filename,
+              fIneReverso.filename,
+              fEntrega.filename,
+            ]
+          );
+          movId = ins.insertId;
+          await conn.query(
+            `UPDATE inventario_tabletas SET ultimo_movimiento_asignacion_id = ? WHERE id = ?`,
+            [movId, tab.id]
+          );
+        }
+
+        await conn.commit();
+      } catch (err) {
+        await conn.rollback();
+        cleanupTabletaEvidenciaFiles(req.files);
+        throw err;
+      } finally {
+        conn.release();
+      }
+
+      // Eliminar del disco únicamente los archivos antiguos reemplazados tras confirmar la transacción
+      for (const oldFile of oldFilesToDelete) {
+        removeEvidenciaFilenameFromDisk(oldFile);
+      }
+
+      const detMsg = isUpdate
+        ? `Evidencias fotográficas actualizadas para Tableta #${tabRow.no_resguardo} (Resguardante: ${tabRow.nombre_resguardante || "Sin nombre"}, Mov #${movId}).`
+        : `Evidencias fotográficas (3 fotos) cargadas para Tableta #${tabRow.no_resguardo} (Resguardante: ${tabRow.nombre_resguardante || "Sin nombre"}, Mov #${movId}).`;
+
+      await registrarBitacora(req, "TABLETAS", "SUBIR_EVIDENCIAS", detMsg);
+      await registrarBitacoraTableta(req, {
+        tableta_id: tabRow.id,
+        no_resguardo: tabRow.no_resguardo,
+        imei: tabRow.imei,
+        numero_serie: tabRow.numero_serie,
+        accion: "SUBIR_EVIDENCIAS",
+        detalles: detMsg,
+      });
+
+      return res.json({
+        ok: true,
+        movimiento_id: movId,
+        tableta_id: tabRow.id,
+        tiene_evidencias: true,
+        message: isUpdate
+          ? `Fotografías de evidencia actualizadas correctamente para la Tableta #${tabRow.no_resguardo}.`
+          : `Las 3 fotografías de evidencia se guardaron correctamente para la Tableta #${tabRow.no_resguardo}.`,
+      });
+    } catch (e) {
+      cleanupTabletaEvidenciaFiles(req.files);
+      return httpError(res, 500, e.message || "Error al subir evidencias fotográficas de la tableta");
+    }
+  }
+);
+
+// ============================================================================
+// BLOQUE 4: FLUJO DE ASIGNACIÓN REGIONAL EN 3 PASOS (LOS CABOS, MULEGÉ, COMONDÚ)
+// ============================================================================
+function getDefaultOficinaForForaneaRegion(regionCode) {
+  const r = String(regionCode || "").toUpperCase();
+  if (r === "LOS CABOS") return "Región Los Cabos";
+  if (r === "MULEGE") return "Región Mulegé";
+  if (r === "COMONDU") return "Región Comondú";
+  return "Delegación La Paz";
+}
+
+// 4.1 GET /api/tabletas/asignaciones/pendientes-region — Listado para cuentas regionales (y admin en consulta)
+app.get("/api/tabletas/asignaciones/pendientes-region", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    const regScope = getRegionalSignatureScope(req.user);
+    const admin = isAdmin(req);
+    if (!regScope && !admin) {
+      return httpError(res, 403, "Acceso exclusivo para enlaces regionales (Los Cabos, Mulegé, Comondú) o Administración.");
+    }
+
+    let where = "WHERE m.tipo = 'ASIGNACION' AND m.estado = 'PENDIENTE_REGION'";
+    const params = [];
+    if (regScope) {
+      where += " AND m.region_firma_destino = ?";
+      params.push(regScope);
+    }
+
+    // CRÍTICO NAS: NUNCA seleccionar firma_asignacion_data en listados
+    const [rows] = await poolRead.query(
+      `SELECT
+         m.id AS movimiento_id,
+         m.tableta_id,
+         t.no_resguardo,
+         t.imei,
+         t.numero_serie,
+         t.no_caja,
+         COALESCE(m.estatus_fisico, t.estatus_fisico) AS estatus_fisico,
+         COALESCE(m.tiene_cargador, t.tiene_cargador) AS tiene_cargador,
+         COALESCE(m.tiene_caja, t.tiene_caja) AS tiene_caja,
+         t.marca,
+         t.modelo,
+         t.descripcion,
+         m.region_firma_destino,
+         COALESCE(m.oficina_programa, t.oficina_programa) AS oficina_programa,
+         m.observaciones,
+         m.nombre_persona,
+         m.cargo_persona,
+         m.motivo_rechazo_asignacion,
+         COALESCE(m.estado_firma, 'PENDIENTE_FIRMA') AS estado_firma,
+         m.created_at AS fecha_envio,
+         (m.foto_ine_frente IS NOT NULL AND m.foto_ine_frente <> '') AS tiene_foto_ine_frente,
+         (m.foto_ine_reverso IS NOT NULL AND m.foto_ine_reverso <> '') AS tiene_foto_ine_reverso,
+         (m.foto_entrega IS NOT NULL AND m.foto_entrega <> '') AS tiene_foto_entrega
+       FROM movimientos_tabletas m
+       INNER JOIN inventario_tabletas t ON t.id = m.tableta_id
+       ${where}
+       ORDER BY m.created_at DESC, m.id DESC`,
+      params
+    );
+
+    return res.json({
+      ok: true,
+      region_scope: regScope || "TODAS (CONSULTA ADMIN)",
+      can_sign: Boolean(regScope),
+      data: rows,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al listar asignaciones pendientes para la región");
+  }
+});
+
+// 4.2 POST /api/tabletas/asignaciones/:movimientoId/completar-region — Captura regional (nombre, cargo, 3 fotos y firma digital)
+app.post(
+  "/api/tabletas/asignaciones/:movimientoId/completar-region",
+  authRequired,
+  (req, res, next) => {
+    if (!getRegionalSignatureScope(req.user)) {
+      return httpError(res, 403, "Solo las cuentas regionales autorizadas (Los Cabos, Mulegé, Comondú) pueden completar asignaciones regionales.");
+    }
+    return next();
+  },
+  uploadTabletaEvidenciasMiddleware,
+  async (req, res) => {
+    try {
+      await ensureSchemaAndUsers();
+      const regScope = getRegionalSignatureScope(req.user);
+      if (!regScope) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 403, "Solo las cuentas regionales autorizadas (Los Cabos, Mulegé, Comondú) pueden completar asignaciones regionales.");
+      }
+      const movId = Number(req.params.movimientoId);
+      if (!Number.isInteger(movId) || movId <= 0) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 400, "ID de movimiento inválido.");
+      }
+
+      const b = req.body || {};
+      const nombreResg = String(b.nombre_resguardante || b.nombre_persona || "").trim();
+      if (nombreResg.length < 5) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 400, "El nombre completo del resguardante es obligatorio (mínimo 5 caracteres).");
+      }
+      const cargoResg = String(b.cargo_resguardante || b.cargo_persona || "Servidor de la Nación").trim() || "Servidor de la Nación";
+
+      const firmaData = String(b.firma_data || "").trim();
+      if (!/^data:image\/png;base64,[A-Za-z0-9+/=\s]+$/i.test(firmaData)) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 400, "Firma digital inválida. Debe enviarse en formato PNG Base64 (data:image/png;base64,...).");
+      }
+      if (Buffer.byteLength(firmaData, "utf8") > 153600) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 400, "La firma digital excede el tamaño máximo permitido de 150 KB.");
+      }
+
+      const fIneFrente = req.files?.foto_ine_frente?.[0] || null;
+      const fIneReverso = req.files?.foto_ine_reverso?.[0] || null;
+      const fEntrega = req.files?.foto_entrega?.[0] || null;
+
+      const conn = await poolOps.getConnection();
+      let movRow = null;
+      let folioFirma = "";
+      const oldFilesToDelete = [];
+
+      try {
+        await conn.beginTransaction();
+        const [[mov]] = await conn.query(
+          `SELECT * FROM movimientos_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+          [movId]
+        );
+        if (!mov) {
+          await conn.rollback();
+          cleanupTabletaEvidenciaFiles(req.files);
+          return httpError(res, 404, "Solicitud de asignación regional no encontrada.");
+        }
+        if (String(mov.region_firma_destino || "").toUpperCase() !== regScope) {
+          await conn.rollback();
+          cleanupTabletaEvidenciaFiles(req.files);
+          return httpError(res, 403, "Forbidden: Esta asignación no corresponde a tu región.");
+        }
+        if (String(mov.tipo || "").toUpperCase() !== "ASIGNACION" || String(mov.estado || "").toUpperCase() !== "PENDIENTE_REGION") {
+          await conn.rollback();
+          cleanupTabletaEvidenciaFiles(req.files);
+          return httpError(res, 409, `Esta asignación ya no está pendiente de captura regional (estado actual: ${mov.estado}).`);
+        }
+
+        const nextFrente = fIneFrente ? fIneFrente.filename : (mov.foto_ine_frente || null);
+        const nextReverso = fIneReverso ? fIneReverso.filename : (mov.foto_ine_reverso || null);
+        const nextEntrega = fEntrega ? fEntrega.filename : (mov.foto_entrega || null);
+
+        if (!nextFrente || !nextReverso || !nextEntrega) {
+          await conn.rollback();
+          cleanupTabletaEvidenciaFiles(req.files);
+          return httpError(
+            res,
+            400,
+            "Debes adjuntar las 3 fotografías obligatorias (INE Frente, INE Reverso y Foto de Entrega) para enviar a revisión."
+          );
+        }
+
+        if (fIneFrente && mov.foto_ine_frente && mov.foto_ine_frente !== nextFrente) {
+          oldFilesToDelete.push(mov.foto_ine_frente);
+        }
+        if (fIneReverso && mov.foto_ine_reverso && mov.foto_ine_reverso !== nextReverso) {
+          oldFilesToDelete.push(mov.foto_ine_reverso);
+        }
+        if (fEntrega && mov.foto_entrega && mov.foto_entrega !== nextEntrega) {
+          oldFilesToDelete.push(mov.foto_entrega);
+        }
+
+        const year = new Date().getFullYear();
+        folioFirma = `ASIG-TAB-${year}-${String(mov.id).padStart(4, "0")}`;
+        movRow = mov;
+
+        await conn.query(
+          `UPDATE movimientos_tabletas
+           SET nombre_persona = ?,
+               cargo_persona = ?,
+               foto_ine_frente = ?,
+               foto_ine_reverso = ?,
+               foto_entrega = ?,
+               firma_asignacion_data = ?,
+               fecha_firma_asignacion = NOW(),
+               folio_firma_asignacion = ?,
+               firmado_por_usuario_id = ?,
+               estado = 'PENDIENTE_REVISION',
+               estado_firma = 'FIRMADO',
+               motivo_rechazo_asignacion = NULL
+           WHERE id = ?`,
+          [
+            nombreResg,
+            cargoResg,
+            nextFrente,
+            nextReverso,
+            nextEntrega,
+            firmaData,
+            folioFirma,
+            Number(req.user?.id || 0) || null,
+            mov.id,
+          ]
+        );
+
+        await conn.query(
+          `UPDATE inventario_tabletas
+           SET estado_asignacion = 'PENDIENTE_REVISION_ASIGNACION'
+           WHERE id = ?`,
+          [mov.tableta_id]
+        );
+
+        await conn.commit();
+      } catch (err) {
+        await conn.rollback();
+        cleanupTabletaEvidenciaFiles(req.files);
+        throw err;
+      } finally {
+        conn.release();
+      }
+
+      for (const oldFile of oldFilesToDelete) {
+        removeEvidenciaFilenameFromDisk(oldFile);
+      }
+
+      const detMsg = `Región ${regScope} capturó datos, 3 fotos y firma digital para asignación de Tableta #${movRow.no_resguardo} (Resguardante: ${nombreResg}, Sello: ${folioFirma}). Enviada a revisión y autorización.`;
+      await registrarBitacora(req, "TABLETAS", "CAPTURA_ASIGNACION_REGION", detMsg);
+      await registrarBitacoraTableta(req, {
+        tableta_id: movRow.tableta_id,
+        no_resguardo: movRow.no_resguardo,
+        accion: "CAPTURA_ASIGNACION_REGION",
+        detalles: detMsg,
+      });
+
+      return res.json({
+        ok: true,
+        movimiento_id: movRow.id,
+        folio_firma_asignacion: folioFirma,
+        message: "✅ Información enviada a Luis Mayoral para revisión y autorización.",
+      });
+    } catch (e) {
+      cleanupTabletaEvidenciaFiles(req.files);
+      return httpError(res, 500, e.message || "Error al completar la captura de asignación regional");
+    }
+  }
+);
+
+// 4.3 GET /api/tabletas/asignaciones/:movimientoId/detalle-revision — Detalle completo con firma para revisión (Luis, Jorge, Rodrigo, Admin)
+app.get("/api/tabletas/asignaciones/:movimientoId/detalle-revision", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canViewTabletas(req)) {
+      return httpError(res, 403, "Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales (Jorge Patrón / Rodrigo Molina) y Administración.");
+    }
+    const movId = Number(req.params.movimientoId);
+    if (!Number.isInteger(movId) || movId <= 0) {
+      return httpError(res, 400, "ID de movimiento inválido.");
+    }
+
+    const [[row]] = await poolRead.query(
+      `SELECT
+         m.id AS movimiento_id,
+         m.tableta_id,
+         m.tipo,
+         m.folio,
+         m.estado,
+         m.estado_firma,
+         m.region_firma_destino,
+         m.oficina_programa,
+         m.nombre_persona,
+         m.cargo_persona,
+         m.observaciones,
+         m.firma_asignacion_data,
+         m.fecha_firma_asignacion,
+         m.folio_firma_asignacion,
+         m.motivo_rechazo_asignacion,
+         m.created_at,
+         (m.foto_ine_frente IS NOT NULL AND m.foto_ine_frente <> '') AS tiene_foto_ine_frente,
+         (m.foto_ine_reverso IS NOT NULL AND m.foto_ine_reverso <> '') AS tiene_foto_ine_reverso,
+         (m.foto_entrega IS NOT NULL AND m.foto_entrega <> '') AS tiene_foto_entrega,
+         t.no_resguardo,
+         t.imei,
+         t.numero_serie,
+         t.no_caja,
+         t.marca,
+         t.modelo,
+         t.descripcion,
+         t.estatus_fisico,
+         t.tiene_cargador,
+         t.tiene_caja,
+         t.estado_asignacion
+       FROM movimientos_tabletas m
+       INNER JOIN inventario_tabletas t ON t.id = m.tableta_id
+       WHERE m.id = ?
+       LIMIT 1`,
+      [movId]
+    );
+    if (!row) {
+      return httpError(res, 404, "Movimiento de asignación no encontrado.");
+    }
+
+    return res.json({ ok: true, data: row });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al obtener detalle de revisión de asignación");
+  }
+});
+
+// 4.4 POST /api/tabletas/asignaciones/:movimientoId/autorizar — Autoriza y pasa la tableta oficialmente a EN_RESGUARDO
+app.post("/api/tabletas/asignaciones/:movimientoId/autorizar", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para autorizar asignaciones regionales de tabletas.");
+    }
+    const movId = Number(req.params.movimientoId);
+    if (!Number.isInteger(movId) || movId <= 0) {
+      return httpError(res, 400, "ID de movimiento inválido.");
+    }
+
+    const conn = await poolOps.getConnection();
+    let movRow = null;
+    let folioFinal = "";
+    try {
+      await conn.beginTransaction();
+      const [[mov]] = await conn.query(
+        `SELECT * FROM movimientos_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+        [movId]
+      );
+      if (!mov) {
+        await conn.rollback();
+        return httpError(res, 404, "Movimiento de asignación no encontrado.");
+      }
+      if (String(mov.tipo || "").toUpperCase() !== "ASIGNACION" || String(mov.estado || "").toUpperCase() !== "PENDIENTE_REVISION") {
+        await conn.rollback();
+        return httpError(res, 409, `Esta asignación no está lista para autorización (estado actual: ${mov.estado}).`);
+      }
+      if (!mov.foto_ine_frente || !mov.foto_ine_reverso || !mov.foto_entrega || !mov.firma_asignacion_data) {
+        await conn.rollback();
+        return httpError(res, 409, "Faltan fotografías de evidencia o la firma digital para autorizar esta asignación.");
+      }
+
+      folioFinal = String(mov.folio || "").trim();
+      if (!folioFinal || folioFinal === "PENDIENTE") {
+        folioFinal = await generateNextTabletaFolio(conn);
+      }
+      const regDest = String(mov.region_firma_destino || mov.region || "LA PAZ").trim().toUpperCase();
+      const ofiDest = String(mov.oficina_programa || "").trim() || getDefaultOficinaForForaneaRegion(regDest);
+      const nomDest = String(mov.nombre_persona || "").trim();
+      const cargoDest = String(mov.cargo_persona || "Servidor de la Nación").trim() || "Servidor de la Nación";
+
+      await conn.query(
+        `UPDATE movimientos_tabletas
+         SET folio = ?,
+             estado = 'CONFIRMADO',
+             confirmed_at = NOW(),
+             asignacion_autorizada_por_id = ?,
+             fecha_autorizacion_asignacion = NOW()
+         WHERE id = ?`,
+        [folioFinal, Number(req.user?.id || 0) || null, mov.id]
+      );
+
+      await conn.query(
+        `UPDATE inventario_tabletas
+         SET estado_asignacion = 'EN_RESGUARDO',
+             sin_resguardo_previo = 0,
+             nombre_resguardante = ?,
+             cargo_resguardante = ?,
+             region = ?,
+             oficina_programa = ?,
+             ultimo_movimiento_asignacion_id = ?
+         WHERE id = ?`,
+        [nomDest, cargoDest, regDest, ofiDest, mov.id, mov.tableta_id]
+      );
+
+      movRow = { ...mov, folio: folioFinal, region_destino: regDest, oficina_destino: ofiDest };
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    const detMsg = `Asignación regional autorizada para Tableta #${movRow.no_resguardo} (Folio ${folioFinal}, Región: ${movRow.region_destino}, Resguardante: ${movRow.nombre_persona}, Sello: ${movRow.folio_firma_asignacion || "-"}). Estado actual: EN_RESGUARDO.`;
+    await registrarBitacora(req, "TABLETAS", "AUTORIZAR_ASIGNACION_REGIONAL", detMsg);
+    await registrarBitacoraTableta(req, {
+      tableta_id: movRow.tableta_id,
+      no_resguardo: movRow.no_resguardo,
+      accion: "AUTORIZAR_ASIGNACION_REGIONAL",
+      detalles: detMsg,
+    });
+
+    return res.json({
+      ok: true,
+      movimiento_id: movRow.id,
+      tableta_id: movRow.tableta_id,
+      folio: folioFinal,
+      pdf_url: `/api/tabletas/${movRow.tableta_id}/resguardo-evidencias-pdf?movimiento_id=${movRow.id}`,
+      message: `✅ Asignación autorizada (Folio ${folioFinal}). La Tableta #${movRow.no_resguardo} pasó oficialmente a En Resguardo.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al autorizar asignación regional");
+  }
+});
+
+// 4.5 POST /api/tabletas/asignaciones/:movimientoId/rechazar — Devuelve la asignación a la región con motivo
+app.post("/api/tabletas/asignaciones/:movimientoId/rechazar", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para rechazar asignaciones regionales de tabletas.");
+    }
+    const movId = Number(req.params.movimientoId);
+    if (!Number.isInteger(movId) || movId <= 0) {
+      return httpError(res, 400, "ID de movimiento inválido.");
+    }
+    const motivo = String(req.body?.motivo || "").trim();
+    if (!motivo) {
+      return httpError(res, 400, "Debes indicar el motivo del rechazo para que la región pueda corregir.");
+    }
+    if (motivo.length > 250) {
+      return httpError(res, 400, "El motivo no puede exceder 250 caracteres.");
+    }
+
+    const conn = await poolOps.getConnection();
+    let movRow = null;
+    try {
+      await conn.beginTransaction();
+      const [[mov]] = await conn.query(
+        `SELECT * FROM movimientos_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+        [movId]
+      );
+      if (!mov) {
+        await conn.rollback();
+        return httpError(res, 404, "Movimiento de asignación no encontrado.");
+      }
+      if (String(mov.tipo || "").toUpperCase() !== "ASIGNACION" || String(mov.estado || "").toUpperCase() !== "PENDIENTE_REVISION") {
+        await conn.rollback();
+        return httpError(res, 409, `Solo se pueden rechazar asignaciones en estado PENDIENTE_REVISION (actual: ${mov.estado}).`);
+      }
+
+      await conn.query(
+        `UPDATE movimientos_tabletas
+         SET estado = 'PENDIENTE_REGION',
+             estado_firma = 'RECHAZADO',
+             motivo_rechazo_asignacion = ?
+         WHERE id = ?`,
+        [motivo, mov.id]
+      );
+
+      await conn.query(
+        `UPDATE inventario_tabletas
+         SET estado_asignacion = 'PENDIENTE_ASIGNACION_REGIONAL'
+         WHERE id = ?`,
+        [mov.tableta_id]
+      );
+
+      movRow = mov;
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    const detMsg = `Asignación regional de Tableta #${movRow.no_resguardo} devuelta a región ${movRow.region_firma_destino || "-"} para corrección. Motivo: ${motivo}`;
+    await registrarBitacora(req, "TABLETAS", "RECHAZAR_ASIGNACION_REGIONAL", detMsg);
+    await registrarBitacoraTableta(req, {
+      tableta_id: movRow.tableta_id,
+      no_resguardo: movRow.no_resguardo,
+      accion: "RECHAZAR_ASIGNACION_REGIONAL",
+      detalles: detMsg,
+    });
+
+    return res.json({
+      ok: true,
+      movimiento_id: movRow.id,
+      message: `Asignación devuelta a ${movRow.region_firma_destino || "la región"} con el motivo registrado.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al rechazar asignación regional");
+  }
+});
+
+// 4.6 POST /api/tabletas/asignaciones/:movimientoId/cancelar — Cancela envío regional, limpia fotos y regresa a DISPONIBLE
+app.post("/api/tabletas/asignaciones/:movimientoId/cancelar", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para cancelar envíos regionales de tabletas.");
+    }
+    const movId = Number(req.params.movimientoId);
+    if (!Number.isInteger(movId) || movId <= 0) {
+      return httpError(res, 400, "ID de movimiento inválido.");
+    }
+
+    const conn = await poolOps.getConnection();
+    let movRow = null;
+    const filesToCleanup = [];
+    try {
+      await conn.beginTransaction();
+      const [[mov]] = await conn.query(
+        `SELECT * FROM movimientos_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+        [movId]
+      );
+      if (!mov) {
+        await conn.rollback();
+        return httpError(res, 404, "Movimiento de asignación no encontrado.");
+      }
+      const movEst = String(mov.estado || "").toUpperCase();
+      if (String(mov.tipo || "").toUpperCase() !== "ASIGNACION" || !["PENDIENTE_REGION", "PENDIENTE_REVISION"].includes(movEst)) {
+        await conn.rollback();
+        return httpError(res, 409, `Solo se pueden cancelar envíos en estado PENDIENTE_REGION o PENDIENTE_REVISION (actual: ${movEst}).`);
+      }
+
+      if (mov.foto_ine_frente) filesToCleanup.push(mov.foto_ine_frente);
+      if (mov.foto_ine_reverso) filesToCleanup.push(mov.foto_ine_reverso);
+      if (mov.foto_entrega) filesToCleanup.push(mov.foto_entrega);
+
+      await conn.query(
+        `UPDATE movimientos_tabletas
+         SET estado = 'CANCELADO',
+             estado_firma = 'CANCELADO',
+             foto_ine_frente = NULL,
+             foto_ine_reverso = NULL,
+             foto_entrega = NULL
+         WHERE id = ?`,
+        [mov.id]
+      );
+
+      await conn.query(
+        `UPDATE inventario_tabletas
+         SET estado_asignacion = 'DISPONIBLE',
+             region = 'LA PAZ',
+             oficina_programa = 'Delegación La Paz',
+             nombre_resguardante = '',
+             cargo_resguardante = '',
+             ultimo_movimiento_asignacion_id = NULL
+         WHERE id = ?`,
+        [mov.tableta_id]
+      );
+
+      movRow = mov;
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    for (const f of filesToCleanup) {
+      removeEvidenciaFilenameFromDisk(f);
+    }
+
+    const detMsg = `Envío de asignación regional (${movRow.region_firma_destino || "-"}) cancelado para Tableta #${movRow.no_resguardo}. Equipo regresado a DISPONIBLE en La Paz.`;
+    await registrarBitacora(req, "TABLETAS", "CANCELAR_ASIGNACION_REGIONAL", detMsg);
+    await registrarBitacoraTableta(req, {
+      tableta_id: movRow.tableta_id,
+      no_resguardo: movRow.no_resguardo,
+      accion: "CANCELAR_ASIGNACION_REGIONAL",
+      detalles: detMsg,
+    });
+
+    return res.json({
+      ok: true,
+      movimiento_id: movRow.id,
+      message: `Envío regional cancelado. La Tableta #${movRow.no_resguardo} regresó a Disponibles.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al cancelar asignación regional");
+  }
+});
+
+// 4.7 POST /api/tabletas/:id/enviar-asignacion-region — Paso 1: Enviar tableta DISPONIBLE a región foránea
+app.post("/api/tabletas/:id/enviar-asignacion-region", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "No tienes permiso para enviar tabletas a asignación regional.");
+    }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return httpError(res, 400, "ID de tableta inválido.");
+    }
+
+    const b = req.body || {};
+    const regionDestino = normalizeTabletaForaneaRegion(b.region_destino || b.region || "");
+    if (!regionDestino || !["LOS CABOS", "MULEGE", "COMONDU"].includes(regionDestino)) {
+      return httpError(res, 400, "Selecciona una región foránea válida: LOS CABOS, MULEGE o COMONDU.");
+    }
+    const oficinaDestino = String(b.oficina_programa || "").trim() || getDefaultOficinaForForaneaRegion(regionDestino);
+    const observaciones = String(b.observaciones || "").trim() || null;
+
+    const conn = await poolOps.getConnection();
+    let movId = null;
+    let tabRow = null;
+    try {
+      await conn.beginTransaction();
+      const [[tab]] = await conn.query(
+        `SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`,
+        [id]
+      );
+      if (!tab) {
+        await conn.rollback();
+        return httpError(res, 404, "Tableta no encontrada.");
+      }
+      if (String(tab.estado_asignacion || "").toUpperCase() !== "DISPONIBLE") {
+        await conn.rollback();
+        return httpError(res, 409, `La Tableta #${tab.no_resguardo} no está DISPONIBLE para enviar a región (estado actual: ${tab.estado_asignacion}).`);
+      }
+
+      const [ins] = await conn.query(
+        `INSERT INTO movimientos_tabletas
+           (tipo, folio, tableta_id, no_resguardo, region, oficina_programa,
+            nombre_persona, cargo_persona, tiene_cargador, tiene_caja, estatus_fisico, observaciones,
+            estado, estado_firma, region_firma_destino, asignacion_enviada_por_id)
+         VALUES ('ASIGNACION', '', ?, ?, ?, ?, '', 'Servidor de la Nación', ?, ?, ?, ?, 'PENDIENTE_REGION', 'PENDIENTE_FIRMA', ?, ?)`,
+        [
+          tab.id,
+          tab.no_resguardo,
+          regionDestino,
+          oficinaDestino,
+          Number(tab.tiene_cargador ?? 1) ? 1 : 0,
+          Number(tab.tiene_caja ?? 1) ? 1 : 0,
+          String(tab.estatus_fisico || "BUENO").trim().toUpperCase(),
+          observaciones || tab.observaciones || null,
+          regionDestino,
+          Number(req.user?.id || 0) || null,
+        ]
+      );
+      movId = ins.insertId;
+
+      await conn.query(
+        `UPDATE inventario_tabletas
+         SET estado_asignacion = 'PENDIENTE_ASIGNACION_REGIONAL',
+             region = ?,
+             oficina_programa = ?,
+             ultimo_movimiento_asignacion_id = ?,
+             observaciones = COALESCE(?, observaciones)
+         WHERE id = ?`,
+        [regionDestino, oficinaDestino, movId, observaciones, tab.id]
+      );
+
+      tabRow = tab;
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    const detMsg = `Tableta #${tabRow.no_resguardo} (IMEI: ${tabRow.imei}, Serie: ${tabRow.numero_serie}) enviada a asignación regional de ${regionDestino} (${oficinaDestino}).${observaciones ? ` Obs: ${observaciones}` : ""}`;
+    await registrarBitacora(req, "TABLETAS", "ENVIAR_ASIGNACION_REGION", detMsg);
+    await registrarBitacoraTableta(req, {
+      tableta_id: tabRow.id,
+      no_resguardo: tabRow.no_resguardo,
+      imei: tabRow.imei,
+      numero_serie: tabRow.numero_serie,
+      accion: "ENVIAR_ASIGNACION_REGION",
+      detalles: detMsg,
+    });
+
+    return res.json({
+      ok: true,
+      movimiento_id: movId,
+      tableta_id: tabRow.id,
+      region_destino: regionDestino,
+      message: `📤 Tableta #${tabRow.no_resguardo} enviada a ${regionDestino} para captura de resguardante, 3 fotos y firma digital.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al enviar tableta a asignación regional");
   }
 });
 
@@ -18024,6 +19013,7 @@ app.get("/api/tabletas/:id/resguardo-evidencias-pdf", authRequired, async (req, 
     }
 
     let priorizarTableta = true;
+    const tabEstadoUpper = String(tab.estado_asignacion || "").toUpperCase();
     if (!mov) {
       const [[lastAsig]] = await poolRead.query(
         `SELECT * FROM movimientos_tabletas
@@ -18031,7 +19021,7 @@ app.get("/api/tabletas/:id/resguardo-evidencias-pdf", authRequired, async (req, 
            ?,
            (
              SELECT m2.id FROM movimientos_tabletas m2
-             WHERE m2.tableta_id = ? AND m2.tipo = 'ASIGNACION' AND m2.estado = 'CONFIRMADO'
+             WHERE m2.tableta_id = ? AND m2.tipo = 'ASIGNACION' AND m2.estado IN ('CONFIRMADO', 'PENDIENTE_REVISION')
              ORDER BY (m2.foto_ine_frente IS NOT NULL) DESC, m2.id DESC
              LIMIT 1
            )
@@ -18042,7 +19032,6 @@ app.get("/api/tabletas/:id/resguardo-evidencias-pdf", authRequired, async (req, 
       mov = lastAsig || null;
       priorizarTableta = true;
     } else {
-      const tabEstadoUpper = String(tab.estado_asignacion || "").toUpperCase();
       if (Number(tab.ultimo_movimiento_asignacion_id || 0) > 0) {
         priorizarTableta = Number(mov.id) === Number(tab.ultimo_movimiento_asignacion_id);
       } else if (tabEstadoUpper !== "DISPONIBLE") {
@@ -18056,6 +19045,14 @@ app.get("/api/tabletas/:id/resguardo-evidencias-pdf", authRequired, async (req, 
       } else {
         priorizarTableta = false;
       }
+    }
+
+    // En vista previa de asignación regional pendiente de revisión, usar los datos recién capturados por la región en `mov`
+    if (
+      tabEstadoUpper === "PENDIENTE_REVISION_ASIGNACION" ||
+      String(mov?.estado || "").toUpperCase() === "PENDIENTE_REVISION"
+    ) {
+      priorizarTableta = false;
     }
 
     return renderTabletaFormatoPdf(req, res, {

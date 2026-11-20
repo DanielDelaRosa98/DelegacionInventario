@@ -1536,6 +1536,58 @@ tr.row-siniestro td:first-child {
   gap: 12px;
 }
 
+.badge-tab-asig-revision {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: #dbeafe;
+  color: #1d4ed8;
+  border: 1px solid #93c5fd;
+}
+
+.badge-tab-asig-esperando {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #f59e0b;
+}
+
+.tab-rev-sig-box {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.tab-rev-sig-box img {
+  max-width: 340px;
+  max-height: 110px;
+  object-fit: contain;
+  border-bottom: 1px solid #94a3b8;
+  padding-bottom: 4px;
+}
+
+.tab-alerta-rechazo-box {
+  background: #fef2f2;
+  border: 1px solid #f87171;
+  color: #991b1b;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
 
 
 
