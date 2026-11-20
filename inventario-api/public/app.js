@@ -865,6 +865,7 @@
     routeKey('POST', '/api/tabletas/devoluciones/:movimientoId/rechazar'),
     routeKey('POST', '/api/tabletas/devoluciones/:movimientoId/cancelar'),
     routeKey('GET', '/api/tabletas/evidencias/:movimientoId/:tipo'),
+    routeKey('GET', '/api/tabletas/:id/resguardo-evidencias-pdf'),
     routeKey('PUT', '/api/vales-prestamo/:id/autorizar'),
     routeKey('PUT', '/api/vales-prestamo/:id/devolver'),
     routeKey('PUT', '/api/vales-prestamo/:id/cancelar'),
@@ -1137,7 +1138,9 @@
       if (breadcrumb) {
         const btnClone = btn.cloneNode(true);
         btnClone.querySelectorAll('.badge-pending, svg').forEach(n => n.remove());
-        const labelClean = (btnClone.textContent || btn.textContent || '').trim();
+        const labelClean = (btnClone.textContent || btn.textContent || '')
+          .replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]+\s*/u, '')
+          .trim();
         breadcrumb.innerHTML = `Operación / <b>${escHtml(labelClean)}</b>`;
       }
     }
@@ -8276,7 +8279,27 @@
     lb.classList.remove('hidden');
   }
 
-  function openModalEvidenciasTableta({ movId, noResguardo, nombreResguardante, folio }) {
+  let CURRENT_TAB_EVIDENCIAS_CTX = { tabletaId: 0, movId: 0 };
+
+  function openResguardoEvidenciasPdf(tabletaId, movId) {
+    if (!canViewTabletas(CURRENT_USER)) {
+      toast('No tienes permiso para abrir el expediente con evidencias fotográficas.', false);
+      return;
+    }
+    const tid = Number(tabletaId || 0);
+    const mid = Number(movId || 0);
+    if (!tid && !mid) {
+      toast('No se encontró la referencia del resguardo con evidencias.', false);
+      return;
+    }
+    const qs = new URLSearchParams();
+    if (mid > 0) qs.set('movimiento_id', String(mid));
+    qs.set('_t', String(Date.now()));
+    const url = `/api/tabletas/${tid}/resguardo-evidencias-pdf?${qs.toString()}`;
+    window.open(url, '_blank', 'noopener');
+  }
+
+  function openModalEvidenciasTableta({ tabletaId = 0, movId, noResguardo, nombreResguardante, folio }) {
     if (!canViewTabletas(CURRENT_USER)) {
       toast('No tienes permiso para consultar evidencias fotográficas.', false);
       return;
@@ -8285,6 +8308,14 @@
     if (!mid) {
       toast('Este resguardo no cuenta con evidencias fotográficas adjuntas.', false);
       return;
+    }
+    CURRENT_TAB_EVIDENCIAS_CTX = {
+      tabletaId: Number(tabletaId || 0),
+      movId: mid,
+    };
+    const btnPdfModal = $('btn-tab-evidencias-pdf');
+    if (btnPdfModal) {
+      btnPdfModal.classList.toggle('hidden', !canViewTabletas(CURRENT_USER));
     }
     if ($('tab_evidencias_meta')) {
       const parts = [
@@ -8526,8 +8557,13 @@
           ? `IMEI: ${escHtml(safestr(r.imei || '-'))}<br><span class="muted" style="font-size:11px;">Serie: ${escHtml(safestr(r.numero_serie || '-'))}</span>`
           : '-';
         const evMovId = Number(r.evidencias_mov_id || 0);
-        const evBtn = (r.tiene_evidencias && evMovId > 0)
-          ? `<div style="margin-top:4px;"><button type="button" class="mini btn-tab-evidencias" data-mov="${evMovId}" data-resg="${Number(r.no_resguardo || 0)}" data-nombre="" data-folio="">📷 Ver evidencias</button></div>`
+        const tabIdBit = Number(r.tableta_id || 0);
+        const canViewEvidBit = canViewTabletas(CURRENT_USER) && r.tiene_evidencias && evMovId > 0;
+        const evBtn = canViewEvidBit
+          ? `<div style="margin-top:5px; display:flex; flex-wrap:wrap; gap:4px;">
+               <button type="button" class="mini btn-tab-evidencias" data-id="${tabIdBit}" data-mov="${evMovId}" data-resg="${Number(r.no_resguardo || 0)}" data-nombre="" data-folio="">📷 Ver evidencias</button>
+               <button type="button" class="mini btn-tab-evidencias-pdf" data-id="${tabIdBit}" data-mov="${evMovId}" title="Vista previa / imprimir Resguardo con Anexo Fotográfico (2 páginas)">🖨️ Resguardo + Fotos</button>
+             </div>`
           : '';
         return `<tr>
           <td style="white-space:nowrap; font-size:12px;">${escHtml(fecha)}</td>
@@ -8573,7 +8609,8 @@
       const evMovId = Number(t.evidencias_mov_id || 0);
       const hasEvid = canViewTab && Number(t.tiene_evidencias) === 1 && evMovId > 0;
       const evidBtnHtml = hasEvid
-        ? `<button type="button" class="mini btn-tab-evidencias" data-mov="${evMovId}" data-resg="${Number(t.no_resguardo)}" data-nombre="${escHtml(safestr(t.nombre_resguardante))}" data-folio="${escHtml(safestr(t.ultimo_asig_folio || ''))}" title="Ver 3 fotografías de evidencia del resguardo">📷 Evidencias</button>`
+        ? `<button type="button" class="mini btn-tab-evidencias" data-id="${id}" data-mov="${evMovId}" data-resg="${Number(t.no_resguardo)}" data-nombre="${escHtml(safestr(t.nombre_resguardante))}" data-folio="${escHtml(safestr(t.ultimo_asig_folio || ''))}" title="Ver 3 fotografías de evidencia del resguardo">📷 Evidencias</button>
+           <button type="button" class="mini btn-tab-evidencias-pdf" data-id="${id}" data-mov="${evMovId}" title="Vista previa / imprimir Resguardo con Anexo Fotográfico (2 páginas)">🖨️ Resguardo + Fotos</button>`
         : '';
 
       let resgHtml = '';
@@ -8582,7 +8619,7 @@
           ? `<span class="badge-tableta-excel-rojo">🔴 Proveniente de Excel sin resguardo (17 en rojo)</span>`
           : `<span class="badge-tableta-devuelta">📦 Disponible en almacén</span>`;
       } else if (estadoAsig === 'DEVOLUCION_PENDIENTE') {
-        const devNombre = safestr(t.devolucion_nombre_persona || t.nombre_resguardante || '-');
+        const devNombre = safestr(t.nombre_resguardante || t.devolucion_nombre_persona || '-');
         const folioTxt = safestr(t.devolucion_folio || '-');
         const estFirma = safestr(t.devolucion_estado_firma || 'NO_APLICA').toUpperCase();
         const regFirma = safestr(t.devolucion_region_firma || t.region || '');
@@ -8803,14 +8840,14 @@
       const btnResgPdf = ev.target.closest('.btn-tab-pdf-resg');
       if (btnResgPdf) {
         const id = Number(btnResgPdf.dataset.id);
-        window.open(`/api/tabletas/${id}/resguardo-pdf`, '_blank');
+        window.open(`/api/tabletas/${id}/resguardo-pdf?_t=${Date.now()}`, '_blank', 'noopener');
         return;
       }
 
       const btnMovPdf = ev.target.closest('.btn-tab-pdf-mov');
       if (btnMovPdf) {
         const movId = Number(btnMovPdf.dataset.mov);
-        window.open(`/api/tabletas/movimientos/${movId}/pdf`, '_blank');
+        window.open(`/api/tabletas/movimientos/${movId}/pdf?_t=${Date.now()}`, '_blank', 'noopener');
         return;
       }
 
@@ -8841,11 +8878,21 @@
       const btnEvid = ev.target.closest('.btn-tab-evidencias');
       if (btnEvid) {
         openModalEvidenciasTableta({
+          tabletaId: Number(btnEvid.dataset.id || 0),
           movId: Number(btnEvid.dataset.mov || 0),
           noResguardo: Number(btnEvid.dataset.resg || 0),
           nombreResguardante: btnEvid.dataset.nombre || '',
           folio: btnEvid.dataset.folio || '',
         });
+        return;
+      }
+
+      const btnEvidPdf = ev.target.closest('.btn-tab-evidencias-pdf');
+      if (btnEvidPdf) {
+        openResguardoEvidenciasPdf(
+          Number(btnEvidPdf.dataset.id || 0),
+          Number(btnEvidPdf.dataset.mov || 0)
+        );
         return;
       }
 
@@ -8888,14 +8935,31 @@
 
     // Delegación para botón de evidencias dentro del Log de Movimientos (Tabletas)
     $('tab_bit_tbody')?.addEventListener('click', (ev) => {
+      const btnEvidPdf = ev.target.closest('.btn-tab-evidencias-pdf');
+      if (btnEvidPdf) {
+        openResguardoEvidenciasPdf(
+          Number(btnEvidPdf.dataset.id || 0),
+          Number(btnEvidPdf.dataset.mov || 0)
+        );
+        return;
+      }
       const btnEvid = ev.target.closest('.btn-tab-evidencias');
       if (!btnEvid) return;
       openModalEvidenciasTableta({
+        tabletaId: Number(btnEvid.dataset.id || 0),
         movId: Number(btnEvid.dataset.mov || 0),
         noResguardo: Number(btnEvid.dataset.resg || 0),
         nombreResguardante: btnEvid.dataset.nombre || '',
         folio: btnEvid.dataset.folio || '',
       });
+    });
+
+    // Botón dentro del modal de evidencias para abrir PDF de 2 páginas (Resguardo + Anexo Fotográfico)
+    $('btn-tab-evidencias-pdf')?.addEventListener('click', () => {
+      openResguardoEvidenciasPdf(
+        CURRENT_TAB_EVIDENCIAS_CTX.tabletaId,
+        CURRENT_TAB_EVIDENCIAS_CTX.movId
+      );
     });
 
     // Listeners de carga de 3 fotografías obligatorias en Modal Asignar

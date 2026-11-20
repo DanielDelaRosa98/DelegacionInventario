@@ -3459,6 +3459,63 @@ async function ensureSchemaAndUsers() {
       console.warn("[WARN] MIGRACION_COORD_PCD_PAM_V1:", errCoord?.message || errCoord);
     }
 
+    // ========================================================================
+    // MIGRACION_DEV_TAB98_FIRMA_V1:
+    // Pasar por única vez la devolución activa de la Tableta #98 de Los Cabos
+    // (IMEI 356149370513595 / Serie 253QLTE29127H50639 / Folio 000001)
+    // a estado_firma = 'PENDIENTE_FIRMA' y region_firma_destino = 'LOS CABOS'.
+    // ========================================================================
+    try {
+      const [[migTab98Row]] = await poolRead.query(
+        `SELECT valor FROM configuracion_sistema WHERE clave = 'MIGRACION_DEV_TAB98_FIRMA_V1' LIMIT 1`
+      ).catch(() => [[]]);
+
+      if (String(migTab98Row?.valor || "0").trim() !== "1") {
+        const [[tab98]] = await poolRead.query(
+          `SELECT id, no_resguardo, estado_asignacion
+           FROM inventario_tabletas
+           WHERE imei = '356149370513595'
+              OR numero_serie = '253QLTE29127H50639'
+              OR no_resguardo = 98
+           ORDER BY (imei = '356149370513595') DESC, (no_resguardo = 98) DESC, id ASC
+           LIMIT 1`
+        ).catch(() => [[]]);
+
+        if (tab98 && tab98.id) {
+          const [[mov98]] = await poolRead.query(
+            `SELECT id
+             FROM movimientos_tabletas
+             WHERE (tableta_id = ? OR no_resguardo = 98)
+               AND tipo = 'DEVOLUCION'
+               AND estado = 'EN_PROCESO'
+               AND (estado_firma = 'NO_APLICA' OR estado_firma IS NULL OR TRIM(estado_firma) = '')
+             ORDER BY (folio = '000001') DESC, id DESC
+             LIMIT 1`,
+            [tab98.id]
+          ).catch(() => [[]]);
+
+          if (mov98 && mov98.id) {
+            await poolOps.query(
+              `UPDATE movimientos_tabletas
+               SET estado_firma = 'PENDIENTE_FIRMA',
+                   region_firma_destino = 'LOS CABOS'
+               WHERE id = ?`,
+              [mov98.id]
+            ).catch((e) => console.warn("[WARN] MIGRACION_DEV_TAB98_FIRMA_V1 update mov:", e?.message || e));
+          }
+        }
+
+        await poolOps.query(
+          `INSERT INTO configuracion_sistema (clave, valor) VALUES ('MIGRACION_DEV_TAB98_FIRMA_V1', '1')
+           ON DUPLICATE KEY UPDATE valor = '1'`
+        ).catch(() => {});
+
+        console.log("[MIGRACION] MIGRACION_DEV_TAB98_FIRMA_V1 completada exitosamente.");
+      }
+    } catch (errTab98) {
+      console.warn("[WARN] MIGRACION_DEV_TAB98_FIRMA_V1:", errTab98?.message || errTab98);
+    }
+
     SCHEMA_MIGRATED = true;
     return true;
   } catch (err) {
@@ -15624,8 +15681,10 @@ async function generateNextTabletaFolio(conn) {
   return String(nextNum).padStart(6, "0");
 }
 
-function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = "ASIGNACION" }) {
+function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = "ASIGNACION", incluirAnexoEvidencias = false, priorizarTableta = false }) {
   const isDevolucion = String(modo || "").toUpperCase() === "DEVOLUCION";
+  const withAnexo = Boolean(incluirAnexoEvidencias) && !isDevolucion;
+  const preferTab = Boolean(priorizarTableta);
   const folioRaw = movimiento?.folio
     ? String(movimiento.folio).trim()
     : String(tableta?.no_resguardo || 1).padStart(6, "0");
@@ -15642,14 +15701,19 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
   };
   const fechaStr = fmtDateMx(fechaSource);
 
-  const regionVal = String(movimiento?.region || tableta?.region || "LA PAZ").trim();
-  const oficinaVal = String(movimiento?.oficina_programa || tableta?.oficina_programa || "Delegación La Paz").trim();
-  const nombrePersona = String(
-    movimiento?.nombre_persona || tableta?.nombre_resguardante || "SIN NOMBRE ASIGNADO"
-  ).trim();
-  const cargoPersona = String(
-    movimiento?.cargo_persona || tableta?.cargo_resguardante || "Servidor de la nación"
-  ).trim();
+  const tabNombreClean = String(tableta?.nombre_resguardante || "").trim();
+  const movNombreClean = String(movimiento?.nombre_persona || "").trim();
+  const tabCargoClean = String(tableta?.cargo_resguardante || "").trim();
+  const movCargoClean = String(movimiento?.cargo_persona || "").trim();
+  const tabRegionClean = String(tableta?.region || "").trim();
+  const movRegionClean = String(movimiento?.region || "").trim();
+  const tabOficinaClean = String(tableta?.oficina_programa || "").trim();
+  const movOficinaClean = String(movimiento?.oficina_programa || "").trim();
+
+  const regionVal = (preferTab ? (tabRegionClean || movRegionClean) : (movRegionClean || tabRegionClean)) || "LA PAZ";
+  const oficinaVal = (preferTab ? (tabOficinaClean || movOficinaClean) : (movOficinaClean || tabOficinaClean)) || "Delegación La Paz";
+  const nombrePersona = (preferTab ? (tabNombreClean || movNombreClean) : (movNombreClean || tabNombreClean)) || "SIN NOMBRE ASIGNADO";
+  const cargoPersona = (preferTab ? (tabCargoClean || movCargoClean) : (movCargoClean || tabCargoClean)) || "Servidor de la nación";
 
   const tieneCargador = movimiento !== null
     ? Number(movimiento.tiene_cargador ?? 1) === 1
@@ -15665,7 +15729,9 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
     margins: { top: 24, left: 36, right: 36, bottom: 0 },
     bufferPages: true,
     info: {
-      Title: `${isDevolucion ? "Vale de Devolución" : "Resguardo Personal"} Tableta #${tableta.no_resguardo}`,
+      Title: withAnexo
+        ? `Resguardo y Anexo Fotográfico Tableta #${tableta.no_resguardo}`
+        : `${isDevolucion ? "Vale de Devolución" : "Resguardo Personal"} Tableta #${tableta.no_resguardo}`,
       Author: "Delegación de Programas para el Desarrollo en Baja California Sur",
     },
   });
@@ -15674,14 +15740,33 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
   doc.on("data", (c) => chunks.push(c));
   doc.on("end", () => {
     const pdfBuf = Buffer.concat(chunks);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Pragma", "no-cache");
+    if (withAnexo) {
+      const filenameSafe = `Resguardo_Evidencias_${tableta.no_resguardo}.pdf`;
+      res.setHeader("Content-Disposition", `inline; filename="${filenameSafe}"`);
+      return res.send(pdfBuf);
+    }
     const filenameSafe = isDevolucion
       ? `Vale_Devolucion_Tableta_${tableta.no_resguardo}_Folio_${folioStr}.pdf`
       : `Resguardo_Tableta_${tableta.no_resguardo}_Folio_${folioStr}.pdf`;
     savePdfBackup(pdfBuf, "vales_generados", filenameSafe);
-    res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="${filenameSafe}"`);
     res.send(pdfBuf);
   });
+
+  const drawFittedText = (text, x, y, { width, font = "Helvetica-Bold", maxSize = 8.5, minSize = 5.2, align = "left", color = "#111827" }) => {
+    const str = String(text ?? "");
+    let sz = maxSize;
+    doc.font(font).fontSize(sz);
+    while (sz > minSize && doc.widthOfString(str) > width) {
+      sz = Math.max(minSize, Number((sz - 0.3).toFixed(1)));
+      doc.fontSize(sz);
+    }
+    doc.fillColor(color).font(font).fontSize(sz)
+      .text(str, x, y, { width, align, lineBreak: false });
+  };
 
   const COLOR_PRIMARY = "#621132";
   const COLOR_ACCENT = "#B38E5D";
@@ -15762,8 +15847,13 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
   const personaLabel = isDevolucion ? "QUIEN ENTREGA / DEVUELVE:" : "USUARIO RESGUARDANTE:";
   doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
     .text(personaLabel, leftX + 6, metaY + 23, { lineBreak: false });
-  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8.5)
-    .text(nombrePersona.toUpperCase(), leftX + 132, metaY + 23, { width: 228, lineBreak: false });
+  drawFittedText(nombrePersona.toUpperCase(), leftX + 132, metaY + 23, {
+    width: 228,
+    font: "Helvetica-Bold",
+    maxSize: 8.5,
+    minSize: 5.8,
+    color: "#111827",
+  });
 
   doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
     .text("FECHA:", leftX + 372, metaY + 23, { lineBreak: false });
@@ -15773,8 +15863,13 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
   // Fila 3 de metadatos: Cargo y Caja
   doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
     .text("CARGO / PUESTO:", leftX + 6, metaY + 41, { lineBreak: false });
-  doc.fillColor("#111827").font("Helvetica").fontSize(8)
-    .text(cargoPersona, leftX + 132, metaY + 41, { width: 240, lineBreak: false });
+  drawFittedText(cargoPersona, leftX + 132, metaY + 41, {
+    width: 235,
+    font: "Helvetica",
+    maxSize: 8,
+    minSize: 5.8,
+    color: "#111827",
+  });
   doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
     .text("NO. CAJA:", leftX + 372, metaY + 41, { lineBreak: false });
   doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8)
@@ -15938,10 +16033,22 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
 
     doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(6.8)
       .text(titulo, x + 2, y + 3, { width: w - 4, align: "center", lineBreak: false });
-    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(6.6)
-      .text(nombre, x + 4, y + h - 19, { width: w - 8, align: "center", lineBreak: false });
-    doc.fillColor("#4B5563").font("Helvetica").fontSize(5.7)
-      .text(cargo, x + 4, y + h - 10, { width: w - 8, align: "center", lineBreak: false });
+    drawFittedText(nombre, x + 4, y + h - 19, {
+      width: w - 8,
+      font: "Helvetica-Bold",
+      maxSize: 6.6,
+      minSize: 4.8,
+      align: "center",
+      color: "#111827",
+    });
+    drawFittedText(cargo, x + 4, y + h - 10, {
+      width: w - 8,
+      font: "Helvetica",
+      maxSize: 5.7,
+      minSize: 4.5,
+      align: "center",
+      color: "#4B5563",
+    });
   };
 
   // Firma Superior Central (AUTORIZA)
@@ -16025,14 +16132,196 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
     cargo: "Encargado de Almacén",
   });
 
-  // Pie de página único en 1 hoja (sin desbordamiento)
+  // Página 2 opcional: ANEXO FOTOGRÁFICO DE EVIDENCIAS (exclusivo auditoría)
+  if (withAnexo) {
+    doc.addPage({
+      size: "LETTER",
+      margins: { top: 24, left: 36, right: 36, bottom: 0 },
+    });
+
+    if (logoGobPath) {
+      try {
+        doc.image(logoGobPath, leftX, 20, { fit: [100, 34], align: "left", valign: "top" });
+      } catch {}
+    }
+    if (logoBienPath) {
+      try {
+        doc.image(logoBienPath, rightLimit - 90, 20, { fit: [90, 34], align: "right", valign: "top" });
+      } catch {}
+    }
+
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(10.5)
+      .text("SECRETARÍA DE BIENESTAR", leftX, 20, { width: contentWidth, align: "center", lineBreak: false });
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(8.3)
+      .text("DELEGACIÓN BAJA CALIFORNIA SUR — ANEXO DE EVIDENCIA FOTOGRÁFICA", leftX, 34, { width: contentWidth, align: "center", lineBreak: false });
+    doc.fillColor("#4B5563").font("Helvetica-Bold").fontSize(7.8)
+      .text("COORDINACIÓN DE RECURSOS MATERIALES", leftX, 46, { width: contentWidth, align: "center", lineBreak: false });
+
+    doc.save();
+    doc.moveTo(leftX, 60).lineTo(rightLimit, 60).lineWidth(1.5).strokeColor(COLOR_ACCENT).stroke();
+    doc.restore();
+
+    // Banda compacta de metadatos del resguardo
+    const p2MetaY = 68;
+    const p2MetaH = 52;
+    doc.save();
+    doc.rect(leftX, p2MetaY, contentWidth, p2MetaH).fillAndStroke(COLOR_SOFT_BG, COLOR_PRIMARY);
+    doc.moveTo(leftX, p2MetaY + 17).lineTo(rightLimit, p2MetaY + 17).lineWidth(0.5).strokeColor("#D1D5DB").stroke();
+    doc.moveTo(leftX, p2MetaY + 34).lineTo(rightLimit, p2MetaY + 34).lineWidth(0.5).strokeColor("#D1D5DB").stroke();
+    doc.restore();
+
+    // Fila 1: No. Resguardo | Región / Oficina | Fecha de Asignación
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+      .text("NO. RESGUARDO:", leftX + 6, p2MetaY + 5, { lineBreak: false });
+    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8.2)
+      .text(`#${tableta.no_resguardo}   (Folio: ${folioStr})`, leftX + 82, p2MetaY + 5, { width: 135, lineBreak: false });
+
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+      .text("REGIÓN / OFICINA:", leftX + 215, p2MetaY + 5, { lineBreak: false });
+    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(7.8)
+      .text(`${regionVal} — ${oficinaVal}`, leftX + 292, p2MetaY + 5, { width: 130, lineBreak: false });
+
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+      .text("FECHA ASIG.:", leftX + 426, p2MetaY + 5, { lineBreak: false });
+    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(7.8)
+      .text(fechaStr, leftX + 480, p2MetaY + 5, { width: 54, align: "right", lineBreak: false });
+
+    // Fila 2: Resguardante | Cargo
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+      .text("RESGUARDANTE:", leftX + 6, p2MetaY + 22, { lineBreak: false });
+    drawFittedText(nombrePersona.toUpperCase(), leftX + 82, p2MetaY + 22, {
+      width: 255,
+      font: "Helvetica-Bold",
+      maxSize: 8,
+      minSize: 5.8,
+      color: "#111827",
+    });
+
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+      .text("CARGO:", leftX + 345, p2MetaY + 22, { lineBreak: false });
+    drawFittedText(cargoPersona, leftX + 382, p2MetaY + 22, {
+      width: 152,
+      font: "Helvetica",
+      maxSize: 7.8,
+      minSize: 5.5,
+      align: "right",
+      color: "#111827",
+    });
+
+    // Fila 3: Equipo | IMEI | No. de Serie
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+      .text("EQUIPO:", leftX + 6, p2MetaY + 39, { lineBreak: false });
+    doc.fillColor("#111827").font("Helvetica").fontSize(7.8)
+      .text(`${tableta.marca || "Compac"} ${tableta.modelo || "QTab LTE"} (Caja: ${tableta.no_caja || "S/N"})`, leftX + 48, p2MetaY + 39, { width: 170, lineBreak: false });
+
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+      .text("IMEI:", leftX + 222, p2MetaY + 39, { lineBreak: false });
+    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(7.8)
+      .text(String(tableta.imei || "-"), leftX + 246, p2MetaY + 39, { width: 112, lineBreak: false });
+
+    doc.fillColor(COLOR_PRIMARY).font("Helvetica-Bold").fontSize(7.5)
+      .text("NO. DE SERIE:", leftX + 362, p2MetaY + 39, { lineBreak: false });
+    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(7.8)
+      .text(String(tableta.numero_serie || "-"), leftX + 422, p2MetaY + 39, { width: 112, align: "right", lineBreak: false });
+
+    const baseEvidDir = path.resolve(TABLETAS_EVIDENCIAS_DIR);
+    const drawEvidenciaPhotoBox = ({ x, y, w, h, label, rawFilename }) => {
+      const hdrH = 18;
+      doc.save();
+      doc.rect(x, y, w, h).lineWidth(0.7).strokeColor(COLOR_PRIMARY).stroke();
+      doc.rect(x, y, w, hdrH).fill(COLOR_PRIMARY);
+      doc.restore();
+
+      doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(7.5)
+        .text(label, x + 6, y + 5, { width: w - 12, align: "center", lineBreak: false });
+
+      let drawn = false;
+      if (rawFilename) {
+        try {
+          const safeFile = path.basename(String(rawFilename).trim());
+          const fullPath = path.resolve(baseEvidDir, safeFile);
+          if (fullPath.startsWith(baseEvidDir + path.sep) && fs.existsSync(fullPath)) {
+            const imgBuf = fs.readFileSync(fullPath);
+            const magic = detectImageMagicFormat(imgBuf);
+            if (magic === "jpeg" || magic === "png") {
+              doc.image(imgBuf, x + 8, y + hdrH + 6, {
+                fit: [w - 16, h - hdrH - 12],
+                align: "center",
+                valign: "center",
+              });
+              drawn = true;
+            }
+          }
+        } catch (errImg) {
+          console.warn("[WARN] Error incrustando evidencia en PDF:", errImg?.message || errImg);
+        }
+      }
+
+      if (!drawn) {
+        doc.save();
+        doc.rect(x + 12, y + hdrH + 10, w - 24, h - hdrH - 20).fillAndStroke("#F9FAFB", "#D1D5DB");
+        doc.restore();
+        doc.fillColor("#6B7280").font("Helvetica-Bold").fontSize(8.5)
+          .text(
+            "Fotografía no disponible en archivo",
+            x + 16,
+            y + hdrH + Math.floor((h - hdrH) / 2) - 5,
+            { width: w - 32, align: "center", lineBreak: false }
+          );
+      }
+    };
+
+    // Fila superior: 2 recuadros lado a lado (INE Frente e INE Reverso)
+    const topRowY = 130;
+    const topGap = 16;
+    const topBoxW = (contentWidth - topGap) / 2; // 262 pt
+    const topBoxH = 262;
+
+    drawEvidenciaPhotoBox({
+      x: leftX,
+      y: topRowY,
+      w: topBoxW,
+      h: topBoxH,
+      label: "1. IDENTIFICACIÓN OFICIAL (INE — FRENTE / ANVERSO)",
+      rawFilename: movimiento?.foto_ine_frente || null,
+    });
+
+    drawEvidenciaPhotoBox({
+      x: leftX + topBoxW + topGap,
+      y: topRowY,
+      w: topBoxW,
+      h: topBoxH,
+      label: "2. IDENTIFICACIÓN OFICIAL (INE — REVERSO)",
+      rawFilename: movimiento?.foto_ine_reverso || null,
+    });
+
+    // Fila inferior: recuadro centrado más amplio (Evidencia de Entrega)
+    const botRowY = 404;
+    const botBoxW = 460;
+    const botBoxX = leftX + (contentWidth - botBoxW) / 2;
+    const botBoxH = 330;
+
+    drawEvidenciaPhotoBox({
+      x: botBoxX,
+      y: botRowY,
+      w: botBoxW,
+      h: botBoxH,
+      label: "3. EVIDENCIA DE ENTREGA (RESGUARDANTE CON EQUIPO)",
+      rawFilename: movimiento?.foto_entrega || null,
+    });
+  }
+
+  // Pie de página en cada hoja (sin desbordamiento)
   const pages = doc.bufferedPageRange();
   for (let i = 0; i < pages.count; i++) {
     doc.switchToPage(i);
     doc.page.margins.bottom = 0;
+    const footerTxt = withAnexo && i === 1
+      ? `Documento de soporte para auditoría — Resguardo No. ${tableta.no_resguardo} — Hoja ${i + 1} de ${pages.count}`
+      : `Folio: ${folioStr}   |   Hoja ${i + 1} de ${pages.count}   |   Delegación de Programas para el Desarrollo en Baja California Sur`;
     doc.fillColor("#6B7280").font("Helvetica").fontSize(7)
       .text(
-        `Folio: ${folioStr}   |   Hoja ${i + 1} de ${pages.count}   |   Delegación de Programas para el Desarrollo en Baja California Sur`,
+        footerTxt,
         leftX,
         pageHeight - 28,
         { width: contentWidth, align: "center", lineBreak: false }
@@ -16810,6 +17099,62 @@ app.post("/api/tabletas", authRequired, async (req, res) => {
   }
 });
 
+async function syncTabletaMovimientosVigentes(executor, {
+  tabletaId,
+  ultimoMovAsigId = null,
+  estadoAsignacion = "",
+  nombreResg = "",
+  cargoResg = null,
+}) {
+  const nomClean = String(nombreResg || "").trim();
+  const cargoClean = cargoResg !== null && cargoResg !== undefined ? String(cargoResg || "").trim() : "";
+  if (!tabletaId || (!nomClean && !cargoClean)) return;
+
+  const setParts = [];
+  const setVals = [];
+  if (nomClean) {
+    setParts.push("nombre_persona = ?");
+    setVals.push(nomClean);
+  }
+  if (cargoClean) {
+    setParts.push("cargo_persona = ?");
+    setVals.push(cargoClean);
+  }
+  const setSql = setParts.join(", ");
+  const estAsig = String(estadoAsignacion || "").toUpperCase();
+
+  // a) Sincronizar el movimiento de asignación vigente
+  let asigTargetId = Number(ultimoMovAsigId || 0);
+  if (!asigTargetId && estAsig !== "DISPONIBLE") {
+    const [[lastAsig]] = await executor.query(
+      `SELECT id FROM movimientos_tabletas
+       WHERE tableta_id = ? AND tipo = 'ASIGNACION' AND estado = 'CONFIRMADO'
+       ORDER BY id DESC LIMIT 1`,
+      [tabletaId]
+    ).catch(() => [[]]);
+    asigTargetId = Number(lastAsig?.id || 0);
+  }
+  if (asigTargetId > 0) {
+    await executor.query(
+      `UPDATE movimientos_tabletas SET ${setSql} WHERE id = ? AND tableta_id = ?`,
+      [...setVals, asigTargetId, tabletaId]
+    ).catch((e) => console.warn("[WARN] Sync mov asignación vigente:", e?.message || e));
+  }
+
+  // b) Sincronizar cualquier movimiento de devolución en proceso de esa tableta
+  await executor.query(
+    `UPDATE movimientos_tabletas
+     SET ${setSql}
+     WHERE tableta_id = ?
+       AND tipo = 'DEVOLUCION'
+       AND (
+         estado = 'EN_PROCESO'
+         OR (? = 'DEVOLUCION_PENDIENTE' AND estado NOT IN ('CONFIRMADO', 'CANCELADO') AND COALESCE(estado_firma, 'NO_APLICA') IN ('NO_APLICA', 'PENDIENTE_FIRMA', 'RECHAZADO'))
+       )`,
+    [...setVals, tabletaId, estAsig]
+  ).catch((e) => console.warn("[WARN] Sync mov devolución en proceso:", e?.message || e));
+}
+
 // 2. PUT /api/tabletas/:id — Edición de registro con validación de unicidad (409)
 app.put("/api/tabletas/:id", authRequired, async (req, res) => {
   try {
@@ -16888,6 +17233,16 @@ app.put("/api/tabletas/:id", authRequired, async (req, res) => {
         id,
       ]
     );
+
+    if (b.nombre_resguardante !== undefined || b.cargo_resguardante !== undefined) {
+      await syncTabletaMovimientosVigentes(poolOps, {
+        tabletaId: id,
+        ultimoMovAsigId: existing.ultimo_movimiento_asignacion_id,
+        estadoAsignacion: existing.estado_asignacion,
+        nombreResg,
+        cargoResg,
+      });
+    }
 
     await registrarBitacora(
       req,
@@ -17050,20 +17405,21 @@ app.post("/api/tabletas/importar-nombres", authRequired, async (req, res) => {
         let targetRows = [];
         if (c.no_resguardo) {
           const [r] = await conn.query(
-            `SELECT id, estado_asignacion FROM inventario_tabletas WHERE no_resguardo = ? LIMIT 1`,
+            `SELECT id, estado_asignacion, ultimo_movimiento_asignacion_id FROM inventario_tabletas WHERE no_resguardo = ? LIMIT 1`,
             [c.no_resguardo]
           );
           targetRows = r;
         }
         if (!targetRows.length && c.imei) {
           const [r] = await conn.query(
-            `SELECT id, estado_asignacion FROM inventario_tabletas WHERE imei = ? LIMIT 1`,
+            `SELECT id, estado_asignacion, ultimo_movimiento_asignacion_id FROM inventario_tabletas WHERE imei = ? LIMIT 1`,
             [c.imei]
           );
           targetRows = r;
         }
         if (targetRows.length) {
-          const tId = targetRows[0].id;
+          const tRow = targetRows[0];
+          const tId = tRow.id;
           if (c.cargo) {
             await conn.query(
               `UPDATE inventario_tabletas SET nombre_resguardante = ?, cargo_resguardante = ? WHERE id = ?`,
@@ -17075,6 +17431,13 @@ app.post("/api/tabletas/importar-nombres", authRequired, async (req, res) => {
               [c.nombre, tId]
             );
           }
+          await syncTabletaMovimientosVigentes(conn, {
+            tabletaId: tId,
+            ultimoMovAsigId: tRow.ultimo_movimiento_asignacion_id,
+            estadoAsignacion: tRow.estado_asignacion,
+            nombreResg: c.nombre,
+            cargoResg: c.cargo || null,
+          });
           actualizados++;
         }
       }
@@ -17542,10 +17905,31 @@ app.get("/api/tabletas/movimientos/:movId/pdf", authRequired, async (req, res) =
     const [[tab]] = await poolRead.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1`, [mov.tableta_id]);
     if (!tab) return httpError(res, 404, "Tableta asociada no encontrada.");
 
+    const movTipoUpper = String(mov.tipo || "").toUpperCase();
+    const movEstadoUpper = String(mov.estado || "").toUpperCase();
+    const tabEstadoUpper = String(tab.estado_asignacion || "").toUpperCase();
+    let priorizarTableta = false;
+    if (movTipoUpper === "DEVOLUCION") {
+      priorizarTableta = movEstadoUpper === "EN_PROCESO" || (tabEstadoUpper === "DEVOLUCION_PENDIENTE" && movEstadoUpper !== "CANCELADO" && movEstadoUpper !== "CONFIRMADO");
+    } else if (movTipoUpper === "ASIGNACION") {
+      if (Number(tab.ultimo_movimiento_asignacion_id || 0) > 0) {
+        priorizarTableta = Number(mov.id) === Number(tab.ultimo_movimiento_asignacion_id);
+      } else if (tabEstadoUpper !== "DISPONIBLE") {
+        const [[latestAsig]] = await poolRead.query(
+          `SELECT id FROM movimientos_tabletas
+           WHERE tableta_id = ? AND tipo = 'ASIGNACION' AND estado = 'CONFIRMADO'
+           ORDER BY id DESC LIMIT 1`,
+          [tab.id]
+        );
+        priorizarTableta = Number(latestAsig?.id || 0) === Number(mov.id);
+      }
+    }
+
     return renderTabletaFormatoPdf(req, res, {
       tableta: tab,
       movimiento: mov,
       modo: mov.tipo,
+      priorizarTableta,
     });
   } catch (e) {
     return httpError(res, 500, e.message || "Error al generar PDF del movimiento de tableta");
@@ -17570,18 +17954,119 @@ app.get("/api/tabletas/:id/resguardo-pdf", authRequired, async (req, res) => {
 
     const [[lastAsig]] = await poolRead.query(
       `SELECT * FROM movimientos_tabletas
-       WHERE tableta_id = ? AND tipo = 'ASIGNACION' AND estado = 'CONFIRMADO'
-       ORDER BY id DESC LIMIT 1`,
-      [tab.id]
+       WHERE id = COALESCE(
+         ?,
+         (
+           SELECT m2.id FROM movimientos_tabletas m2
+           WHERE m2.tableta_id = ? AND m2.tipo = 'ASIGNACION' AND m2.estado = 'CONFIRMADO'
+           ORDER BY m2.id DESC LIMIT 1
+         )
+       )
+       LIMIT 1`,
+      [tab.ultimo_movimiento_asignacion_id || null, tab.id]
     );
 
     return renderTabletaFormatoPdf(req, res, {
       tableta: tab,
       movimiento: lastAsig || null,
       modo: "ASIGNACION",
+      priorizarTableta: true,
     });
   } catch (e) {
     return httpError(res, 500, e.message || "Error al generar PDF de resguardo de tableta");
+  }
+});
+
+// 9. GET /api/tabletas/:id/resguardo-evidencias-pdf — PDF de Resguardo + Anexo Fotográfico (2 páginas, exclusivo auditoría: Luis, Jorge, Rodrigo y Admin)
+app.get("/api/tabletas/:id/resguardo-evidencias-pdf", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (getRegionalSignatureScope(req.user) || !canViewTabletas(req)) {
+      return httpError(
+        res,
+        403,
+        "Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales (Jorge Patrón / Rodrigo Molina) y Administración."
+      );
+    }
+
+    const rawId = Number(req.params.id || 0);
+    const movIdParam = Number(req.query?.movimiento_id || 0);
+
+    let mov = null;
+    if (Number.isInteger(movIdParam) && movIdParam > 0) {
+      const [[mRow]] = await poolRead.query(
+        `SELECT * FROM movimientos_tabletas WHERE id = ? LIMIT 1`,
+        [movIdParam]
+      );
+      if (!mRow) {
+        return httpError(res, 404, "Movimiento de resguardo no encontrado.");
+      }
+      mov = mRow;
+    }
+
+    const targetTabId = Number.isInteger(rawId) && rawId > 0
+      ? rawId
+      : Number(mov?.tableta_id || 0);
+    if (!Number.isInteger(targetTabId) || targetTabId <= 0) {
+      return httpError(res, 400, "ID de tableta inválido.");
+    }
+
+    const [[tab]] = await poolRead.query(
+      `SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1`,
+      [targetTabId]
+    );
+    if (!tab) {
+      return httpError(res, 404, "Tableta no encontrada.");
+    }
+
+    if (mov && Number(mov.tableta_id) !== Number(tab.id)) {
+      return httpError(res, 400, "El movimiento especificado no corresponde a la tableta solicitada.");
+    }
+
+    let priorizarTableta = true;
+    if (!mov) {
+      const [[lastAsig]] = await poolRead.query(
+        `SELECT * FROM movimientos_tabletas
+         WHERE id = COALESCE(
+           ?,
+           (
+             SELECT m2.id FROM movimientos_tabletas m2
+             WHERE m2.tableta_id = ? AND m2.tipo = 'ASIGNACION' AND m2.estado = 'CONFIRMADO'
+             ORDER BY (m2.foto_ine_frente IS NOT NULL) DESC, m2.id DESC
+             LIMIT 1
+           )
+         )
+         LIMIT 1`,
+        [tab.ultimo_movimiento_asignacion_id || null, tab.id]
+      );
+      mov = lastAsig || null;
+      priorizarTableta = true;
+    } else {
+      const tabEstadoUpper = String(tab.estado_asignacion || "").toUpperCase();
+      if (Number(tab.ultimo_movimiento_asignacion_id || 0) > 0) {
+        priorizarTableta = Number(mov.id) === Number(tab.ultimo_movimiento_asignacion_id);
+      } else if (tabEstadoUpper !== "DISPONIBLE") {
+        const [[latestAsig]] = await poolRead.query(
+          `SELECT id FROM movimientos_tabletas
+           WHERE tableta_id = ? AND tipo = 'ASIGNACION' AND estado = 'CONFIRMADO'
+           ORDER BY id DESC LIMIT 1`,
+          [tab.id]
+        );
+        priorizarTableta = Number(latestAsig?.id || 0) === Number(mov.id);
+      } else {
+        priorizarTableta = false;
+      }
+    }
+
+    return renderTabletaFormatoPdf(req, res, {
+      tableta: tab,
+      movimiento: mov,
+      modo: "ASIGNACION",
+      incluirAnexoEvidencias: true,
+      priorizarTableta,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al generar PDF de resguardo con evidencias fotográficas");
   }
 });
 
