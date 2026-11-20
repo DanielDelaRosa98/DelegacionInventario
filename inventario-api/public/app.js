@@ -274,6 +274,39 @@
     return false;
   }
 
+  function getRegionalSignatureScopeFront(user = CURRENT_USER) {
+    const u = user || CURRENT_USER || {};
+    const uname = String(u.username || UI_PERMISOS?.user || '').toLowerCase().trim();
+    if (uname === 'loscabos') return 'LOS CABOS';
+    if (uname === 'mulege') return 'MULEGE';
+    if (uname === 'comondu') return 'COMONDU';
+    return null;
+  }
+
+  function normalizeTabletaForaneaRegionFront(regionStr) {
+    const clean = String(regionStr || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!clean) return null;
+    if (clean.includes('CABOS')) return 'LOS CABOS';
+    if (clean.includes('MULEGE') || clean.includes('GUERRERO')) return 'MULEGE';
+    if (clean.includes('COMONDU') || clean.includes('LORETO')) return 'COMONDU';
+    return null;
+  }
+
+  function canViewFirmasTabletas(user = CURRENT_USER) {
+    const u = user || CURRENT_USER || {};
+    const uname = String(u.username || UI_PERMISOS?.user || '').toLowerCase().trim();
+    const role = String(u.rol || u.role || UI_PERMISOS?.rol || '').toUpperCase().trim();
+    if (getRegionalSignatureScopeFront(u)) return true;
+    if (role === 'ADMIN' || uname === 'admin') return true;
+    return false;
+  }
+
   // Regla de Negocio: solo Administrador puede elegir cualquier departamento (Gabriel Fiol solicita bajo su área)
   const canUserSelectAnyDepartment = () => {
     const uname = norm(CURRENT_USER?.username || UI_PERMISOS?.user || '');
@@ -431,7 +464,7 @@
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         hasStrokes = false;
         uploadedDataUrl = null;
-        const up = $(uploadInputId) || $('sol_firma_file');
+        const up = uploadInputId ? $(uploadInputId) : null;
         if (up && up.value) up.value = '';
         updateStatus('Sin firma capturada', false);
       } finally {
@@ -439,13 +472,13 @@
       }
     }
 
-    const clearBtnEl = $(clearBtnId) || $('btn-clear-firma-sol');
+    const clearBtnEl = clearBtnId ? $(clearBtnId) : null;
     clearBtnEl?.addEventListener('click', (ev) => {
       ev.preventDefault();
       clear(ev);
     });
 
-    $(uploadInputId)?.addEventListener('change', (ev) => {
+    if (uploadInputId) $(uploadInputId)?.addEventListener('change', (ev) => {
       const file = ev.target?.files?.[0];
       if (!file) return;
       const reader = new FileReader();
@@ -604,6 +637,14 @@
         } else {
           btn.style.removeProperty('display');
         }
+      } else if (v === 'firmas_tabletas') {
+        const canFirmasTab = canViewFirmasTabletas(CURRENT_USER);
+        btn.classList.toggle('hidden', !canFirmasTab);
+        if (!canFirmasTab) {
+          btn.style.display = 'none';
+        } else {
+          btn.style.removeProperty('display');
+        }
       } else if (v === 'reporte' || v === 'graficas') {
         btn.classList.toggle('hidden', hideReportesGraficas);
         if (hideReportesGraficas) {
@@ -636,9 +677,14 @@
     // 2B. Botones del módulo de Tabletas Digitales según permisos estrictos
     const canViewTab = canViewTabletas(CURRENT_USER);
     const canEditTab = canEditTabletas(CURRENT_USER);
+    const canFirmasTab = canViewFirmasTabletas(CURRENT_USER);
     if (!canViewTab && $('view-tabletas')) {
       $('view-tabletas').classList.add('hidden');
       $('view-tabletas').style.display = 'none';
+    }
+    if (!canFirmasTab && $('view-firmas_tabletas')) {
+      $('view-firmas_tabletas').classList.add('hidden');
+      $('view-firmas_tabletas').style.display = 'none';
     }
     if ($('btn-tab-agregar')) $('btn-tab-agregar').classList.toggle('hidden', !canEditTab);
     if ($('btn-tab-nuevo-resguardo')) $('btn-tab-nuevo-resguardo').classList.toggle('hidden', !canEditTab);
@@ -813,6 +859,12 @@
     routeKey('POST', '/api/tabletas/:id/generar-devolucion'),
     routeKey('PUT', '/api/tabletas/movimientos/:movId/confirmar-devolucion'),
     routeKey('POST', '/api/tabletas/:id/generar-resguardo'),
+    routeKey('GET', '/api/tabletas/devoluciones/badge'),
+    routeKey('GET', '/api/tabletas/devoluciones/pendientes-firma'),
+    routeKey('POST', '/api/tabletas/devoluciones/:movimientoId/firmar'),
+    routeKey('POST', '/api/tabletas/devoluciones/:movimientoId/rechazar'),
+    routeKey('POST', '/api/tabletas/devoluciones/:movimientoId/cancelar'),
+    routeKey('GET', '/api/tabletas/evidencias/:movimientoId/:tipo'),
     routeKey('PUT', '/api/vales-prestamo/:id/autorizar'),
     routeKey('PUT', '/api/vales-prestamo/:id/devolver'),
     routeKey('PUT', '/api/vales-prestamo/:id/cancelar'),
@@ -1020,6 +1072,7 @@
       await Promise.all([loadSolicitudUsers(), loadSolicitudOficialias()]); 
       applyPermassions();
       startSolicitudesPolling();
+      startTabletasBadgePolling();
     } catch(e) {
       console.error("Error en me():", e);
       window.location.replace('/');
@@ -1028,6 +1081,7 @@
 
   async function logout(){
     stopSolicitudesPolling();
+    stopTabletasBadgePolling();
     try{ await apiJSON('/api/auth/logout', { method:'POST' }); }catch{}
     CURRENT_USER = null; UI_PERMISOS = null;
     window.location.replace('/');
@@ -1058,6 +1112,10 @@
       toast('Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales (Jorge Patrón / Rodrigo Molina) y Administración', false);
       return showView('panel_general');
     }
+    if (id === 'firmas_tabletas' && !canViewFirmasTabletas(CURRENT_USER)) {
+      toast('Acceso exclusivo para enlaces regionales (Los Cabos, Mulegé, Comondú) y Administración', false);
+      return showView('panel_general');
+    }
     document.querySelectorAll('.view-section, #view-container > section').forEach(sec => {
       sec.classList.remove('active');
       sec.classList.add('hidden');
@@ -1077,7 +1135,10 @@
       btn.classList.add('active');
       const breadcrumb = document.getElementById('breadcrumb');
       if (breadcrumb) {
-        breadcrumb.innerHTML = `Operación / <b>${btn.textContent.trim()}</b>`;
+        const btnClone = btn.cloneNode(true);
+        btnClone.querySelectorAll('.badge-pending, svg').forEach(n => n.remove());
+        const labelClean = (btnClone.textContent || btn.textContent || '').trim();
+        breadcrumb.innerHTML = `Operación / <b>${escHtml(labelClean)}</b>`;
       }
     }
 
@@ -1107,6 +1168,9 @@
     }
     if (id === 'tabletas') {
       if (typeof loadTabletasModule === 'function') loadTabletasModule();
+    }
+    if (id === 'firmas_tabletas') {
+      if (typeof loadFirmasTabletasView === 'function') loadFirmasTabletasView();
     }
     if (id === 'reporte') { setReporteView('home'); loadReporteUsuarios(); }
     if (id === 'graficas') { loadGraficas(); }
@@ -8054,6 +8118,216 @@
   function closeTabletaModal(modalId) {
     const m = $(modalId);
     if (m) m.classList.add('hidden');
+    if (modalId === 'modal-tab-asignar') {
+      resetAsignarEvidencias();
+    }
+  }
+
+  // Compresión de imágenes en navegador antes de subir evidencias fotográficas
+  function compressImageToJpegBlob(file, maxWidth = 1280, quality = 0.78) {
+    return new Promise((resolve, reject) => {
+      if (!file) return reject(new Error('Archivo de imagen inválido.'));
+      const objectUrl = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const origW = img.naturalWidth || img.width || 1;
+          const origH = img.naturalHeight || img.height || 1;
+          const scale = origW > maxWidth ? (maxWidth / origW) : 1;
+          const targetW = Math.max(1, Math.round(origW * scale));
+          const targetH = Math.max(1, Math.round(origH * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = targetW;
+          canvas.height = targetH;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, targetW, targetH);
+          ctx.drawImage(img, 0, 0, targetW, targetH);
+          canvas.toBlob(
+            (blob) => {
+              URL.revokeObjectURL(objectUrl);
+              if (!blob) return reject(new Error('No se pudo comprimir la fotografía seleccionada.'));
+              resolve(blob);
+            },
+            'image/jpeg',
+            quality
+          );
+        } catch (err) {
+          URL.revokeObjectURL(objectUrl);
+          reject(err);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error('El archivo seleccionado no es una imagen válida o está dañado.'));
+      };
+      img.src = objectUrl;
+    });
+  }
+
+  const TAB_EVIDENCIA_SLOTS = [
+    {
+      key: 'ine_frente',
+      field: 'foto_ine_frente',
+      inputId: 'tab_foto_ine_frente',
+      cardId: 'tab_ev_card_ine_frente',
+      badgeId: 'tab_ev_badge_ine_frente',
+      prevId: 'tab_ev_prev_ine_frente',
+      btnId: 'tab_ev_btn_ine_frente',
+      label: 'INE — Frente (Anverso)',
+    },
+    {
+      key: 'ine_reverso',
+      field: 'foto_ine_reverso',
+      inputId: 'tab_foto_ine_reverso',
+      cardId: 'tab_ev_card_ine_reverso',
+      badgeId: 'tab_ev_badge_ine_reverso',
+      prevId: 'tab_ev_prev_ine_reverso',
+      btnId: 'tab_ev_btn_ine_reverso',
+      label: 'INE — Reverso (Parte trasera)',
+    },
+    {
+      key: 'entrega',
+      field: 'foto_entrega',
+      inputId: 'tab_foto_entrega',
+      cardId: 'tab_ev_card_entrega',
+      badgeId: 'tab_ev_badge_entrega',
+      prevId: 'tab_ev_prev_entrega',
+      btnId: 'tab_ev_btn_entrega',
+      label: 'Foto de Entrega (Persona con tableta)',
+    },
+  ];
+  const TAB_ASIG_FILES = { ine_frente: null, ine_reverso: null, entrega: null };
+  const TAB_ASIG_PREVIEW_URLS = { ine_frente: null, ine_reverso: null, entrega: null };
+
+  function resetAsignarEvidencias() {
+    TAB_EVIDENCIA_SLOTS.forEach((slot) => {
+      if (TAB_ASIG_PREVIEW_URLS[slot.key]) {
+        try { URL.revokeObjectURL(TAB_ASIG_PREVIEW_URLS[slot.key]); } catch (_) {}
+        TAB_ASIG_PREVIEW_URLS[slot.key] = null;
+      }
+      TAB_ASIG_FILES[slot.key] = null;
+      const inp = $(slot.inputId);
+      if (inp) inp.value = '';
+      const card = $(slot.cardId);
+      if (card) card.classList.remove('is-ready');
+      const badge = $(slot.badgeId);
+      if (badge) {
+        badge.textContent = 'Falta';
+        badge.className = 'tab-evidencia-badge pending';
+      }
+      const prev = $(slot.prevId);
+      if (prev) prev.innerHTML = '<span class="tab-evidencia-placeholder">Sin fotografía</span>';
+      const btnLbl = $(slot.btnId);
+      if (btnLbl) btnLbl.textContent = '📷 Seleccionar foto';
+    });
+  }
+
+  function handleAsignarEvidenciaChange(slot, file) {
+    if (!file) return;
+    const mime = String(file.type || '').toLowerCase();
+    const extOk = /\.(jpe?g|png|webp)$/i.test(file.name || '');
+    const mimeOk = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(mime) || (!mime && extOk);
+    if (!mimeOk) {
+      toast(`Formato no permitido para ${slot.label}. Usa únicamente JPG, PNG o WEBP.`, false);
+      const inp = $(slot.inputId);
+      if (inp) inp.value = '';
+      return;
+    }
+    if (TAB_ASIG_PREVIEW_URLS[slot.key]) {
+      try { URL.revokeObjectURL(TAB_ASIG_PREVIEW_URLS[slot.key]); } catch (_) {}
+    }
+    const url = URL.createObjectURL(file);
+    TAB_ASIG_FILES[slot.key] = file;
+    TAB_ASIG_PREVIEW_URLS[slot.key] = url;
+
+    const card = $(slot.cardId);
+    if (card) card.classList.add('is-ready');
+    const badge = $(slot.badgeId);
+    if (badge) {
+      badge.textContent = '✓ Lista';
+      badge.className = 'tab-evidencia-badge ready';
+    }
+    const prev = $(slot.prevId);
+    if (prev) {
+      prev.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = slot.label;
+      prev.appendChild(img);
+    }
+    const btnLbl = $(slot.btnId);
+    if (btnLbl) btnLbl.textContent = '🔄 Cambiar foto';
+  }
+
+  function closeTabEvidenciaLightbox() {
+    const lb = $('tab-evidencia-lightbox');
+    if (lb) lb.classList.add('hidden');
+    if ($('tab_lightbox_img')) $('tab_lightbox_img').src = '';
+    if ($('tab_lightbox_label')) $('tab_lightbox_label').textContent = '';
+  }
+
+  function openTabEvidenciaLightbox(src, label) {
+    if (!src) return;
+    const lb = $('tab-evidencia-lightbox');
+    if (!lb) return;
+    if ($('tab_lightbox_img')) $('tab_lightbox_img').src = src;
+    if ($('tab_lightbox_label')) $('tab_lightbox_label').textContent = label || 'Evidencia fotográfica';
+    lb.classList.remove('hidden');
+  }
+
+  function openModalEvidenciasTableta({ movId, noResguardo, nombreResguardante, folio }) {
+    if (!canViewTabletas(CURRENT_USER)) {
+      toast('No tienes permiso para consultar evidencias fotográficas.', false);
+      return;
+    }
+    const mid = Number(movId || 0);
+    if (!mid) {
+      toast('Este resguardo no cuenta con evidencias fotográficas adjuntas.', false);
+      return;
+    }
+    if ($('tab_evidencias_meta')) {
+      const parts = [
+        noResguardo ? `<b>Tableta No. Resguardo #${Number(noResguardo)}</b>` : '<b>Evidencias de Resguardo</b>',
+        nombreResguardante ? `Resguardante: <b>${escHtml(safestr(nombreResguardante))}</b>` : '',
+        folio ? `Folio: <b>${escHtml(safestr(folio))}</b>` : '',
+      ].filter(Boolean);
+      $('tab_evidencias_meta').innerHTML = parts.join(' &nbsp;|&nbsp; ');
+    }
+
+    const mapping = [
+      { id: 'tab_view_img_ine_frente', tipo: 'ine_frente', label: '1. INE — Frente (Anverso)' },
+      { id: 'tab_view_img_ine_reverso', tipo: 'ine_reverso', label: '2. INE — Reverso (Parte trasera)' },
+      { id: 'tab_view_img_entrega', tipo: 'entrega', label: '3. Foto de Entrega (Persona con tableta)' },
+    ];
+    mapping.forEach((item) => {
+      const img = $(item.id);
+      if (!img) return;
+      const box = img.closest('.tab-viewer-img-box');
+      if (box) {
+        const oldErr = box.querySelector('.tab-viewer-err-msg');
+        if (oldErr) oldErr.remove();
+      }
+      img.style.display = 'block';
+      img.dataset.loaded = '0';
+      img.onload = () => {
+        img.dataset.loaded = '1';
+      };
+      img.onerror = () => {
+        img.dataset.loaded = '0';
+        img.style.display = 'none';
+        if (box && !box.querySelector('.tab-viewer-err-msg')) {
+          const msg = document.createElement('div');
+          msg.className = 'tab-viewer-err-msg muted';
+          msg.style.cssText = 'font-size:12px; text-align:center; padding:12px;';
+          msg.textContent = 'Imagen no disponible en el servidor.';
+          box.appendChild(msg);
+        }
+      };
+      img.src = `/api/tabletas/evidencias/${mid}/${item.tipo}`;
+    });
+
+    openTabletaModal('modal-tab-evidencias');
   }
 
   function openModalDevolucionTableta(t) {
@@ -8064,6 +8338,22 @@
       <span class="muted">IMEI: <b>${escHtml(safestr(t.imei))}</b> | Serie: <b>${escHtml(safestr(t.numero_serie))}</b> | Caja: <b>${escHtml(safestr(t.no_caja || 'S/N'))}</b><br>
       Origen: <b>${escHtml(safestr(t.region))} — ${escHtml(safestr(t.oficina_programa))}</b></span>
     `;
+    const regForanea = normalizeTabletaForaneaRegionFront(t.region);
+    const noticeEl = $('tab_dev_remota_notice');
+    const submitBtn = $('btn-tab-dev-submit');
+    if (regForanea) {
+      if (noticeEl) {
+        noticeEl.innerHTML = `📡 <b>Firma Digital Remota (${escHtml(regForanea)}):</b> Al enviar esta devolución, se habilitará en el panel del enlace regional de <b>${escHtml(regForanea)}</b> para su firma digital. El PDF oficial y la confirmación física solo se habilitarán una vez firmada por la región.`;
+        noticeEl.classList.remove('hidden');
+      }
+      if (submitBtn) submitBtn.textContent = `📤 Enviar a Firma Digital (${regForanea})`;
+    } else {
+      if (noticeEl) {
+        noticeEl.innerHTML = '';
+        noticeEl.classList.add('hidden');
+      }
+      if (submitBtn) submitBtn.textContent = '📄 Generar Vale de Devolución y Abrir PDF';
+    }
     $('tab_dev_nombre').value = safestr(t.nombre_resguardante);
     $('tab_dev_cargo').value = safestr(t.cargo_resguardante) || 'Servidor de la nación';
     $('tab_dev_cargador').checked = Number(t.tiene_cargador ?? 1) === 1;
@@ -8106,6 +8396,7 @@
       toast('Modo solo lectura: no tienes permisos para generar resguardos de tabletas.', false);
       return;
     }
+    resetAsignarEvidencias();
     if ($('tab_asig_nombre')) $('tab_asig_nombre').value = '';
     if ($('tab_asig_cargo')) $('tab_asig_cargo').value = 'Servidor de la nación';
 
@@ -8234,13 +8525,17 @@
         const imeiSerie = (r.imei || r.numero_serie)
           ? `IMEI: ${escHtml(safestr(r.imei || '-'))}<br><span class="muted" style="font-size:11px;">Serie: ${escHtml(safestr(r.numero_serie || '-'))}</span>`
           : '-';
+        const evMovId = Number(r.evidencias_mov_id || 0);
+        const evBtn = (r.tiene_evidencias && evMovId > 0)
+          ? `<div style="margin-top:4px;"><button type="button" class="mini btn-tab-evidencias" data-mov="${evMovId}" data-resg="${Number(r.no_resguardo || 0)}" data-nombre="" data-folio="">📷 Ver evidencias</button></div>`
+          : '';
         return `<tr>
           <td style="white-space:nowrap; font-size:12px;">${escHtml(fecha)}</td>
           <td><b>${escHtml(safestr(r.usuario || '-'))}</b></td>
           <td><span class="status-badge" style="font-size:11px;">${escHtml(safestr(r.accion || '-'))}</span></td>
           <td style="text-align:center;"><b>${escHtml(resg)}</b></td>
           <td style="font-size:12px;">${imeiSerie}</td>
-          <td style="font-size:12px;">${escHtml(safestr(r.detalles || '-'))}</td>
+          <td style="font-size:12px;">${escHtml(safestr(r.detalles || '-'))}${evBtn}</td>
         </tr>`;
       }).join('');
     } catch (e) {
@@ -8253,6 +8548,7 @@
     const tbody = $('tab_tbody');
     if (!tbody) return;
     const canEdit = canEditTabletas(CURRENT_USER);
+    const canViewTab = canViewTabletas(CURRENT_USER);
 
     if (!rows || !rows.length) {
       tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center; padding:18px;">No hay tabletas en esta pestaña con los filtros aplicados.</td></tr>';
@@ -8274,6 +8570,12 @@
         </div>
       `;
 
+      const evMovId = Number(t.evidencias_mov_id || 0);
+      const hasEvid = canViewTab && Number(t.tiene_evidencias) === 1 && evMovId > 0;
+      const evidBtnHtml = hasEvid
+        ? `<button type="button" class="mini btn-tab-evidencias" data-mov="${evMovId}" data-resg="${Number(t.no_resguardo)}" data-nombre="${escHtml(safestr(t.nombre_resguardante))}" data-folio="${escHtml(safestr(t.ultimo_asig_folio || ''))}" title="Ver 3 fotografías de evidencia del resguardo">📷 Evidencias</button>`
+        : '';
+
       let resgHtml = '';
       if (estadoAsig === 'DISPONIBLE') {
         resgHtml = Number(t.sin_resguardo_previo) === 1
@@ -8282,10 +8584,39 @@
       } else if (estadoAsig === 'DEVOLUCION_PENDIENTE') {
         const devNombre = safestr(t.devolucion_nombre_persona || t.nombre_resguardante || '-');
         const folioTxt = safestr(t.devolucion_folio || '-');
-        resgHtml = `
-          <div><b>${escHtml(devNombre)}</b></div>
-          <div style="font-size:11px; color:#b45309; font-weight:700;">⏳ Vale Devolución Folio: ${escHtml(folioTxt)}</div>
-        `;
+        const estFirma = safestr(t.devolucion_estado_firma || 'NO_APLICA').toUpperCase();
+        const regFirma = safestr(t.devolucion_region_firma || t.region || '');
+        if (estFirma === 'PENDIENTE_FIRMA') {
+          resgHtml = `
+            <div><b>${escHtml(devNombre)}</b></div>
+            <div style="font-size:11px; color:#64748b;">Folio: <b>${escHtml(folioTxt)}</b></div>
+            <div style="margin-top:4px;"><span class="badge-tab-firma-pendiente">⏳ Esperando firma (${escHtml(regFirma)})</span></div>
+          `;
+        } else if (estFirma === 'RECHAZADO') {
+          const mot = safestr(t.devolucion_motivo_rechazo || 'Sin motivo especificado');
+          resgHtml = `
+            <div><b>${escHtml(devNombre)}</b></div>
+            <div style="font-size:11px; color:#64748b;">Folio: <b>${escHtml(folioTxt)}</b></div>
+            <div style="margin-top:4px;"><span class="badge-tab-firma-rechazado">⚠️ Rechazada por región</span></div>
+            <div style="font-size:11px; color:#991b1b; margin-top:3px; line-height:1.3;"><b>Motivo:</b> ${escHtml(mot)}</div>
+          `;
+        } else if (estFirma === 'FIRMADO') {
+          const fechaFirmaTxt = t.devolucion_fecha_firma ? new Date(t.devolucion_fecha_firma).toLocaleString('es-MX') : '';
+          const selloTxt = safestr(t.devolucion_folio_firma || '');
+          resgHtml = `
+            <div><b>${escHtml(devNombre)}</b></div>
+            <div style="font-size:11px; color:#64748b;">Folio: <b>${escHtml(folioTxt)}</b></div>
+            <div style="margin-top:4px;"><span class="badge-tab-firma-firmado">✓ Firmado Digitalmente</span></div>
+            <div style="font-size:11px; color:#166534; margin-top:3px; line-height:1.3;">
+              ${selloTxt ? `Sello: <b>${escHtml(selloTxt)}</b>` : ''}${fechaFirmaTxt ? `<br>${escHtml(fechaFirmaTxt)}` : ''}
+            </div>
+          `;
+        } else {
+          resgHtml = `
+            <div><b>${escHtml(devNombre)}</b></div>
+            <div style="font-size:11px; color:#b45309; font-weight:700;">⏳ Vale Devolución Folio: ${escHtml(folioTxt)}</div>
+          `;
+        }
       } else if (estadoAsig === 'EN_PRESTAMO_PROVISIONAL') {
         const nom = safestr(t.nombre_resguardante || 'PRÉSTAMO PROVISIONAL');
         resgHtml = `
@@ -8305,19 +8636,47 @@
         actionsHtml = `
           <div style="display:flex; flex-wrap:wrap; gap:4px;">
             <button type="button" class="mini btn-tab-pdf-resg" data-id="${id}" title="Descargar Resguardo Personal PDF">📄 Resguardo PDF</button>
+            ${evidBtnHtml}
             ${canEdit ? `<button type="button" class="mini btn-tab-dev" data-id="${id}" title="Generar Vale de Devolución">📤 Devolución</button>` : ''}
             ${canEdit ? `<button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos de tableta">✏️</button>` : ''}
           </div>
         `;
       } else if (estadoAsig === 'DEVOLUCION_PENDIENTE') {
         const movId = Number(t.devolucion_mov_id || 0);
-        actionsHtml = `
-          <div style="display:flex; flex-wrap:wrap; gap:4px;">
-            ${movId ? `<button type="button" class="mini btn-tab-pdf-mov" data-mov="${movId}">📄 Reimprimir Vale</button>` : ''}
-            ${canEdit && movId ? `<button type="button" class="mini btn-primary btn-tab-confirm-dev" data-mov="${movId}" data-resg="${Number(t.no_resguardo)}">✅ Confirmar Recepción Física</button>` : ''}
-            ${canEdit ? `<button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos">✏️</button>` : ''}
-          </div>
-        `;
+        const estFirma = safestr(t.devolucion_estado_firma || 'NO_APLICA').toUpperCase();
+        if (estFirma === 'PENDIENTE_FIRMA') {
+          actionsHtml = `
+            <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;">
+              ${canEdit && movId ? `<button type="button" class="mini btn-tab-cancel-dev" data-mov="${movId}" data-resg="${Number(t.no_resguardo)}" style="color:#b91c1c; border-color:#fca5a5;">❌ Cancelar solicitud</button>` : `<span class="muted" style="font-size:11.5px;">Esperando firma</span>`}
+              ${evidBtnHtml}
+            </div>
+          `;
+        } else if (estFirma === 'RECHAZADO') {
+          actionsHtml = `
+            <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;">
+              ${canEdit && movId ? `<button type="button" class="mini btn-tab-cancel-dev" data-mov="${movId}" data-resg="${Number(t.no_resguardo)}" style="background:#fef2f2; color:#991b1b; border-color:#f87171; font-weight:600;">↩️ Cancelar y Corregir</button>` : `<span class="muted" style="font-size:11.5px;">Rechazada por región</span>`}
+              ${evidBtnHtml}
+            </div>
+          `;
+        } else if (estFirma === 'FIRMADO') {
+          actionsHtml = `
+            <div style="display:flex; flex-wrap:wrap; gap:4px;">
+              ${canEdit && movId ? `<button type="button" class="mini btn-tab-pdf-mov" data-mov="${movId}">📄 Descargar PDF Firmado</button>` : ''}
+              ${canEdit && movId ? `<button type="button" class="mini btn-primary btn-tab-confirm-dev" data-mov="${movId}" data-resg="${Number(t.no_resguardo)}">✅ Confirmar de Recibido</button>` : ''}
+              ${evidBtnHtml}
+              ${canEdit ? `<button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos">✏️</button>` : ''}
+            </div>
+          `;
+        } else {
+          actionsHtml = `
+            <div style="display:flex; flex-wrap:wrap; gap:4px;">
+              ${canEdit && movId ? `<button type="button" class="mini btn-tab-pdf-mov" data-mov="${movId}">📄 Reimprimir Vale</button>` : ''}
+              ${canEdit && movId ? `<button type="button" class="mini btn-primary btn-tab-confirm-dev" data-mov="${movId}" data-resg="${Number(t.no_resguardo)}">✅ Confirmar Recepción Física</button>` : ''}
+              ${evidBtnHtml}
+              ${canEdit ? `<button type="button" class="mini btn-tab-edit" data-id="${id}" title="Editar datos">✏️</button>` : ''}
+            </div>
+          `;
+        }
       } else if (estadoAsig === 'EN_PRESTAMO_PROVISIONAL') {
         actionsHtml = `
           <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;">
@@ -8479,6 +8838,36 @@
         return;
       }
 
+      const btnEvid = ev.target.closest('.btn-tab-evidencias');
+      if (btnEvid) {
+        openModalEvidenciasTableta({
+          movId: Number(btnEvid.dataset.mov || 0),
+          noResguardo: Number(btnEvid.dataset.resg || 0),
+          nombreResguardante: btnEvid.dataset.nombre || '',
+          folio: btnEvid.dataset.folio || '',
+        });
+        return;
+      }
+
+      const btnCancelDev = ev.target.closest('.btn-tab-cancel-dev');
+      if (btnCancelDev) {
+        const movId = Number(btnCancelDev.dataset.mov || 0);
+        const noResg = Number(btnCancelDev.dataset.resg || 0);
+        if (!movId) return;
+        if (!confirm(`¿Cancelar la solicitud de devolución de la Tableta #${noResg}?\n\nLa tableta regresará a En Resguardo conservando su región y resguardante para corregir y reenviar si es necesario.`)) {
+          return;
+        }
+        try {
+          const r = await apiJSON(`/api/tabletas/devoluciones/${movId}/cancelar`, { method: 'POST' });
+          toast(r.message || 'Solicitud de devolución cancelada', true);
+          loadTabletasModule();
+          pollTabletasBadge();
+        } catch (err) {
+          if (!handleAuthError(err)) toast(err.message || 'Error al cancelar solicitud de devolución', false);
+        }
+        return;
+      }
+
       const btnConfirmDev = ev.target.closest('.btn-tab-confirm-dev');
       if (btnConfirmDev) {
         const movId = Number(btnConfirmDev.dataset.mov);
@@ -8490,10 +8879,45 @@
           const r = await apiJSON(`/api/tabletas/movimientos/${movId}/confirmar-devolucion`, { method: 'PUT' });
           toast(r.message || 'Recepción confirmada correctamente', true);
           loadTabletasModule();
+          pollTabletasBadge();
         } catch (err) {
           if (!handleAuthError(err)) toast(err.message || 'Error al confirmar recepción', false);
         }
       }
+    });
+
+    // Delegación para botón de evidencias dentro del Log de Movimientos (Tabletas)
+    $('tab_bit_tbody')?.addEventListener('click', (ev) => {
+      const btnEvid = ev.target.closest('.btn-tab-evidencias');
+      if (!btnEvid) return;
+      openModalEvidenciasTableta({
+        movId: Number(btnEvid.dataset.mov || 0),
+        noResguardo: Number(btnEvid.dataset.resg || 0),
+        nombreResguardante: btnEvid.dataset.nombre || '',
+        folio: btnEvid.dataset.folio || '',
+      });
+    });
+
+    // Listeners de carga de 3 fotografías obligatorias en Modal Asignar
+    TAB_EVIDENCIA_SLOTS.forEach((slot) => {
+      $(slot.inputId)?.addEventListener('change', (ev) => {
+        const file = ev.target?.files?.[0];
+        if (!file) return;
+        handleAsignarEvidenciaChange(slot, file);
+      });
+    });
+
+    // Lightbox del visor de evidencias fotográficas
+    $('tab_evidencias_gallery')?.addEventListener('click', (ev) => {
+      const box = ev.target.closest('.tab-viewer-img-box');
+      if (!box) return;
+      const img = box.querySelector('img');
+      if (!img || img.dataset.loaded !== '1' || !img.src) return;
+      openTabEvidenciaLightbox(img.src, box.dataset.lightboxLabel || img.alt || 'Evidencia');
+    });
+    $('btn-close-tab-lightbox')?.addEventListener('click', () => closeTabEvidenciaLightbox());
+    $('tab-evidencia-lightbox')?.addEventListener('click', (ev) => {
+      if (ev.target === ev.currentTarget) closeTabEvidenciaLightbox();
     });
 
     // Botón Log de Movimientos (Tabletas) - Visible para Admin, Luis Eduardo, Jorge y Rodrigo
@@ -8534,7 +8958,7 @@
     });
 
     // Cerrar modales de tabletas
-    ['modal-tab-devolucion', 'modal-tab-asignar', 'modal-tab-editar', 'modal-tab-bitacora', 'modal-tab-agregar'].forEach(mid => {
+    ['modal-tab-devolucion', 'modal-tab-asignar', 'modal-tab-editar', 'modal-tab-bitacora', 'modal-tab-agregar', 'modal-tab-evidencias'].forEach(mid => {
       $(mid)?.addEventListener('click', (ev) => {
         if (ev.target === ev.currentTarget || ev.target.closest('[data-close-modal]')) {
           closeTabletaModal(mid);
@@ -8602,6 +9026,12 @@
         toast('Indica el nombre de quien entrega/devuelve la tableta', false);
         return;
       }
+      const submitBtn = $('btn-tab-dev-submit');
+      const prevBtnText = submitBtn ? submitBtn.textContent : '';
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '⏳ Procesando...';
+      }
       try {
         const payload = {
           nombre_persona,
@@ -8618,14 +9048,22 @@
         });
         closeTabletaModal('modal-tab-devolucion');
         toast(r.message || 'Vale de devolución generado', true);
-        if (r.pdf_url) window.open(r.pdf_url, '_blank');
+        if (!r.requiere_firma_remota && r.pdf_url) {
+          window.open(r.pdf_url, '_blank');
+        }
         loadTabletasModule();
+        pollTabletasBadge();
       } catch (err) {
         if (!handleAuthError(err)) toast(err.message || 'Error al generar vale de devolución', false);
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = prevBtnText || '📄 Generar Vale de Devolución y Abrir PDF';
+        }
       }
     });
 
-    // Submit Modal Asignar y Generar Resguardo
+    // Submit Modal Asignar y Generar Resguardo (con 3 fotografías obligatorias comprimidas)
     $('form-tab-asignar')?.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const id = Number($('tab_asig_select_tableta')?.value || $('tab_asig_id')?.value || 0);
@@ -8638,24 +9076,47 @@
         toast('El nombre completo del nuevo resguardante es obligatorio', false);
         return;
       }
+
+      const missingSlots = TAB_EVIDENCIA_SLOTS.filter((slot) => !TAB_ASIG_FILES[slot.key]);
+      if (missingSlots.length > 0) {
+        const faltantesTxt = missingSlots.map((s) => s.label).join(', ');
+        toast(`Debes adjuntar las 3 fotografías obligatorias antes de asignar. Faltan: ${faltantesTxt}.`, false);
+        return;
+      }
+
+      const submitBtn = $('btn-tab-asig-submit');
+      const prevBtnText = submitBtn ? submitBtn.textContent : '';
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '⏳ Optimizando y subiendo evidencias...';
+      }
+
       try {
-        const payload = {
-          nombre_resguardante,
-          cargo_resguardante: safestr($('tab_asig_cargo')?.value) || 'Servidor de la nación',
-          region: safestr($('tab_asig_region')?.value || 'LA PAZ'),
-          oficina_programa: safestr($('tab_asig_oficina')?.value || 'Delegación La Paz'),
-          tiene_cargador: $('tab_asig_cargador')?.checked ? 1 : 0,
-          tiene_caja: $('tab_asig_caja')?.checked ? 1 : 0,
-          estatus_fisico: safestr($('tab_asig_estatus')?.value || 'BUENO'),
-          observaciones: safestr($('tab_asig_obs')?.value),
-        };
+        const [blobFrente, blobReverso, blobEntrega] = await Promise.all([
+          compressImageToJpegBlob(TAB_ASIG_FILES.ine_frente, 1280, 0.78),
+          compressImageToJpegBlob(TAB_ASIG_FILES.ine_reverso, 1280, 0.78),
+          compressImageToJpegBlob(TAB_ASIG_FILES.entrega, 1280, 0.78),
+        ]);
+
+        const fd = new FormData();
+        fd.append('nombre_resguardante', nombre_resguardante);
+        fd.append('cargo_resguardante', safestr($('tab_asig_cargo')?.value) || 'Servidor de la nación');
+        fd.append('region', safestr($('tab_asig_region')?.value || 'LA PAZ'));
+        fd.append('oficina_programa', safestr($('tab_asig_oficina')?.value || 'Delegación La Paz'));
+        fd.append('tiene_cargador', $('tab_asig_cargador')?.checked ? '1' : '0');
+        fd.append('tiene_caja', $('tab_asig_caja')?.checked ? '1' : '0');
+        fd.append('estatus_fisico', safestr($('tab_asig_estatus')?.value || 'BUENO'));
+        fd.append('observaciones', safestr($('tab_asig_obs')?.value));
+        fd.append('foto_ine_frente', blobFrente, 'ine_frente.jpg');
+        fd.append('foto_ine_reverso', blobReverso, 'ine_reverso.jpg');
+        fd.append('foto_entrega', blobEntrega, 'entrega.jpg');
+
         const r = await apiJSON(`/api/tabletas/${id}/generar-resguardo`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
+          body: fd,
         });
         closeTabletaModal('modal-tab-asignar');
-        toast(r.message || 'Resguardo personal generado', true);
+        toast(r.message || 'Resguardo personal y evidencias registrados correctamente', true);
         if (r.pdf_url) window.open(r.pdf_url, '_blank');
         loadTabletasModule();
         if (typeof loadVpCatalogo === 'function') {
@@ -8663,6 +9124,11 @@
         }
       } catch (err) {
         if (!handleAuthError(err)) toast(err.message || 'Error al generar resguardo', false);
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = prevBtnText || '📄 Asignar y Generar PDF de Resguardo';
+        }
       }
     });
 
@@ -8701,6 +9167,368 @@
     });
   }
 
+  // ==========================================================================
+  // FIRMAS DIGITALES REMOTAS DE DEVOLUCIONES DE TABLETAS (REGIONES FORÁNEAS)
+  // ==========================================================================
+  let FIRMAS_TABLETAS_ROWS = [];
+  let FIRMAS_TABLETAS_CAN_SIGN = false;
+  let FIRMAS_TABLETAS_LISTENERS_BOUND = false;
+  let TAB_FIRMA_SIG_PAD = null;
+
+  function openModalFirmarDevolucionTab(row, openRejectMode = false) {
+    if (!row) return;
+    if (!FIRMAS_TABLETAS_CAN_SIGN) {
+      toast('Solo los enlaces regionales autorizados (Los Cabos, Mulegé, Comondú) pueden firmar o reportar devoluciones.', false);
+      return;
+    }
+    if (!TAB_FIRMA_SIG_PAD) {
+      TAB_FIRMA_SIG_PAD = createSignaturePadController({
+        canvasId: 'tab_firma_canvas',
+        clearBtnId: 'btn-clear-firma-tab',
+        uploadInputId: null,
+        statusId: 'tab_firma_status_badge',
+      });
+    }
+    $('tab_firma_mov_id').value = Number(row.movimiento_id || 0);
+    const fechaTxt = row.fecha_movimiento ? new Date(row.fecha_movimiento).toLocaleString('es-MX') : '-';
+    $('tab_firma_equipo_info').innerHTML = `
+      <b>Tableta No. Resguardo #${Number(row.no_resguardo)}</b> &nbsp;|&nbsp; Folio: <b>${escHtml(safestr(row.folio || '-'))}</b><br>
+      Resguardante: <b>${escHtml(safestr(row.nombre_resguardante || '-'))}</b> <span class="muted">(${escHtml(safestr(row.cargo_resguardante || 'Servidor de la nación'))})</span><br>
+      <span class="muted">
+        Región: <b>${escHtml(safestr(row.region_firma_destino || '-'))}</b> (${escHtml(safestr(row.oficina_programa || '-'))}) |
+        Caja: <b>${escHtml(safestr(row.no_caja || 'S/N'))}</b> |
+        Equipo: <b>${escHtml(safestr(row.marca || 'Compac'))} ${escHtml(safestr(row.modelo || 'QTab LTE'))}</b><br>
+        IMEI: <b>${escHtml(safestr(row.imei || '-'))}</b> |
+        Serie: <b>${escHtml(safestr(row.numero_serie || '-'))}</b> |
+        Estado físico: <b>${escHtml(safestr(row.estatus_fisico || 'BUENO'))}</b> |
+        Cargador: <b>${Number(row.tiene_cargador ?? 1) ? 'Sí' : 'No'}</b> |
+        Caja: <b>${Number(row.tiene_caja ?? 1) ? 'Sí' : 'No'}</b> |
+        Enviado: ${escHtml(fechaTxt)}
+      </span>
+    `;
+    const obsTxt = safestr(row.observaciones);
+    $('tab_firma_obs_box').innerHTML = `<b>Observaciones físicas registradas:</b> ${escHtml(obsTxt || 'Sin observaciones adicionales.')}`;
+
+    if (TAB_FIRMA_SIG_PAD) TAB_FIRMA_SIG_PAD.clear();
+    if ($('tab_firma_conformidad')) $('tab_firma_conformidad').checked = false;
+    if ($('tab_rechazo_motivo')) $('tab_rechazo_motivo').value = '';
+    if ($('tab_rechazo_wrap')) $('tab_rechazo_wrap').classList.toggle('hidden', !openRejectMode);
+
+    openTabletaModal('modal-firmar-devolucion-tab');
+    if (openRejectMode) {
+      setTimeout(() => $('tab_rechazo_motivo')?.focus(), 50);
+    }
+  }
+
+  function bindFirmasTabletasListeners() {
+    if (FIRMAS_TABLETAS_LISTENERS_BOUND) return;
+    FIRMAS_TABLETAS_LISTENERS_BOUND = true;
+
+    $('btn-firmas-tab-refresh')?.addEventListener('click', () => loadFirmasTabletasView());
+
+    $('firmas_tab_list_box')?.addEventListener('click', (ev) => {
+      const btnFirmar = ev.target.closest('.btn-firma-tab-open');
+      if (btnFirmar) {
+        const movId = Number(btnFirmar.dataset.mov || 0);
+        const row = FIRMAS_TABLETAS_ROWS.find(x => Number(x.movimiento_id) === movId);
+        openModalFirmarDevolucionTab(row, false);
+        return;
+      }
+      const btnRech = ev.target.closest('.btn-firma-tab-rechazar');
+      if (btnRech) {
+        const movId = Number(btnRech.dataset.mov || 0);
+        const row = FIRMAS_TABLETAS_ROWS.find(x => Number(x.movimiento_id) === movId);
+        openModalFirmarDevolucionTab(row, true);
+      }
+    });
+
+    $('modal-firmar-devolucion-tab')?.addEventListener('click', (ev) => {
+      if (ev.target === ev.currentTarget || ev.target.closest('[data-close-modal]')) {
+        closeTabletaModal('modal-firmar-devolucion-tab');
+      }
+    });
+
+    $('btn-tab-abrir-rechazo')?.addEventListener('click', () => {
+      $('tab_rechazo_wrap')?.classList.remove('hidden');
+      $('tab_rechazo_motivo')?.focus();
+    });
+
+    $('btn-tab-rechazo-cancelar')?.addEventListener('click', () => {
+      $('tab_rechazo_wrap')?.classList.add('hidden');
+      if ($('tab_rechazo_motivo')) $('tab_rechazo_motivo').value = '';
+    });
+
+    $('btn-tab-rechazo-enviar')?.addEventListener('click', async () => {
+      const movId = Number($('tab_firma_mov_id')?.value || 0);
+      const motivo = safestr($('tab_rechazo_motivo')?.value);
+      if (!movId) return;
+      if (!motivo) {
+        toast('Describe el error o motivo por el cual reportas esta devolución.', false);
+        $('tab_rechazo_motivo')?.focus();
+        return;
+      }
+      if (motivo.length > 250) {
+        toast('El motivo no puede exceder 250 caracteres.', false);
+        return;
+      }
+      const btn = $('btn-tab-rechazo-enviar');
+      if (btn) btn.disabled = true;
+      try {
+        const r = await apiJSON(`/api/tabletas/devoluciones/${movId}/rechazar`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ motivo }),
+        });
+        closeTabletaModal('modal-firmar-devolucion-tab');
+        toast(r.message || 'Reporte enviado correctamente.', true);
+        await loadFirmasTabletasView();
+        pollTabletasBadge();
+      } catch (err) {
+        if (!handleAuthError(err)) toast(err.message || 'Error al enviar reporte', false);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
+
+    $('btn-tab-aceptar-firmar')?.addEventListener('click', async () => {
+      const movId = Number($('tab_firma_mov_id')?.value || 0);
+      if (!movId) return;
+      if (!TAB_FIRMA_SIG_PAD || !TAB_FIRMA_SIG_PAD.hasSignature()) {
+        toast('Debes dibujar tu firma digital dentro del recuadro antes de aceptar.', false);
+        return;
+      }
+      if (!$('tab_firma_conformidad')?.checked) {
+        toast('Debes marcar la casilla de conformidad para validar los datos del equipo.', false);
+        return;
+      }
+      const firmaData = TAB_FIRMA_SIG_PAD.getDataUrl();
+      if (!firmaData || !firmaData.startsWith('data:image/png;base64,')) {
+        toast('Firma digital inválida. Intenta dibujarla nuevamente.', false);
+        return;
+      }
+      if (new Blob([firmaData]).size > 153600) {
+        toast('La firma digital excede el límite máximo de 150 KB. Límpiala e intenta con un trazo más ligero.', false);
+        return;
+      }
+
+      const btn = $('btn-tab-aceptar-firmar');
+      const prevTxt = btn ? btn.textContent : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ Guardando firma...';
+      }
+      try {
+        const r = await apiJSON(`/api/tabletas/devoluciones/${movId}/firmar`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ firma_data: firmaData }),
+        });
+        closeTabletaModal('modal-firmar-devolucion-tab');
+        toast(r.message || 'Devolución firmada digitalmente con éxito.', true);
+        await loadFirmasTabletasView();
+        pollTabletasBadge();
+      } catch (err) {
+        if (!handleAuthError(err)) toast(err.message || 'Error al guardar firma digital', false);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = prevTxt || '✅ Aceptar y Firmar';
+        }
+      }
+    });
+  }
+
+  async function loadFirmasTabletasView() {
+    bindFirmasTabletasListeners();
+    const box = $('firmas_tab_list_box');
+    const meta = $('firmas_tab_meta');
+    const sub = $('firmas_tab_region_subtitle');
+    if (!box) return;
+
+    box.innerHTML = '<div class="muted" style="padding:18px; text-align:center;">Cargando devoluciones pendientes de firma...</div>';
+    try {
+      const res = await apiJSON('/api/tabletas/devoluciones/pendientes-firma');
+      const rows = Array.isArray(res?.data) ? res.data : [];
+      FIRMAS_TABLETAS_ROWS = rows;
+      FIRMAS_TABLETAS_CAN_SIGN = Boolean(res?.can_sign);
+
+      if (sub) {
+        if (FIRMAS_TABLETAS_CAN_SIGN) {
+          sub.textContent = `Región asignada: ${res.region_scope || ''}. Verifica el equipo y estampa tu firma digital para autorizar la devolución al almacén estatal.`;
+        } else {
+          sub.textContent = 'Vista de consulta global (Administración). Únicamente las cuentas regionales (Los Cabos, Mulegé y Comondú) pueden firmar o reportar sus devoluciones.';
+        }
+      }
+      if (meta) {
+        meta.textContent = `${rows.length} devolución${rows.length === 1 ? '' : 'es'} pendiente${rows.length === 1 ? '' : 's'} de firma`;
+      }
+
+      if (!rows.length) {
+        box.innerHTML = '<div class="muted" style="padding:24px; text-align:center;">✅ No tienes devoluciones de tabletas pendientes de firma en este momento.</div>';
+        pollTabletasBadge();
+        return;
+      }
+
+      box.innerHTML = `
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Folio / Fecha</th>
+                <th>No. Resg. / Caja</th>
+                <th>Región / Oficina</th>
+                <th>Resguardante / Cargo</th>
+                <th>Equipo</th>
+                <th>IMEI / Serie</th>
+                <th>Estado Físico</th>
+                <th>Observaciones Físicas</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(r => {
+                const movId = Number(r.movimiento_id || 0);
+                const fecha = r.fecha_movimiento ? new Date(r.fecha_movimiento).toLocaleString('es-MX') : '-';
+                const fisico = safestr(r.estatus_fisico || 'BUENO').toUpperCase();
+                let fisicoCls = 'bueno';
+                if (fisico === 'INCOMPLETO') fisicoCls = 'incompleto';
+                if (fisico.includes('DAÑ') || fisico.includes('DAN')) fisicoCls = 'danado';
+
+                const acciones = FIRMAS_TABLETAS_CAN_SIGN
+                  ? `<div style="display:flex; flex-direction:column; gap:5px;">
+                       <button type="button" class="mini btn-primary btn-firma-tab-open" data-mov="${movId}">✍️ Firmar Devolución</button>
+                       <button type="button" class="mini btn-firma-tab-rechazar" data-mov="${movId}" style="color:#b91c1c; border-color:#fca5a5;">↩️ Reportar Error</button>
+                     </div>`
+                  : `<span class="badge-tab-firma-pendiente">⏳ Pendiente (${escHtml(safestr(r.region_firma_destino || '-'))})</span>`;
+
+                return `<tr>
+                  <td style="white-space:nowrap; font-size:12px;">
+                    <b>${escHtml(safestr(r.folio || '-'))}</b>
+                    <div class="muted" style="font-size:11px;">${escHtml(fecha)}</div>
+                  </td>
+                  <td>
+                    <b>#${Number(r.no_resguardo)}</b>
+                    <div class="muted" style="font-size:11px;">Caja: ${escHtml(safestr(r.no_caja || 'S/N'))}</div>
+                  </td>
+                  <td>
+                    <b>${escHtml(safestr(r.region_firma_destino || '-'))}</b>
+                    <div class="muted" style="font-size:11px;">${escHtml(safestr(r.oficina_programa || '-'))}</div>
+                  </td>
+                  <td>
+                    <b>${escHtml(safestr(r.nombre_resguardante || '-'))}</b>
+                    <div class="muted" style="font-size:11px;">${escHtml(safestr(r.cargo_resguardante || 'Servidor de la nación'))}</div>
+                  </td>
+                  <td>
+                    <b>${escHtml(safestr(r.marca || 'Compac'))}</b>
+                    <div class="muted" style="font-size:11px;">${escHtml(safestr(r.modelo || 'QTab LTE'))}</div>
+                  </td>
+                  <td style="font-family:monospace; font-size:11.5px;">
+                    IMEI: ${escHtml(safestr(r.imei || '-'))}<br>
+                    Serie: ${escHtml(safestr(r.numero_serie || '-'))}
+                  </td>
+                  <td>
+                    <span class="badge-tableta-fisico ${fisicoCls}">${escHtml(fisico)}</span>
+                    <div style="font-size:11px; margin-top:4px; color:#475569;">
+                      Cargador: <b>${Number(r.tiene_cargador ?? 1) ? 'Sí' : 'No'}</b> | Caja: <b>${Number(r.tiene_caja ?? 1) ? 'Sí' : 'No'}</b>
+                    </div>
+                  </td>
+                  <td style="font-size:12px; max-width:220px;">${escHtml(safestr(r.observaciones || '-'))}</td>
+                  <td>${acciones}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+      pollTabletasBadge();
+    } catch (e) {
+      box.innerHTML = `<div class="muted" style="padding:18px; text-align:center; color:var(--danger);">${escHtml(e.message || 'Error al cargar devoluciones pendientes')}</div>`;
+      if (!handleAuthError(e)) toast(e.message || 'Error al cargar firmas de tabletas', false);
+    }
+  }
+
+  // ==========================================================================
+  // POLLING ULTRALIGERO DE ALERTAS DE TABLETAS (60s - SOLO USUARIOS RELEVANTES)
+  // ==========================================================================
+  let TABLETAS_BADGE_TIMER = null;
+  let TABLETAS_BADGE_IN_FLIGHT = false;
+
+  function setSidebarBadge(elId, count, titleText = '') {
+    const el = $(elId);
+    if (!el) return;
+    const n = Number(count || 0);
+    if (n > 0) {
+      el.textContent = String(n);
+      el.classList.remove('hidden');
+      el.style.display = 'inline-block';
+      if (titleText) el.title = titleText;
+    } else {
+      el.textContent = '0';
+      el.classList.add('hidden');
+      el.style.display = 'none';
+      el.title = '';
+    }
+  }
+
+  async function pollTabletasBadge() {
+    if (!CURRENT_USER) return;
+    const isRelevant = canEditTabletas(CURRENT_USER) || Boolean(getRegionalSignatureScopeFront(CURRENT_USER));
+    if (!isRelevant) return;
+    if (document.hidden || TABLETAS_BADGE_IN_FLIGHT) return;
+
+    TABLETAS_BADGE_IN_FLIGHT = true;
+    try {
+      const data = await apiJSON('/api/tabletas/devoluciones/badge');
+      if (!data || !data.ok) return;
+      if (data.scope === 'regional') {
+        const pend = Number(data.pendientes || 0);
+        setSidebarBadge('nav-firmas-tabletas-badge', pend, `${pend} devolución(es) pendiente(s) de firma`);
+        setSidebarBadge('nav-tabletas-badge', 0);
+      } else if (data.scope === 'almacen') {
+        const firmadas = Number(data.firmadas || 0);
+        const rechazadas = Number(data.rechazadas || 0);
+        const totalAlertas = Number(data.total || (firmadas + rechazadas));
+        setSidebarBadge(
+          'nav-tabletas-badge',
+          totalAlertas,
+          `${firmadas} firmada(s) lista(s) para recibir, ${rechazadas} rechazada(s) por región`
+        );
+        if (canViewFirmasTabletas(CURRENT_USER)) {
+          const pend = Number(data.pendientes || 0);
+          setSidebarBadge('nav-firmas-tabletas-badge', pend, `${pend} devolución(es) esperando firma regional`);
+        } else {
+          setSidebarBadge('nav-firmas-tabletas-badge', 0);
+        }
+      }
+    } catch (_) {
+      // Silencioso para no interrumpir al usuario ante errores de red transitorios
+    } finally {
+      TABLETAS_BADGE_IN_FLIGHT = false;
+    }
+  }
+
+  function stopTabletasBadgePolling() {
+    if (TABLETAS_BADGE_TIMER) {
+      clearInterval(TABLETAS_BADGE_TIMER);
+      TABLETAS_BADGE_TIMER = null;
+    }
+  }
+
+  function startTabletasBadgePolling() {
+    stopTabletasBadgePolling();
+    const isRelevant = Boolean(CURRENT_USER) && (
+      canEditTabletas(CURRENT_USER) || Boolean(getRegionalSignatureScopeFront(CURRENT_USER))
+    );
+    if (!isRelevant) {
+      setSidebarBadge('nav-tabletas-badge', 0);
+      setSidebarBadge('nav-firmas-tabletas-badge', 0);
+      return;
+    }
+    pollTabletasBadge();
+    TABLETAS_BADGE_TIMER = setInterval(pollTabletasBadge, 60000);
+  }
+
   window.addEventListener('beforeunload', stopSolicitudesPolling);
+  window.addEventListener('beforeunload', stopTabletasBadgePolling);
 
 })(); // <-- FIN DEL ARCHIVO APP.JS 

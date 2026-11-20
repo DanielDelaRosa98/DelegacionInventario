@@ -748,6 +748,201 @@ function canEditTabletas(userOrReq) {
   return false;
 }
 
+// ============================================================================
+// Helpers de Firma Digital Remota y Evidencia Fotográfica (Tabletas Digitales)
+// ============================================================================
+function getRegionalSignatureScope(userOrReq) {
+  const u = userOrReq?.user ? userOrReq.user : userOrReq;
+  if (!u) return null;
+  const uname = normalizeUser(u.username);
+  if (uname === "loscabos") return "LOS CABOS";
+  if (uname === "mulege") return "MULEGE";
+  if (uname === "comondu") return "COMONDU";
+  return null;
+}
+
+function normalizeTabletaForaneaRegion(regionStr) {
+  if (!regionStr) return null;
+  const normStr = String(regionStr)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+  if (!normStr) return null;
+  if (normStr === "LA PAZ" || normStr.includes("LA PAZ") || normStr === "DELEGACION" || normStr === "PAM" || normStr === "PCD") {
+    return null;
+  }
+  if (normStr === "LOS CABOS" || normStr.includes("LOS CABOS") || normStr.includes("CABOS")) {
+    return "LOS CABOS";
+  }
+  if (normStr === "MULEGE" || normStr.includes("MULEGE") || normStr.includes("GUERRERO")) {
+    return "MULEGE";
+  }
+  if (normStr === "COMONDU" || normStr.includes("COMONDU") || normStr.includes("LORETO")) {
+    return "COMONDU";
+  }
+  return null;
+}
+
+const TABLETAS_EVIDENCIAS_DIR = path.join(__dirname, "uploads", "tabletas_evidencias");
+try {
+  fs.mkdirSync(TABLETAS_EVIDENCIAS_DIR, { recursive: true });
+} catch (errMkEv) {
+  console.warn("[WARN] No se pudo crear directorio de evidencias de tabletas:", errMkEv?.message || errMkEv);
+}
+
+const TABLETAS_EVIDENCIA_FIELDS = new Set(["foto_ine_frente", "foto_ine_reverso", "foto_entrega"]);
+const TABLETAS_EVIDENCIA_ALLOWED_MIMES = new Map([
+  ["image/jpeg", ".jpg"],
+  ["image/jpg", ".jpg"],
+  ["image/png", ".png"],
+  ["image/webp", ".webp"],
+]);
+const TABLETAS_EVIDENCIA_ALLOWED_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const TABLETAS_EVIDENCIA_MAX_BYTES = 3 * 1024 * 1024; // 3 MB por fotografía
+
+function detectImageMagicFormat(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "jpeg";
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "png";
+  if (
+    buf.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buf.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "webp";
+  }
+  return null;
+}
+
+function cleanupTabletaEvidenciaFiles(filesObj) {
+  if (!filesObj || typeof filesObj !== "object") return;
+  for (const key of Object.keys(filesObj)) {
+    const arr = Array.isArray(filesObj[key]) ? filesObj[key] : [filesObj[key]];
+    for (const f of arr) {
+      if (f && f.path) {
+        try {
+          if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
+        } catch {}
+      }
+    }
+  }
+}
+
+async function uploadTabletaEvidenciasMiddleware(req, res, next) {
+  const ctype = String(req.headers["content-type"] || "");
+  if (!/^multipart\/form-data/i.test(ctype)) {
+    req.files = {};
+    return next();
+  }
+
+  const boundaryMatch = ctype.match(/boundary=(?:"([^"]+)"|([^\s;]+))/i);
+  if (!boundaryMatch) {
+    return httpError(res, 400, "Encabezado multipart/form-data sin boundary válido.");
+  }
+  const boundaryStr = (boundaryMatch[1] || boundaryMatch[2] || "").trim();
+  const savedFiles = {};
+  const fields = {};
+
+  try {
+    fs.mkdirSync(TABLETAS_EVIDENCIAS_DIR, { recursive: true });
+    const chunks = [];
+    let totalBytes = 0;
+    const maxBodyBytes = 12 * 1024 * 1024; // 12 MB máximo total para las 3 fotos + formulario
+
+    for await (const chunk of req) {
+      totalBytes += chunk.length;
+      if (totalBytes > maxBodyBytes) {
+        return httpError(res, 400, "El tamaño total de los archivos supera el límite permitido.");
+      }
+      chunks.push(chunk);
+    }
+
+    const bodyBuf = Buffer.concat(chunks);
+    const boundaryBuf = Buffer.from(`--${boundaryStr}`);
+    const safeTabId = String(Number(req.params?.id || 0) || "0").replace(/[^0-9]/g, "");
+
+    let pos = bodyBuf.indexOf(boundaryBuf);
+    while (pos !== -1) {
+      const partStart = pos + boundaryBuf.length;
+      if (partStart + 2 <= bodyBuf.length && bodyBuf.subarray(partStart, partStart + 2).toString("ascii") === "--") {
+        break;
+      }
+      const nextPos = bodyBuf.indexOf(boundaryBuf, partStart);
+      if (nextPos === -1) break;
+
+      // Saltar CRLF inicial después del boundary
+      let headerStart = partStart;
+      if (bodyBuf[headerStart] === 0x0d && bodyBuf[headerStart + 1] === 0x0a) {
+        headerStart += 2;
+      }
+      const headerEnd = bodyBuf.indexOf(Buffer.from("\r\n\r\n"), headerStart);
+      if (headerEnd === -1 || headerEnd >= nextPos) {
+        pos = nextPos;
+        continue;
+      }
+
+      const headerText = bodyBuf.subarray(headerStart, headerEnd).toString("utf8");
+      const contentStart = headerEnd + 4;
+      let contentEnd = nextPos;
+      if (contentEnd >= 2 && bodyBuf[contentEnd - 2] === 0x0d && bodyBuf[contentEnd - 1] === 0x0a) {
+        contentEnd -= 2;
+      }
+      const partData = bodyBuf.subarray(contentStart, Math.max(contentStart, contentEnd));
+
+      const dispLine = headerText.split(/\r\n/).find((l) => /^content-disposition:/i.test(l)) || "";
+      const nameMatch = dispLine.match(/name="([^"]+)"/i);
+      const fieldName = nameMatch ? nameMatch[1].trim() : "";
+      const filenameMatch = dispLine.match(/filename="([^"]*)"/i);
+
+      if (fieldName) {
+        if (filenameMatch) {
+          const rawFilename = path.basename(filenameMatch[1] || "");
+          if (TABLETAS_EVIDENCIA_FIELDS.has(fieldName) && partData.length > 0) {
+            if (partData.length > TABLETAS_EVIDENCIA_MAX_BYTES) {
+              cleanupTabletaEvidenciaFiles(savedFiles);
+              return httpError(res, 400, `La fotografía (${fieldName}) excede el límite máximo de 3 MB.`);
+            }
+            const ctLine = headerText.split(/\r\n/).find((l) => /^content-type:/i.test(l)) || "";
+            const mime = ctLine.replace(/^content-type:\s*/i, "").split(";")[0].trim().toLowerCase();
+            if (!TABLETAS_EVIDENCIA_ALLOWED_MIMES.has(mime)) {
+              cleanupTabletaEvidenciaFiles(savedFiles);
+              return httpError(res, 400, "Formato de imagen no permitido. Solo se aceptan archivos JPEG, PNG o WEBP.");
+            }
+            const magic = detectImageMagicFormat(partData);
+            if (!magic) {
+              cleanupTabletaEvidenciaFiles(savedFiles);
+              return httpError(res, 400, "El archivo subido no corresponde a una imagen válida (JPEG, PNG o WEBP).");
+            }
+            const rawExt = path.extname(rawFilename).toLowerCase();
+            const cleanExt = TABLETAS_EVIDENCIA_ALLOWED_EXTS.has(rawExt)
+              ? rawExt
+              : TABLETAS_EVIDENCIA_ALLOWED_MIMES.get(mime);
+            const uniqueName = path.basename(
+              `tab_${safeTabId}_${fieldName}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}${cleanExt}`
+            );
+            const destPath = path.join(TABLETAS_EVIDENCIAS_DIR, uniqueName);
+            fs.writeFileSync(destPath, partData);
+            savedFiles[fieldName] = [{ filename: uniqueName, path: destPath, mimetype: mime, size: partData.length }];
+          }
+        } else {
+          fields[fieldName] = partData.toString("utf8");
+        }
+      }
+
+      pos = nextPos;
+    }
+
+    req.body = { ...(req.body && typeof req.body === "object" ? req.body : {}), ...fields };
+    req.files = savedFiles;
+    return next();
+  } catch (errUp) {
+    cleanupTabletaEvidenciaFiles(savedFiles);
+    return httpError(res, 400, errUp?.message || "Error al procesar las fotografías adjuntas.");
+  }
+}
+
 function buildCleanFullName(nombre, ap1, ap2) {
   const n = String(nombre || "").trim();
   const a1 = String(ap1 || "").trim();
@@ -2634,6 +2829,66 @@ async function ensureSchemaAndUsers() {
     ).catch((errMovTab) => {
       console.warn("[WARN] CREATE movimientos_tabletas:", errMovTab?.message || errMovTab);
     });
+
+    // Asegurar columnas idempotentes para Firma Digital Remota y Evidencia Fotográfica en movimientos_tabletas e inventario_tabletas
+    try {
+      const [movTabCols] = await poolRead.query(
+        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'movimientos_tabletas'`,
+        [DB_NAME]
+      );
+      const movTabColSet = new Set((movTabCols || []).map((c) => String(c.COLUMN_NAME || "").toLowerCase()));
+      const requiredMovTabCols = [
+        { name: "estado_firma", ddl: "VARCHAR(30) NOT NULL DEFAULT 'NO_APLICA'" },
+        { name: "region_firma_destino", ddl: "VARCHAR(30) NULL" },
+        { name: "firma_devolucion_data", ddl: "MEDIUMTEXT NULL" },
+        { name: "fecha_firma_digital", ddl: "DATETIME NULL" },
+        { name: "folio_firma_digital", ddl: "VARCHAR(64) NULL" },
+        { name: "firmado_por_usuario_id", ddl: "INT NULL" },
+        { name: "motivo_rechazo_region", ddl: "VARCHAR(255) NULL" },
+        { name: "foto_ine_frente", ddl: "VARCHAR(255) NULL" },
+        { name: "foto_ine_reverso", ddl: "VARCHAR(255) NULL" },
+        { name: "foto_entrega", ddl: "VARCHAR(255) NULL" },
+      ];
+      for (const col of requiredMovTabCols) {
+        if (!movTabColSet.has(col.name.toLowerCase())) {
+          await poolOps.query(
+            `ALTER TABLE movimientos_tabletas ADD COLUMN ${qi(col.name)} ${col.ddl}`
+          ).catch((e) => console.warn(`[WARN] ALTER movimientos_tabletas.${col.name}:`, e?.message || e));
+        }
+      }
+
+      const [movTabIdxRows] = await poolRead.query(
+        `SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'movimientos_tabletas'`,
+        [DB_NAME]
+      );
+      const movTabIdxSet = new Set((movTabIdxRows || []).map((i) => String(i.INDEX_NAME || "").toLowerCase()));
+      if (!movTabIdxSet.has("idx_mov_tab_region_firma")) {
+        await poolOps.query(
+          `CREATE INDEX idx_mov_tab_region_firma ON movimientos_tabletas (region_firma_destino, estado_firma)`
+        ).catch((e) => console.warn("[WARN] CREATE INDEX idx_mov_tab_region_firma:", e?.message || e));
+      }
+      if (!movTabIdxSet.has("idx_mov_tab_tableta")) {
+        await poolOps.query(
+          `CREATE INDEX idx_mov_tab_tableta ON movimientos_tabletas (tableta_id)`
+        ).catch((e) => console.warn("[WARN] CREATE INDEX idx_mov_tab_tableta:", e?.message || e));
+      }
+
+      const [invTabCols] = await poolRead.query(
+        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'inventario_tabletas'`,
+        [DB_NAME]
+      );
+      const invTabColSet = new Set((invTabCols || []).map((c) => String(c.COLUMN_NAME || "").toLowerCase()));
+      if (!invTabColSet.has("ultimo_movimiento_asignacion_id")) {
+        await poolOps.query(
+          `ALTER TABLE inventario_tabletas ADD COLUMN ultimo_movimiento_asignacion_id INT NULL`
+        ).catch((e) => console.warn("[WARN] ALTER inventario_tabletas.ultimo_movimiento_asignacion_id:", e?.message || e));
+      }
+    } catch (errTabSchema) {
+      console.warn("[WARN] Migración columnas firma/evidencias tabletas:", errTabSchema?.message || errTabSchema);
+    }
 
     await poolOps.query(
       `CREATE TABLE IF NOT EXISTS bitacora_tabletas (
@@ -15716,6 +15971,40 @@ function renderTabletaFormatoPdf(req, res, { tableta, movimiento = null, modo = 
     cargo: cargoPersona || "Servidor de la nación",
   });
 
+  // Incrustar firma digital remota en Vale de Devolución firmado (estrictamente en 1 sola página)
+  if (
+    isDevolucion &&
+    String(movimiento?.estado_firma || "").toUpperCase() === "FIRMADO" &&
+    movimiento?.firma_devolucion_data
+  ) {
+    try {
+      const rawSig = String(movimiento.firma_devolucion_data).trim();
+      const b64Match = rawSig.match(/^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/i);
+      if (b64Match && b64Match[1]) {
+        const sigBuf = Buffer.from(b64Match[1].replace(/\s+/g, ""), "base64");
+        doc.image(sigBuf, leftX + 10, botSigY + 13, {
+          fit: [botSigW - 20, 26],
+          align: "center",
+          valign: "center",
+        });
+      }
+      const dFirma = movimiento.fecha_firma_digital ? new Date(movimiento.fecha_firma_digital) : new Date();
+      const fechaFirmaTxt = isNaN(dFirma.getTime())
+        ? fechaStr
+        : `${String(dFirma.getDate()).padStart(2, "0")}/${String(dFirma.getMonth() + 1).padStart(2, "0")}/${dFirma.getFullYear()} ${String(dFirma.getHours()).padStart(2, "0")}:${String(dFirma.getMinutes()).padStart(2, "0")}`;
+      const selloTxt = String(movimiento.folio_firma_digital || "").trim();
+      doc.fillColor("#166534").font("Helvetica-Bold").fontSize(6)
+        .text(
+          `Firmado digitalmente el ${fechaFirmaTxt} - Sello: ${selloTxt}`,
+          leftX,
+          botSigY + botSigH + 4,
+          { width: contentWidth, align: "left", lineBreak: false }
+        );
+    } catch (errSigPdf) {
+      console.warn("[WARN] Error incrustando firma digital en PDF de devolución:", errSigPdf?.message || errSigPdf);
+    }
+  }
+
   drawSigBox({
     x: leftX + botSigW + botGap,
     y: botSigY,
@@ -15847,8 +16136,16 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
               mp.nombre_persona AS devolucion_nombre_persona,
               mp.cargo_persona AS devolucion_cargo_persona,
               mp.created_at AS devolucion_fecha,
+              COALESCE(mp.estado_firma, 'NO_APLICA') AS devolucion_estado_firma,
+              mp.region_firma_destino AS devolucion_region_firma,
+              mp.fecha_firma_digital AS devolucion_fecha_firma,
+              mp.folio_firma_digital AS devolucion_folio_firma,
+              mp.motivo_rechazo_region AS devolucion_motivo_rechazo,
+              (mp.firma_devolucion_data IS NOT NULL) AS devolucion_tiene_firma,
               ma.id AS ultimo_asig_mov_id,
-              ma.folio AS ultimo_asig_folio
+              ma.folio AS ultimo_asig_folio,
+              CASE WHEN ma.foto_ine_frente IS NOT NULL AND ma.foto_ine_reverso IS NOT NULL AND ma.foto_entrega IS NOT NULL THEN 1 ELSE 0 END AS tiene_evidencias,
+              CASE WHEN ma.foto_ine_frente IS NOT NULL AND ma.foto_ine_reverso IS NOT NULL AND ma.foto_entrega IS NOT NULL THEN ma.id ELSE NULL END AS evidencias_mov_id
        FROM inventario_tabletas t
        LEFT JOIN movimientos_tabletas mp
          ON mp.id = (
@@ -15857,10 +16154,13 @@ app.get("/api/tabletas", authRequired, async (req, res) => {
            ORDER BY m1.id DESC LIMIT 1
          )
        LEFT JOIN movimientos_tabletas ma
-         ON ma.id = (
-           SELECT m2.id FROM movimientos_tabletas m2
-           WHERE m2.tableta_id = t.id AND m2.tipo = 'ASIGNACION' AND m2.estado = 'CONFIRMADO'
-           ORDER BY m2.id DESC LIMIT 1
+         ON ma.id = COALESCE(
+           t.ultimo_movimiento_asignacion_id,
+           (
+             SELECT m2.id FROM movimientos_tabletas m2
+             WHERE m2.tableta_id = t.id AND m2.tipo = 'ASIGNACION' AND m2.estado = 'CONFIRMADO'
+             ORDER BY m2.id DESC LIMIT 1
+           )
          )
        ${where}
        ORDER BY t.no_resguardo ASC`,
@@ -15888,30 +16188,473 @@ app.get("/api/tabletas/bitacora", authRequired, async (req, res) => {
     let where = "WHERE 1=1";
     const params = [];
     if (accion) {
-      where += " AND accion = ?";
+      where += " AND b.accion = ?";
       params.push(accion);
     }
     if (usuario) {
-      where += " AND usuario LIKE ?";
+      where += " AND b.usuario LIKE ?";
       params.push(`%${usuario}%`);
     }
     if (q) {
-      where += " AND (CAST(no_resguardo AS CHAR) LIKE ? OR imei LIKE ? OR numero_serie LIKE ? OR usuario LIKE ? OR detalles LIKE ?)";
+      where += " AND (CAST(b.no_resguardo AS CHAR) LIKE ? OR b.imei LIKE ? OR b.numero_serie LIKE ? OR b.usuario LIKE ? OR b.detalles LIKE ?)";
       const lk = `%${q}%`;
       params.push(lk, lk, lk, lk, lk);
     }
 
     const [rows] = await poolRead.query(
-      `SELECT id, tableta_id, no_resguardo, imei, numero_serie, usuario, accion, detalles, created_at
-       FROM bitacora_tabletas
+      `SELECT b.id, b.tableta_id, b.no_resguardo, b.imei, b.numero_serie, b.usuario, b.accion, b.detalles, b.created_at,
+              CASE WHEN b.accion = 'ASIGNAR_RESGUARDO' THEN (
+                SELECT m.id FROM movimientos_tabletas m
+                WHERE m.tableta_id = b.tableta_id
+                  AND m.tipo = 'ASIGNACION'
+                  AND m.foto_ine_frente IS NOT NULL
+                  AND m.foto_ine_reverso IS NOT NULL
+                  AND m.foto_entrega IS NOT NULL
+                  AND (b.detalles LIKE CONCAT('%Folio ', m.folio, '%') OR m.created_at <= DATE_ADD(b.created_at, INTERVAL 1 MINUTE))
+                ORDER BY (b.detalles LIKE CONCAT('%Folio ', m.folio, '%')) DESC, m.id DESC
+                LIMIT 1
+              ) ELSE NULL END AS evidencias_mov_id
+       FROM bitacora_tabletas b
        ${where}
-       ORDER BY id DESC
+       ORDER BY b.id DESC
        LIMIT ?`,
       [...params, limit]
     );
-    return res.json({ ok: true, data: rows });
+    const enriched = (rows || []).map((r) => ({
+      ...r,
+      tiene_evidencias: Boolean(r.evidencias_mov_id),
+    }));
+    return res.json({ ok: true, data: enriched });
   } catch (e) {
     return httpError(res, 500, e.message || "Error al consultar la bitácora de tabletas");
+  }
+});
+
+// ============================================================================
+// BLOQUE 2: FIRMA DIGITAL REMOTA DE DEVOLUCIONES DE TABLETAS (REGIONES FORÁNEAS)
+// ============================================================================
+
+// GET /api/tabletas/devoluciones/badge — Polling ultraligero cada 60s
+app.get("/api/tabletas/devoluciones/badge", authRequired, async (req, res) => {
+  try {
+    const regScope = getRegionalSignatureScope(req.user);
+    const isLuisOrAdmin = canEditTabletas(req);
+    if (!regScope && !isLuisOrAdmin) {
+      return res.json({ ok: true, total: 0, pendientes: 0, firmadas: 0, rechazadas: 0 });
+    }
+    await ensureSchemaAndUsers();
+
+    if (regScope) {
+      const [[row]] = await poolRead.query(
+        `SELECT COUNT(*) AS pendientes
+         FROM movimientos_tabletas
+         WHERE region_firma_destino = ?
+           AND estado_firma = 'PENDIENTE_FIRMA'
+           AND estado = 'EN_PROCESO'`,
+        [regScope]
+      );
+      const pendientes = Number(row?.pendientes || 0);
+      return res.json({
+        ok: true,
+        scope: "regional",
+        region: regScope,
+        pendientes,
+        total: pendientes,
+      });
+    }
+
+    const [[row]] = await poolRead.query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN m.estado_firma = 'FIRMADO' THEN 1 ELSE 0 END), 0) AS firmadas,
+         COALESCE(SUM(CASE WHEN m.estado_firma = 'RECHAZADO' THEN 1 ELSE 0 END), 0) AS rechazadas,
+         COALESCE(SUM(CASE WHEN m.estado_firma = 'PENDIENTE_FIRMA' THEN 1 ELSE 0 END), 0) AS pendientes_firma
+       FROM movimientos_tabletas m
+       INNER JOIN inventario_tabletas t ON t.id = m.tableta_id
+       WHERE m.tipo = 'DEVOLUCION'
+         AND m.estado = 'EN_PROCESO'
+         AND t.estado_asignacion = 'DEVOLUCION_PENDIENTE'`
+    );
+    const firmadas = Number(row?.firmadas || 0);
+    const rechazadas = Number(row?.rechazadas || 0);
+    const pendientesFirma = Number(row?.pendientes_firma || 0);
+    return res.json({
+      ok: true,
+      scope: "almacen",
+      firmadas,
+      rechazadas,
+      pendientes_firma: pendientesFirma,
+      pendientes: isAdmin(req) ? pendientesFirma : 0,
+      total: firmadas + rechazadas,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al consultar alertas de tabletas");
+  }
+});
+
+// GET /api/tabletas/devoluciones/pendientes-firma — Listado para cuentas regionales (y admin en consulta)
+app.get("/api/tabletas/devoluciones/pendientes-firma", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    const regScope = getRegionalSignatureScope(req.user);
+    const admin = isAdmin(req);
+    if (!regScope && !admin) {
+      return httpError(res, 403, "Acceso exclusivo para enlaces regionales (Los Cabos, Mulegé, Comondú) o Administración.");
+    }
+
+    // Anti-IDOR estricto: para usuarios regionales la región proviene SIEMPRE de la sesión, jamás de query params.
+    let where = "WHERE m.tipo = 'DEVOLUCION' AND m.estado = 'EN_PROCESO' AND m.estado_firma = 'PENDIENTE_FIRMA'";
+    const params = [];
+    if (regScope) {
+      where += " AND m.region_firma_destino = ?";
+      params.push(regScope);
+    }
+
+    // CRÍTICO NAS: NUNCA seleccionar firma_devolucion_data en endpoints de listado
+    const [rows] = await poolRead.query(
+      `SELECT
+         m.id AS movimiento_id,
+         m.folio,
+         m.tableta_id,
+         m.no_resguardo,
+         m.nombre_persona AS nombre_resguardante,
+         m.cargo_persona AS cargo_resguardante,
+         t.no_caja,
+         t.marca,
+         t.modelo,
+         t.descripcion,
+         t.imei,
+         t.numero_serie,
+         m.tiene_cargador,
+         m.tiene_caja,
+         m.estatus_fisico,
+         m.observaciones,
+         m.region_firma_destino,
+         m.oficina_programa,
+         m.estado_firma,
+         m.created_at AS fecha_movimiento,
+         (m.firma_devolucion_data IS NOT NULL) AS tiene_firma
+       FROM movimientos_tabletas m
+       INNER JOIN inventario_tabletas t ON t.id = m.tableta_id
+       ${where}
+       ORDER BY m.created_at DESC, m.id DESC`,
+      params
+    );
+
+    return res.json({
+      ok: true,
+      region_scope: regScope || "TODAS (CONSULTA ADMIN)",
+      can_sign: Boolean(regScope),
+      data: rows,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al consultar devoluciones pendientes de firma");
+  }
+});
+
+// POST /api/tabletas/devoluciones/:movimientoId/firmar — Firma digital remota (Solo loscabos, mulege, comondu)
+app.post("/api/tabletas/devoluciones/:movimientoId/firmar", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    const regScope = getRegionalSignatureScope(req.user);
+    if (!regScope) {
+      return httpError(res, 403, "Solo las cuentas regionales autorizadas (Los Cabos, Mulegé, Comondú) pueden firmar devoluciones remotas.");
+    }
+    const movId = Number(req.params.movimientoId);
+    if (!Number.isInteger(movId) || movId <= 0) {
+      return httpError(res, 400, "ID de movimiento inválido.");
+    }
+
+    const firmaData = String(req.body?.firma_data || "").trim();
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/=\s]+$/i.test(firmaData)) {
+      return httpError(res, 400, "Firma digital inválida. Debe enviarse en formato PNG Base64 (data:image/png;base64,...).");
+    }
+    if (Buffer.byteLength(firmaData, "utf8") > 153600) {
+      return httpError(res, 400, "La firma digital excede el tamaño máximo permitido de 150 KB.");
+    }
+
+    const conn = await poolOps.getConnection();
+    let movRow = null;
+    let folioFirma = "";
+    try {
+      await conn.beginTransaction();
+      const [[mov]] = await conn.query(
+        `SELECT id, tipo, folio, tableta_id, no_resguardo, estado, estado_firma, region_firma_destino, nombre_persona
+         FROM movimientos_tabletas
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [movId]
+      );
+      if (!mov) {
+        await conn.rollback();
+        return httpError(res, 404, "Movimiento de devolución no encontrado.");
+      }
+      if (String(mov.region_firma_destino || "").toUpperCase() !== regScope) {
+        await conn.rollback();
+        return httpError(res, 403, "Forbidden: Esta devolución no corresponde a tu región.");
+      }
+      if (mov.tipo !== "DEVOLUCION" || mov.estado !== "EN_PROCESO" || mov.estado_firma !== "PENDIENTE_FIRMA") {
+        await conn.rollback();
+        return httpError(res, 409, `Esta devolución ya no está pendiente de firma (estado actual: ${mov.estado_firma || mov.estado}).`);
+      }
+
+      const year = new Date().getFullYear();
+      folioFirma = `DEV-TAB-${year}-${String(mov.id).padStart(4, "0")}`;
+      movRow = mov;
+
+      // La tableta NO pasa a DISPONIBLE; permanece en DEVOLUCION_PENDIENTE hasta confirmación física en La Paz
+      await conn.query(
+        `UPDATE movimientos_tabletas
+         SET estado_firma = 'FIRMADO',
+             firma_devolucion_data = ?,
+             fecha_firma_digital = NOW(),
+             folio_firma_digital = ?,
+             firmado_por_usuario_id = ?
+         WHERE id = ?`,
+        [firmaData, folioFirma, Number(req.user?.id || 0) || null, mov.id]
+      );
+
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    await registrarBitacora(
+      req,
+      "TABLETAS",
+      "FIRMAR_DEVOLUCION_REMOTA",
+      `Devolución Folio ${movRow.folio} de Tableta #${movRow.no_resguardo} firmada digitalmente desde región ${regScope} (Sello: ${folioFirma}).`
+    );
+    await registrarBitacoraTableta(req, {
+      tableta_id: movRow.tableta_id,
+      no_resguardo: movRow.no_resguardo,
+      accion: "FIRMAR_DEVOLUCION_REMOTA",
+      detalles: `Firmada digitalmente por región ${regScope} (Folio ${movRow.folio}, Sello ${folioFirma}). Pendiente de recepción física en almacén.`
+    });
+
+    return res.json({
+      ok: true,
+      movimiento_id: movRow.id,
+      folio_firma_digital: folioFirma,
+      message: `Devolución firmada digitalmente con éxito (Sello: ${folioFirma}). El equipo queda listo para recepción física en almacén.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al registrar la firma digital de devolución");
+  }
+});
+
+// POST /api/tabletas/devoluciones/:movimientoId/rechazar — Reportar error desde región (Solo loscabos, mulege, comondu)
+app.post("/api/tabletas/devoluciones/:movimientoId/rechazar", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    const regScope = getRegionalSignatureScope(req.user);
+    if (!regScope) {
+      return httpError(res, 403, "Solo las cuentas regionales autorizadas (Los Cabos, Mulegé, Comondú) pueden reportar errores en devoluciones.");
+    }
+    const movId = Number(req.params.movimientoId);
+    if (!Number.isInteger(movId) || movId <= 0) {
+      return httpError(res, 400, "ID de movimiento inválido.");
+    }
+    const motivo = String(req.body?.motivo || "").trim();
+    if (!motivo) {
+      return httpError(res, 400, "Debes describir el motivo del error o corrección requerida.");
+    }
+    if (motivo.length > 250) {
+      return httpError(res, 400, "El motivo no puede exceder 250 caracteres.");
+    }
+
+    const conn = await poolOps.getConnection();
+    let movRow = null;
+    try {
+      await conn.beginTransaction();
+      const [[mov]] = await conn.query(
+        `SELECT id, tipo, folio, tableta_id, no_resguardo, estado, estado_firma, region_firma_destino
+         FROM movimientos_tabletas
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [movId]
+      );
+      if (!mov) {
+        await conn.rollback();
+        return httpError(res, 404, "Movimiento de devolución no encontrado.");
+      }
+      if (String(mov.region_firma_destino || "").toUpperCase() !== regScope) {
+        await conn.rollback();
+        return httpError(res, 403, "Forbidden: Esta devolución no corresponde a tu región.");
+      }
+      if (mov.tipo !== "DEVOLUCION" || mov.estado !== "EN_PROCESO" || mov.estado_firma !== "PENDIENTE_FIRMA") {
+        await conn.rollback();
+        return httpError(res, 409, `Esta devolución ya no está pendiente de firma (estado actual: ${mov.estado_firma || mov.estado}).`);
+      }
+
+      movRow = mov;
+      await conn.query(
+        `UPDATE movimientos_tabletas
+         SET estado_firma = 'RECHAZADO',
+             motivo_rechazo_region = ?
+         WHERE id = ?`,
+        [motivo, mov.id]
+      );
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    await registrarBitacora(
+      req,
+      "TABLETAS",
+      "RECHAZAR_DEVOLUCION_REMOTA",
+      `Región ${regScope} reportó error en devolución Folio ${movRow.folio} de Tableta #${movRow.no_resguardo}: ${motivo}`
+    );
+    await registrarBitacoraTableta(req, {
+      tableta_id: movRow.tableta_id,
+      no_resguardo: movRow.no_resguardo,
+      accion: "RECHAZAR_DEVOLUCION_REMOTA",
+      detalles: `Rechazada por región ${regScope} (Folio ${movRow.folio}). Motivo: ${motivo}`
+    });
+
+    return res.json({
+      ok: true,
+      movimiento_id: movRow.id,
+      message: "Reporte enviado al encargado de tabletas para corrección.",
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al reportar error en devolución");
+  }
+});
+
+// POST /api/tabletas/devoluciones/:movimientoId/cancelar — Cancelar devolución remota (Solo Luis Eduardo y Admin)
+app.post("/api/tabletas/devoluciones/:movimientoId/cancelar", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canEditTabletas(req)) {
+      return httpError(res, 403, "Solo el encargado de tabletas o Administración puede cancelar solicitudes de devolución.");
+    }
+    const movId = Number(req.params.movimientoId);
+    if (!Number.isInteger(movId) || movId <= 0) {
+      return httpError(res, 400, "ID de movimiento inválido.");
+    }
+
+    const conn = await poolOps.getConnection();
+    let movRow = null;
+    try {
+      await conn.beginTransaction();
+      const [[mov]] = await conn.query(
+        `SELECT id, tipo, folio, tableta_id, no_resguardo, estado, estado_firma, region_firma_destino
+         FROM movimientos_tabletas
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [movId]
+      );
+      if (!mov) {
+        await conn.rollback();
+        return httpError(res, 404, "Movimiento de devolución no encontrado.");
+      }
+      if (mov.tipo !== "DEVOLUCION" || !["PENDIENTE_FIRMA", "RECHAZADO"].includes(String(mov.estado_firma || "").toUpperCase())) {
+        await conn.rollback();
+        return httpError(res, 409, `Solo se pueden cancelar solicitudes en estado PENDIENTE_FIRMA o RECHAZADO (estado actual: ${mov.estado_firma || mov.estado}).`);
+      }
+
+      movRow = mov;
+      await conn.query(
+        `UPDATE movimientos_tabletas
+         SET estado = 'CANCELADO',
+             estado_firma = 'CANCELADO'
+         WHERE id = ?`,
+        [mov.id]
+      );
+
+      // Regresa la tableta a EN_RESGUARDO sin borrar región, oficina ni resguardante
+      await conn.query(
+        `UPDATE inventario_tabletas
+         SET estado_asignacion = 'EN_RESGUARDO'
+         WHERE id = ?`,
+        [mov.tableta_id]
+      );
+
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    await registrarBitacora(
+      req,
+      "TABLETAS",
+      "CANCELAR_DEVOLUCION_REMOTA",
+      `Solicitud de devolución Folio ${movRow.folio} de Tableta #${movRow.no_resguardo} cancelada. Equipo regresado a EN_RESGUARDO.`
+    );
+    await registrarBitacoraTableta(req, {
+      tableta_id: movRow.tableta_id,
+      no_resguardo: movRow.no_resguardo,
+      accion: "CANCELAR_DEVOLUCION_REMOTA",
+      detalles: `Devolución Folio ${movRow.folio} cancelada. Tableta regresada a EN_RESGUARDO.`
+    });
+
+    return res.json({
+      ok: true,
+      movimiento_id: movRow.id,
+      message: `Solicitud de devolución cancelada. La Tableta #${movRow.no_resguardo} regresó a En Resguardo.`,
+    });
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al cancelar solicitud de devolución");
+  }
+});
+
+// ============================================================================
+// BLOQUE 3: CONSULTA SEGURA DE EVIDENCIAS FOTOGRÁFICAS (3 FOTOS)
+// ============================================================================
+app.get("/api/tabletas/evidencias/:movimientoId/:tipo", authRequired, async (req, res) => {
+  try {
+    await ensureSchemaAndUsers();
+    if (!canViewTabletas(req)) {
+      return httpError(res, 403, "Acceso exclusivo para Luis Eduardo Mayoral Geraldo, Recursos Materiales (Jorge Patrón / Rodrigo Molina) y Administración.");
+    }
+    const movId = Number(req.params.movimientoId);
+    if (!Number.isInteger(movId) || movId <= 0) {
+      return httpError(res, 400, "ID de movimiento inválido.");
+    }
+    const tipo = String(req.params.tipo || "").trim().toLowerCase();
+    const tipoColMap = {
+      ine_frente: "foto_ine_frente",
+      ine_reverso: "foto_ine_reverso",
+      entrega: "foto_entrega",
+    };
+    const colName = tipoColMap[tipo];
+    if (!colName) {
+      return httpError(res, 400, "Tipo de evidencia inválido. Valores permitidos: ine_frente, ine_reverso, entrega.");
+    }
+
+    const [[mov]] = await poolRead.query(
+      `SELECT id, ${qi(colName)} AS filename FROM movimientos_tabletas WHERE id = ? LIMIT 1`,
+      [movId]
+    );
+    if (!mov || !mov.filename) {
+      return httpError(res, 404, "Evidencia fotográfica no encontrada para este movimiento.");
+    }
+
+    const safeFile = path.basename(String(mov.filename).trim());
+    const baseDir = path.resolve(TABLETAS_EVIDENCIAS_DIR);
+    const fullPath = path.resolve(baseDir, safeFile);
+    if (!fullPath.startsWith(baseDir + path.sep) || !fs.existsSync(fullPath)) {
+      return httpError(res, 404, "El archivo de evidencia no existe en el almacenamiento.");
+    }
+
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    return res.sendFile(fullPath);
+  } catch (e) {
+    return httpError(res, 500, e.message || "Error al consultar evidencia fotográfica");
   }
 });
 
@@ -16365,7 +17108,7 @@ app.post("/api/tabletas/importar-nombres", authRequired, async (req, res) => {
   }
 });
 
-// 4. POST /api/tabletas/:id/generar-devolucion — Inicia devolución y genera Vale de Devolución
+// 4. POST /api/tabletas/:id/generar-devolucion — Inicia devolución (remota para foráneos, PDF inmediato para La Paz)
 app.post("/api/tabletas/:id/generar-devolucion", authRequired, async (req, res) => {
   try {
     await ensureSchemaAndUsers();
@@ -16379,6 +17122,7 @@ app.post("/api/tabletas/:id/generar-devolucion", authRequired, async (req, res) 
     const conn = await poolOps.getConnection();
     let movId = null;
     let folio = "";
+    let regionForanea = null;
     try {
       await conn.beginTransaction();
       const [[tab]] = await conn.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`, [id]);
@@ -16389,6 +17133,30 @@ app.post("/api/tabletas/:id/generar-devolucion", authRequired, async (req, res) 
       if (tab.estado_asignacion !== "EN_RESGUARDO") {
         await conn.rollback();
         return httpError(res, 409, `La tableta #${tab.no_resguardo} no está EN_RESGUARDO (estado actual: ${tab.estado_asignacion}).`);
+      }
+
+      regionForanea = normalizeTabletaForaneaRegion(tab.region);
+
+      if (regionForanea) {
+        const [dupMov] = await conn.query(
+          `SELECT id, estado_firma
+           FROM movimientos_tabletas
+           WHERE tableta_id = ?
+             AND tipo = 'DEVOLUCION'
+             AND estado = 'EN_PROCESO'
+             AND estado_firma IN ('PENDIENTE_FIRMA', 'FIRMADO')
+           LIMIT 1
+           FOR UPDATE`,
+          [tab.id]
+        );
+        if (dupMov && dupMov.length > 0) {
+          await conn.rollback();
+          return httpError(
+            res,
+            409,
+            `Ya existe una solicitud de devolución activa (${dupMov[0].estado_firma}) para la Tableta #${tab.no_resguardo}.`
+          );
+        }
       }
 
       const nombrePersona = String(b.nombre_persona || tab.nombre_resguardante || "").trim();
@@ -16402,12 +17170,16 @@ app.post("/api/tabletas/:id/generar-devolucion", authRequired, async (req, res) 
       const estatusFisico = String(b.estatus_fisico || tab.estatus_fisico || "BUENO").trim().toUpperCase();
       const observaciones = String(b.observaciones ?? tab.observaciones ?? "").trim() || null;
 
+      const estadoFirmaInit = regionForanea ? "PENDIENTE_FIRMA" : "NO_APLICA";
+      const regionDestinoInit = regionForanea || null;
+
       folio = await generateNextTabletaFolio(conn);
       const [ins] = await conn.query(
         `INSERT INTO movimientos_tabletas
            (tipo, folio, tableta_id, no_resguardo, region, oficina_programa,
-            nombre_persona, cargo_persona, tiene_cargador, tiene_caja, estatus_fisico, observaciones, estado)
-         VALUES ('DEVOLUCION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EN_PROCESO')`,
+            nombre_persona, cargo_persona, tiene_cargador, tiene_caja, estatus_fisico, observaciones, estado,
+            estado_firma, region_firma_destino)
+         VALUES ('DEVOLUCION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EN_PROCESO', ?, ?)`,
         [
           folio,
           tab.id,
@@ -16420,6 +17192,8 @@ app.post("/api/tabletas/:id/generar-devolucion", authRequired, async (req, res) 
           tieneCaja,
           estatusFisico,
           observaciones,
+          estadoFirmaInit,
+          regionDestinoInit,
         ]
       );
       movId = ins.insertId;
@@ -16440,7 +17214,9 @@ app.post("/api/tabletas/:id/generar-devolucion", authRequired, async (req, res) 
         req,
         "TABLETAS",
         "GENERAR_DEVOLUCION",
-        `Vale de devolución Folio ${folio} generado para Tableta #${tab.no_resguardo} (Entrega: ${nombrePersona}). Estado: DEVOLUCION_PENDIENTE.`
+        regionForanea
+          ? `Devolución Folio ${folio} de Tableta #${tab.no_resguardo} enviada a Firma Digital remota (${regionForanea}). Entrega: ${nombrePersona}.`
+          : `Vale de devolución Folio ${folio} generado para Tableta #${tab.no_resguardo} (Entrega: ${nombrePersona}). Estado: DEVOLUCION_PENDIENTE.`
       );
       await registrarBitacoraTableta(req, {
         tableta_id: tab.id,
@@ -16448,7 +17224,9 @@ app.post("/api/tabletas/:id/generar-devolucion", authRequired, async (req, res) 
         imei: tab.imei,
         numero_serie: tab.numero_serie,
         accion: "GENERAR_DEVOLUCION",
-        detalles: `Vale de devolución Folio ${folio} generado (Entrega: ${nombrePersona}). Estado: DEVOLUCION_PENDIENTE.`
+        detalles: regionForanea
+          ? `Devolución Folio ${folio} enviada a firma digital remota (${regionForanea}). Entrega: ${nombrePersona}.`
+          : `Vale de devolución Folio ${folio} generado (Entrega: ${nombrePersona}). Estado: DEVOLUCION_PENDIENTE.`
       });
     } catch (err) {
       await conn.rollback();
@@ -16457,8 +17235,20 @@ app.post("/api/tabletas/:id/generar-devolucion", authRequired, async (req, res) 
       conn.release();
     }
 
+    if (regionForanea) {
+      return res.json({
+        ok: true,
+        requiere_firma_remota: true,
+        region_destino: regionForanea,
+        movimiento_id: movId,
+        folio,
+        message: `Devolución Folio ${folio} enviada a Firma Digital remota de la región ${regionForanea}.`,
+      });
+    }
+
     return res.json({
       ok: true,
+      requiere_firma_remota: false,
       movimiento_id: movId,
       folio,
       pdf_url: `/api/tabletas/movimientos/${movId}/pdf`,
@@ -16499,6 +17289,15 @@ app.put("/api/tabletas/movimientos/:movId/confirmar-devolucion", authRequired, a
         await conn.rollback();
         return httpError(res, 409, "Esta devolución ya fue confirmada previamente.");
       }
+      const estFirma = String(mov.estado_firma || "NO_APLICA").toUpperCase();
+      if (["PENDIENTE_FIRMA", "RECHAZADO", "CANCELADO"].includes(estFirma)) {
+        await conn.rollback();
+        return httpError(
+          res,
+          409,
+          `No se puede confirmar la recepción física mientras la firma digital esté en estado ${estFirma}.`
+        );
+      }
       movRow = mov;
 
       await conn.query(
@@ -16510,7 +17309,8 @@ app.put("/api/tabletas/movimientos/:movId/confirmar-devolucion", authRequired, a
         `UPDATE inventario_tabletas
          SET estado_asignacion = 'DISPONIBLE',
              nombre_resguardante = '',
-             sin_resguardo_previo = 0
+             sin_resguardo_previo = 0,
+             ultimo_movimiento_asignacion_id = NULL
          WHERE id = ?`,
         [mov.tableta_id]
       );
@@ -16545,135 +17345,177 @@ app.put("/api/tabletas/movimientos/:movId/confirmar-devolucion", authRequired, a
   }
 });
 
-// 6. POST /api/tabletas/:id/generar-resguardo — Asigna tableta disponible y genera Resguardo Personal
-app.post("/api/tabletas/:id/generar-resguardo", authRequired, async (req, res) => {
-  try {
-    await ensureSchemaAndUsers();
+// 6. POST /api/tabletas/:id/generar-resguardo — Asigna tableta disponible con 3 fotografías obligatorias y genera Resguardo Personal
+app.post(
+  "/api/tabletas/:id/generar-resguardo",
+  authRequired,
+  (req, res, next) => {
     if (!canEditTabletas(req)) {
       return httpError(res, 403, "No tienes permiso para asignar tabletas y generar resguardos.");
     }
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) return httpError(res, 400, "ID de tableta inválido.");
-
-    const b = req.body || {};
-    const nombreResg = String(b.nombre_resguardante || b.nombre_persona || "").trim();
-    if (!nombreResg) {
-      return httpError(res, 400, "El nombre completo del nuevo resguardante es obligatorio.");
-    }
-    const cargoResg = String(b.cargo_resguardante || b.cargo_persona || "Servidor de la nación").trim() || "Servidor de la nación";
-
-    const conn = await poolOps.getConnection();
-    let movId = null;
-    let folio = "";
-    let noResguardo = 0;
+    return next();
+  },
+  uploadTabletaEvidenciasMiddleware,
+  async (req, res) => {
     try {
-      await conn.beginTransaction();
-      const [[tab]] = await conn.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`, [id]);
-      if (!tab) {
-        await conn.rollback();
-        return httpError(res, 404, "Tableta no encontrada.");
+      await ensureSchemaAndUsers();
+      if (!canEditTabletas(req)) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 403, "No tienes permiso para asignar tabletas y generar resguardos.");
       }
-      if (tab.estado_asignacion !== "DISPONIBLE") {
-        await conn.rollback();
-        return httpError(res, 409, `La tableta #${tab.no_resguardo} no está DISPONIBLE para asignar (estado actual: ${tab.estado_asignacion}).`);
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 400, "ID de tableta inválido.");
       }
 
-      const { region, oficina_programa } = normalizeTabletaRegionInput(
-        b.region || tab.region,
-        b.oficina_programa || tab.oficina_programa
+      // Validación obligatoria de las 3 fotografías de evidencia
+      const fIneFrente = req.files?.foto_ine_frente?.[0] || null;
+      const fIneReverso = req.files?.foto_ine_reverso?.[0] || null;
+      const fEntrega = req.files?.foto_entrega?.[0] || null;
+      if (!fIneFrente || !fIneReverso || !fEntrega) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(
+          res,
+          400,
+          "Debes adjuntar las 3 fotografías obligatorias (INE Frente, INE Reverso y Foto de Entrega) para asignar la tableta."
+        );
+      }
+
+      const b = req.body || {};
+      const nombreResg = String(b.nombre_resguardante || b.nombre_persona || "").trim();
+      if (!nombreResg) {
+        cleanupTabletaEvidenciaFiles(req.files);
+        return httpError(res, 400, "El nombre completo del nuevo resguardante es obligatorio.");
+      }
+      const cargoResg = String(b.cargo_resguardante || b.cargo_persona || "Servidor de la nación").trim() || "Servidor de la nación";
+
+      const conn = await poolOps.getConnection();
+      let movId = null;
+      let folio = "";
+      let noResguardo = 0;
+      try {
+        await conn.beginTransaction();
+        const [[tab]] = await conn.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1 FOR UPDATE`, [id]);
+        if (!tab) {
+          await conn.rollback();
+          cleanupTabletaEvidenciaFiles(req.files);
+          return httpError(res, 404, "Tableta no encontrada.");
+        }
+        if (tab.estado_asignacion !== "DISPONIBLE") {
+          await conn.rollback();
+          cleanupTabletaEvidenciaFiles(req.files);
+          return httpError(res, 409, `La tableta #${tab.no_resguardo} no está DISPONIBLE para asignar (estado actual: ${tab.estado_asignacion}).`);
+        }
+
+        const { region, oficina_programa } = normalizeTabletaRegionInput(
+          b.region || tab.region,
+          b.oficina_programa || tab.oficina_programa
+        );
+        const tieneCargador = b.tiene_cargador !== undefined ? (Number(b.tiene_cargador) ? 1 : 0) : Number(tab.tiene_cargador ?? 1);
+        const tieneCaja = b.tiene_caja !== undefined ? (Number(b.tiene_caja) ? 1 : 0) : Number(tab.tiene_caja ?? 1);
+        const estatusFisico = String(b.estatus_fisico || tab.estatus_fisico || "BUENO").trim().toUpperCase();
+        const observaciones = b.observaciones !== undefined ? (String(b.observaciones || "").trim() || null) : tab.observaciones;
+
+        folio = await generateNextTabletaFolio(conn);
+        noResguardo = tab.no_resguardo;
+
+        const [ins] = await conn.query(
+          `INSERT INTO movimientos_tabletas
+             (tipo, folio, tableta_id, no_resguardo, region, oficina_programa,
+              nombre_persona, cargo_persona, tiene_cargador, tiene_caja, estatus_fisico, observaciones,
+              estado, confirmed_at, foto_ine_frente, foto_ine_reverso, foto_entrega)
+           VALUES ('ASIGNACION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMADO', NOW(), ?, ?, ?)`,
+          [
+            folio,
+            tab.id,
+            tab.no_resguardo,
+            region,
+            oficina_programa,
+            nombreResg,
+            cargoResg,
+            tieneCargador,
+            tieneCaja,
+            estatusFisico,
+            observaciones,
+            fIneFrente.filename,
+            fIneReverso.filename,
+            fEntrega.filename,
+          ]
+        );
+        movId = ins.insertId;
+
+        await conn.query(
+          `UPDATE inventario_tabletas
+           SET estado_asignacion = 'EN_RESGUARDO',
+               nombre_resguardante = ?,
+               cargo_resguardante = ?,
+               region = ?,
+               oficina_programa = ?,
+               tiene_cargador = ?,
+               tiene_caja = ?,
+               estatus_fisico = ?,
+               observaciones = ?,
+               sin_resguardo_previo = 0,
+               ultimo_movimiento_asignacion_id = ?
+           WHERE id = ?`,
+          [
+            nombreResg,
+            cargoResg,
+            region,
+            oficina_programa,
+            tieneCargador,
+            tieneCaja,
+            estatusFisico,
+            observaciones,
+            movId,
+            tab.id,
+          ]
+        );
+
+        await conn.commit();
+      } catch (err) {
+        await conn.rollback();
+        cleanupTabletaEvidenciaFiles(req.files);
+        throw err;
+      } finally {
+        conn.release();
+      }
+
+      await registrarBitacora(
+        req,
+        "TABLETAS",
+        "ASIGNAR_RESGUARDO",
+        `Resguardo personal Folio ${folio} generado para Tableta #${noResguardo} a favor de "${nombreResg}" (con 3 fotografías de evidencia).`
       );
-      const tieneCargador = b.tiene_cargador !== undefined ? (Number(b.tiene_cargador) ? 1 : 0) : Number(tab.tiene_cargador ?? 1);
-      const tieneCaja = b.tiene_caja !== undefined ? (Number(b.tiene_caja) ? 1 : 0) : Number(tab.tiene_caja ?? 1);
-      const estatusFisico = String(b.estatus_fisico || tab.estatus_fisico || "BUENO").trim().toUpperCase();
-      const observaciones = b.observaciones !== undefined ? (String(b.observaciones || "").trim() || null) : tab.observaciones;
+      await registrarBitacoraTableta(req, {
+        tableta_id: id,
+        no_resguardo: noResguardo,
+        accion: "ASIGNAR_RESGUARDO",
+        detalles: `Resguardo personal Folio ${folio} generado a favor de "${nombreResg}" (3 evidencias fotográficas adjuntas).`
+      });
 
-      folio = await generateNextTabletaFolio(conn);
-      noResguardo = tab.no_resguardo;
-
-      const [ins] = await conn.query(
-        `INSERT INTO movimientos_tabletas
-           (tipo, folio, tableta_id, no_resguardo, region, oficina_programa,
-            nombre_persona, cargo_persona, tiene_cargador, tiene_caja, estatus_fisico, observaciones, estado, confirmed_at)
-         VALUES ('ASIGNACION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMADO', NOW())`,
-        [
-          folio,
-          tab.id,
-          tab.no_resguardo,
-          region,
-          oficina_programa,
-          nombreResg,
-          cargoResg,
-          tieneCargador,
-          tieneCaja,
-          estatusFisico,
-          observaciones,
-        ]
-      );
-      movId = ins.insertId;
-
-      await conn.query(
-        `UPDATE inventario_tabletas
-         SET estado_asignacion = 'EN_RESGUARDO',
-             nombre_resguardante = ?,
-             cargo_resguardante = ?,
-             region = ?,
-             oficina_programa = ?,
-             tiene_cargador = ?,
-             tiene_caja = ?,
-             estatus_fisico = ?,
-             observaciones = ?,
-             sin_resguardo_previo = 0
-         WHERE id = ?`,
-        [
-          nombreResg,
-          cargoResg,
-          region,
-          oficina_programa,
-          tieneCargador,
-          tieneCaja,
-          estatusFisico,
-          observaciones,
-          tab.id,
-        ]
-      );
-
-      await conn.commit();
-    } catch (err) {
-      await conn.rollback();
-      throw err;
-    } finally {
-      conn.release();
+      return res.json({
+        ok: true,
+        movimiento_id: movId,
+        folio,
+        pdf_url: `/api/tabletas/movimientos/${movId}/pdf`,
+        message: `Resguardo personal Folio ${folio} asignado correctamente a ${nombreResg}.`,
+      });
+    } catch (e) {
+      cleanupTabletaEvidenciaFiles(req.files);
+      return httpError(res, 500, e.message || "Error al generar resguardo de tableta");
     }
-
-    await registrarBitacora(
-      req,
-      "TABLETAS",
-      "ASIGNAR_RESGUARDO",
-      `Resguardo personal Folio ${folio} generado para Tableta #${noResguardo} a favor de "${nombreResg}".`
-    );
-    await registrarBitacoraTableta(req, {
-      tableta_id: id,
-      no_resguardo: noResguardo,
-      accion: "ASIGNAR_RESGUARDO",
-      detalles: `Resguardo personal Folio ${folio} generado a favor de "${nombreResg}".`
-    });
-
-    return res.json({
-      ok: true,
-      movimiento_id: movId,
-      folio,
-      pdf_url: `/api/tabletas/movimientos/${movId}/pdf`,
-      message: `Resguardo personal Folio ${folio} asignado correctamente a ${nombreResg}.`,
-    });
-  } catch (e) {
-    return httpError(res, 500, e.message || "Error al generar resguardo de tableta");
   }
-});
+);
 
 // 7. GET /api/tabletas/movimientos/:movId/pdf — PDF oficial de Resguardo Personal o Vale de Devolución
 app.get("/api/tabletas/movimientos/:movId/pdf", authRequired, async (req, res) => {
   try {
     await ensureSchemaAndUsers();
+    if (getRegionalSignatureScope(req.user)) {
+      return httpError(res, 403, "Las cuentas regionales no tienen permiso para descargar archivos PDF.");
+    }
     if (!canAccessTabletas(req)) {
       return httpError(res, 403, "No tienes permiso para descargar formatos de tabletas.");
     }
@@ -16682,6 +17524,20 @@ app.get("/api/tabletas/movimientos/:movId/pdf", authRequired, async (req, res) =
 
     const [[mov]] = await poolRead.query(`SELECT * FROM movimientos_tabletas WHERE id = ? LIMIT 1`, [movId]);
     if (!mov) return httpError(res, 404, "Movimiento no encontrado.");
+
+    if (String(mov.tipo || "").toUpperCase() === "DEVOLUCION") {
+      if (!canEditTabletas(req)) {
+        return httpError(res, 403, "Solo el encargado de tabletas o Administración puede descargar Vales de Devolución.");
+      }
+      const estFirma = String(mov.estado_firma || "NO_APLICA").toUpperCase();
+      if (["PENDIENTE_FIRMA", "RECHAZADO", "CANCELADO"].includes(estFirma)) {
+        return httpError(
+          res,
+          409,
+          `El Vale de Devolución no puede descargarse mientras su estado de firma sea ${estFirma}.`
+        );
+      }
+    }
 
     const [[tab]] = await poolRead.query(`SELECT * FROM inventario_tabletas WHERE id = ? LIMIT 1`, [mov.tableta_id]);
     if (!tab) return httpError(res, 404, "Tableta asociada no encontrada.");
@@ -16700,6 +17556,9 @@ app.get("/api/tabletas/movimientos/:movId/pdf", authRequired, async (req, res) =
 app.get("/api/tabletas/:id/resguardo-pdf", authRequired, async (req, res) => {
   try {
     await ensureSchemaAndUsers();
+    if (getRegionalSignatureScope(req.user)) {
+      return httpError(res, 403, "Las cuentas regionales no tienen permiso para descargar archivos PDF.");
+    }
     if (!canAccessTabletas(req)) {
       return httpError(res, 403, "No tienes permiso para descargar formatos de tabletas.");
     }

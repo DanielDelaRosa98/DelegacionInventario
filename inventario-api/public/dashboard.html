@@ -4,7 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Sistema - Control de Inventario</title>
-  <link rel="stylesheet" href="/styles.css?v=5" />
+  <link rel="stylesheet" href="/styles.css?v=6" />
 </head>
 <body>
 
@@ -61,7 +61,14 @@
 
         <button class="nav-item hidden" data-view="tabletas" id="nav-tabletas">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
-          📱 Tabletas Digitales
+          <span style="flex:1; text-align:left;">📱 Tabletas Digitales</span>
+          <span id="nav-tabletas-badge" class="badge-pending hidden" style="background:#dc2626; color:#fff; font-size:11px; font-weight:700; border-radius:10px; padding:1px 7px; margin-left:auto; line-height:16px; display:none;">0</span>
+        </button>
+
+        <button class="nav-item hidden" data-view="firmas_tabletas" id="nav-firmas-tabletas">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"></path><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path><path d="M2 2l7.586 7.586"></path><circle cx="11" cy="11" r="2"></circle></svg>
+          <span style="flex:1; text-align:left;">✍️ Firmas de Tabletas</span>
+          <span id="nav-firmas-tabletas-badge" class="badge-pending hidden" style="background:#d97706; color:#fff; font-size:11px; font-weight:700; border-radius:10px; padding:1px 7px; margin-left:auto; line-height:16px; display:none;">0</span>
         </button>
 
         <button class="nav-item" data-view="reporte" id="nav-reportes">
@@ -1751,6 +1758,7 @@
               <form id="form-tab-devolucion" novalidate>
                 <input type="hidden" id="tab_dev_id" value="">
                 <div id="tab_dev_equipo_info" style="background:#F9F2F4; border:1px solid var(--border); padding:10px 12px; border-radius:6px; margin-bottom:12px; font-size:13px;"></div>
+                <div id="tab_dev_remota_notice" class="hidden" style="background:#fef3c7; border:1px solid #f59e0b; color:#92400e; padding:10px 12px; border-radius:6px; margin-bottom:12px; font-size:12.5px; line-height:1.45;"></div>
                 <div class="grid cols-2" style="gap:10px;">
                   <div class="field">
                     <label for="tab_dev_nombre">Nombre de quien entrega / devuelve *</label>
@@ -1791,7 +1799,7 @@
 
           <!-- Modal 2: Asignar y Generar Resguardo Personal -->
           <div id="modal-tab-asignar" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-tab-asignar-title">
-            <div class="modal-box" style="max-width:680px;">
+            <div class="modal-box" style="max-width:780px;">
               <div class="modal-header">
                 <h3 id="modal-tab-asignar-title" style="margin:0; color:var(--primary);">➕ Asignar Tableta y Generar Resguardo Personal</h3>
                 <button type="button" class="btn-icon modal-close" data-close-modal="modal-tab-asignar" title="Cerrar">&times;</button>
@@ -1857,6 +1865,53 @@
                   <label for="tab_asig_obs">Observaciones</label>
                   <textarea id="tab_asig_obs" rows="2" placeholder="Observaciones opcionales para el resguardo..."></textarea>
                 </div>
+
+                <!-- Evidencia Fotográfica Obligatoria (3 fotos) -->
+                <div class="tab-evidencias-section" id="tab_asig_evidencias_wrap">
+                  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                    <div style="font-size:13px; font-weight:700; color:var(--primary);">📷 Evidencia Fotográfica Obligatoria (3 fotos) *</div>
+                    <span class="muted" style="font-size:11.5px;">JPG, PNG o WEBP (se optimizan automáticamente antes de subir)</span>
+                  </div>
+                  <div class="tab-evidencias-grid">
+                    <!-- 1. INE Frente -->
+                    <div class="tab-evidencia-card" id="tab_ev_card_ine_frente">
+                      <div class="tab-evidencia-card-head">
+                        <span class="tab-evidencia-card-title">1. INE — Frente (Anverso)</span>
+                        <span class="tab-evidencia-badge pending" id="tab_ev_badge_ine_frente">Falta</span>
+                      </div>
+                      <div class="tab-evidencia-preview-wrap" id="tab_ev_prev_ine_frente">
+                        <span class="tab-evidencia-placeholder">Sin fotografía</span>
+                      </div>
+                      <input type="file" id="tab_foto_ine_frente" accept="image/jpeg,image/png,image/webp" capture="environment" style="display:none;">
+                      <label for="tab_foto_ine_frente" class="btn-secondary mini" id="tab_ev_btn_ine_frente" style="text-align:center; cursor:pointer; margin:0;">📷 Seleccionar foto</label>
+                    </div>
+                    <!-- 2. INE Reverso -->
+                    <div class="tab-evidencia-card" id="tab_ev_card_ine_reverso">
+                      <div class="tab-evidencia-card-head">
+                        <span class="tab-evidencia-card-title">2. INE — Reverso (Parte trasera)</span>
+                        <span class="tab-evidencia-badge pending" id="tab_ev_badge_ine_reverso">Falta</span>
+                      </div>
+                      <div class="tab-evidencia-preview-wrap" id="tab_ev_prev_ine_reverso">
+                        <span class="tab-evidencia-placeholder">Sin fotografía</span>
+                      </div>
+                      <input type="file" id="tab_foto_ine_reverso" accept="image/jpeg,image/png,image/webp" capture="environment" style="display:none;">
+                      <label for="tab_foto_ine_reverso" class="btn-secondary mini" id="tab_ev_btn_ine_reverso" style="text-align:center; cursor:pointer; margin:0;">📷 Seleccionar foto</label>
+                    </div>
+                    <!-- 3. Foto de Entrega -->
+                    <div class="tab-evidencia-card" id="tab_ev_card_entrega">
+                      <div class="tab-evidencia-card-head">
+                        <span class="tab-evidencia-card-title">3. Foto de Entrega (Persona con tableta)</span>
+                        <span class="tab-evidencia-badge pending" id="tab_ev_badge_entrega">Falta</span>
+                      </div>
+                      <div class="tab-evidencia-preview-wrap" id="tab_ev_prev_entrega">
+                        <span class="tab-evidencia-placeholder">Sin fotografía</span>
+                      </div>
+                      <input type="file" id="tab_foto_entrega" accept="image/jpeg,image/png,image/webp" capture="environment" style="display:none;">
+                      <label for="tab_foto_entrega" class="btn-secondary mini" id="tab_ev_btn_entrega" style="text-align:center; cursor:pointer; margin:0;">📷 Seleccionar foto</label>
+                    </div>
+                  </div>
+                </div>
+
                 <div class="modal-actions">
                   <button type="button" class="btn-secondary" data-close-modal="modal-tab-asignar">Cancelar</button>
                   <button type="submit" class="btn-primary" id="btn-tab-asig-submit">📄 Asignar y Generar PDF de Resguardo</button>
@@ -1978,6 +2033,9 @@
                     <option value="">Todas</option>
                     <option value="ALTA_TABLETA">ALTA_TABLETA</option>
                     <option value="GENERAR_DEVOLUCION">GENERAR_DEVOLUCION</option>
+                    <option value="FIRMAR_DEVOLUCION_REMOTA">FIRMAR_DEVOLUCION_REMOTA</option>
+                    <option value="RECHAZAR_DEVOLUCION_REMOTA">RECHAZAR_DEVOLUCION_REMOTA</option>
+                    <option value="CANCELAR_DEVOLUCION_REMOTA">CANCELAR_DEVOLUCION_REMOTA</option>
                     <option value="CONFIRMAR_RECIBIDO">CONFIRMAR_RECIBIDO</option>
                     <option value="ASIGNAR_RESGUARDO">ASIGNAR_RESGUARDO</option>
                     <option value="EDITAR_TABLETA">EDITAR_TABLETA</option>
@@ -2113,6 +2171,124 @@
               </form>
             </div>
           </div>
+
+          <!-- Modal 6: Visor de Evidencias Fotográficas (Luis, Admin, Jorge y Rodrigo) -->
+          <div id="modal-tab-evidencias" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-tab-evidencias-title">
+            <div class="modal-box" style="max-width:960px;">
+              <div class="modal-header">
+                <h3 id="modal-tab-evidencias-title" style="margin:0; color:var(--primary);">📷 Evidencias Fotográficas del Resguardo</h3>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-tab-evidencias" title="Cerrar">&times;</button>
+              </div>
+              <div id="tab_evidencias_meta" style="background:#F9F2F4; border:1px solid var(--border); padding:10px 12px; border-radius:6px; margin-bottom:14px; font-size:13px;"></div>
+              <div class="tab-viewer-grid" id="tab_evidencias_gallery">
+                <div class="tab-viewer-card">
+                  <div class="tab-viewer-card-label">1. INE — Frente (Anverso)</div>
+                  <div class="tab-viewer-img-box" data-lightbox-label="1. INE — Frente (Anverso)">
+                    <img id="tab_view_img_ine_frente" alt="INE Frente">
+                  </div>
+                </div>
+                <div class="tab-viewer-card">
+                  <div class="tab-viewer-card-label">2. INE — Reverso (Parte trasera)</div>
+                  <div class="tab-viewer-img-box" data-lightbox-label="2. INE — Reverso (Parte trasera)">
+                    <img id="tab_view_img_ine_reverso" alt="INE Reverso">
+                  </div>
+                </div>
+                <div class="tab-viewer-card">
+                  <div class="tab-viewer-card-label">3. Foto de Entrega (Persona con tableta)</div>
+                  <div class="tab-viewer-img-box" data-lightbox-label="3. Foto de Entrega (Persona con tableta)">
+                    <img id="tab_view_img_entrega" alt="Foto de Entrega">
+                  </div>
+                </div>
+              </div>
+              <div class="muted" style="font-size:12px; margin-top:10px;">Haz clic en cualquier fotografía para ampliarla en pantalla completa.</div>
+              <div class="modal-actions">
+                <button type="button" class="btn-secondary" data-close-modal="modal-tab-evidencias">Cerrar</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Lightbox simple para ampliar evidencia fotográfica -->
+          <div id="tab-evidencia-lightbox" class="tab-lightbox-overlay hidden" role="dialog" aria-modal="true">
+            <img id="tab_lightbox_img" src="" alt="Evidencia ampliada">
+            <div class="tab-lightbox-caption">
+              <span id="tab_lightbox_label"></span>
+              <button type="button" class="btn-secondary mini" id="btn-close-tab-lightbox">✕ Cerrar vista ampliada</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- VISTA: Firmas Digitales de Devoluciones de Tabletas (Solo Regiones Foráneas y Consulta Admin) -->
+        <section id="view-firmas_tabletas" class="view-section hidden" style="display:none;">
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+              <div>
+                <h3 style="margin:0; color:var(--primary);">✍️ Devoluciones de Tabletas Pendientes de Firma</h3>
+                <div id="firmas_tab_region_subtitle" class="muted" style="font-size:12.5px; margin-top:4px;">
+                  Revisa los datos del equipo y firma digitalmente para autorizar la entrega en devolución al almacén estatal.
+                </div>
+              </div>
+              <button type="button" id="btn-firmas-tab-refresh" class="btn-secondary">🔄 Actualizar</button>
+            </div>
+            <div id="firmas_tab_meta" class="muted" style="font-size:12.5px; margin-bottom:10px;"></div>
+            <div id="firmas_tab_list_box">
+              <div class="muted" style="padding:16px; text-align:center;">Cargando devoluciones pendientes...</div>
+            </div>
+          </div>
+
+          <!-- Modal: Firmar o Reportar Error en Devolución Remota de Tableta -->
+          <div id="modal-firmar-devolucion-tab" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-firmar-dev-tab-title">
+            <div class="modal-box" style="max-width:660px;">
+              <div class="modal-header">
+                <h3 id="modal-firmar-dev-tab-title" style="margin:0; color:var(--primary);">✍️ Firmar Devolución de Tableta</h3>
+                <button type="button" class="btn-icon modal-close" data-close-modal="modal-firmar-devolucion-tab" title="Cerrar">&times;</button>
+              </div>
+              <input type="hidden" id="tab_firma_mov_id" value="">
+              <div id="tab_firma_equipo_info" style="background:#F9F2F4; border:1px solid var(--border); padding:10px 12px; border-radius:6px; margin-bottom:10px; font-size:13px;"></div>
+              <div id="tab_firma_obs_box" style="background:#FFFBEB; border:1px solid #F59E0B; color:#92400E; padding:10px 12px; border-radius:6px; margin-bottom:12px; font-size:12.5px;"></div>
+
+              <div class="sig-pad-card" id="tab_firma_pad_section">
+                <div class="sig-pad-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
+                  <div>
+                    <div class="sig-pad-title" style="font-weight:700; font-size:13px;">✍️ Firma Digital del Enlace / Resguardante Regional *</div>
+                    <div class="muted" style="font-size:11.5px;">Dibuja tu firma dentro del recuadro (compatible con mouse o pantalla táctil).</div>
+                  </div>
+                  <span id="tab_firma_status_badge" class="status-badge status-pendiente">Sin firma capturada</span>
+                </div>
+                <div class="sig-pad-body">
+                  <div class="sig-canvas-wrap">
+                    <canvas id="tab_firma_canvas" width="420" height="140"></canvas>
+                  </div>
+                  <div class="sig-pad-actions" style="margin-top:8px;">
+                    <button type="button" id="btn-clear-firma-tab" class="btn-secondary mini">Limpiar firma</button>
+                  </div>
+                </div>
+              </div>
+
+              <label style="display:flex; align-items:flex-start; gap:8px; margin-top:12px; font-size:12.5px; cursor:pointer; color:#1e293b;">
+                <input type="checkbox" id="tab_firma_conformidad" style="margin-top:2px;">
+                <span>Confirmo que los datos del equipo (No. Resguardo, IMEI, Serie, cargador/caja y observaciones físicas) coinciden con la tableta entregada en devolución.</span>
+              </label>
+
+              <div id="tab_rechazo_wrap" class="hidden" style="margin-top:12px; padding:10px 12px; background:#fef2f2; border:1px solid #fca5a5; border-radius:6px;">
+                <label for="tab_rechazo_motivo" style="display:block; font-size:12.5px; font-weight:700; color:#991b1b; margin-bottom:6px;">
+                  Describe el error o motivo de rechazo (máx. 250 caracteres) *
+                </label>
+                <textarea id="tab_rechazo_motivo" rows="2" maxlength="250" placeholder="Ej. El número de serie o las observaciones físicas no coinciden con el equipo..."></textarea>
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+                  <button type="button" class="btn-secondary mini" id="btn-tab-rechazo-cancelar">Cancelar reporte</button>
+                  <button type="button" class="btn-primary mini" id="btn-tab-rechazo-enviar" style="background:#dc2626; border-color:#b91c1c;">↩️ Confirmar Reporte de Error</button>
+                </div>
+              </div>
+
+              <div class="modal-actions" style="justify-content:space-between; flex-wrap:wrap;">
+                <button type="button" class="btn-secondary" id="btn-tab-abrir-rechazo" style="color:#b91c1c; border-color:#fca5a5;">↩️ Reportar Error</button>
+                <div style="display:flex; gap:8px;">
+                  <button type="button" class="btn-secondary" data-close-modal="modal-firmar-devolucion-tab">Cancelar</button>
+                  <button type="button" class="btn-primary" id="btn-tab-aceptar-firmar">✅ Aceptar y Firmar</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <!-- Modal: Bitácora de Movimientos (Exclusivo Administrador) -->
@@ -2167,7 +2343,7 @@
     </main>
   </div>
  
-  <script src="/app.js?v=63"></script>
+  <script src="/app.js?v=64"></script>
 
   <script>
     // Filtro de seguridad rápido para evitar parpadeos si no hay sesión
